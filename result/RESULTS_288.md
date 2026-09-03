@@ -84,6 +84,55 @@ AutoDock through the 350-homolog stage; these are the gate-1 and gate-2 records.
 The ligand-swap rho is a useful ceiling: a scale that moves this much under an
 irrelevant perturbation cannot carry a larger genuine correlation.
 
+### Within a position, nothing beats the charge descriptor
+
+A saturation library asks a narrower question than the pooled correlation answers:
+not "which position matters" but "at this position, which substitution". Removing
+each position's mean isolates that. Only three positions have enough measurements
+(R57 8, N59 6, F61 5; n = 19).
+
+| metric | pooled ρ | **within-position ρ** | p | F61 | N59 | R57 |
+|---|---|---|---|---|---|---|
+| **Δcharge** | +0.814 | **+0.848** | 5e-06 | 0.71 | 0.96 | **0.10** |
+| **C-Docker** | +0.832 | **+0.775** | 9.6e-05 | 0.90 | 0.89 | **0.57** |
+| AutoDock best (lig) | +0.843 | +0.550 | 0.015 | 0.95 | 1.00 | 0.33 |
+| AutoDock med (lig) | +0.873 | +0.514 | 0.024 | 0.82 | 0.99 | 0.45 |
+| RxDock best | −0.068 | −0.246 | 0.31 | 0.30 | −0.43 | −0.36 |
+
+Two things reverse here. **C-Docker outranks AutoDock within positions** (+0.775 vs
++0.50–0.55) — the opposite of the pooled ordering. And **neither beats the charge
+descriptor** (+0.848): controlling for position does not control for charge, since a
+single position still spans Δq −2 to +2.
+
+The R57 column is the most informative one. Five of its eight measured variants share
+Δq = −1, so charge is nearly constant there — the closest thing in this dataset to a
+"same site, same charge, which residue" test. Charge collapses to +0.10, and C-Docker
+(+0.57) leads AutoDock (+0.31–0.45).
+
+**This does not settle the engine choice, and must not be read as doing so.** At n = 19
+across three groups the confidence intervals overlap heavily (roughly [0.45, 0.92] vs
+[0.02, 0.79]). N59 drives the pooled figure — its six variants form a clean charge
+ladder (D/E → M/V → R/K), so anything tracking charge scores ≥ 0.89 there. Per-position
+ρ values computed on 5–8 points are not evidence; one of them is exactly 1.00.
+
+It also does not contradict the Δq-residual result above. The two tests control
+different things — that one removes charge and pools positions, this one removes
+position and leaves charge. Both are half-controls. The full control (same position
+*and* same charge) is not computable here: the only such stratum is F61's four Δq = 0
+variants, whose Km spans just 1.65–2.10 mM.
+
+**Consequence for the label choice.** Standardising on AutoDock labels remains
+justified — highest pooled Km correlation, the only engine retaining signal after
+charge control, and the only one that scales. But the justification is *not* that it
+ranks substitutions within a position better than C-Docker; the current data points the
+other way. Do not make that claim.
+
+**What would settle it.** Measured Km for same-position, same-charge substitutions.
+F61 is the best candidate: Phe is neutral, so 15 of its 19 substitutions have Δq = 0,
+and five (A, L, Y, W, D) are already measured. Five or six more Δq = 0 members would
+give an n ≈ 10 set that answers the question directly. No amount of additional docking
+can substitute — this needs measurement, not compute.
+
 ## Caveats
 
 - **C-Docker agreement fell from +0.720 (n=172) to +0.550 (n=286).** The six new
