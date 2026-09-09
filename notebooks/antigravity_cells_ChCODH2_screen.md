@@ -520,6 +520,8 @@ for name, seq in list(BAIT_SEQ.items()):
     bad = set(s) - VALID_AA
     print(f"{name:20s} L={len(s):5d}  비표준문자={bad if bad else '없음'}")
 
+VARIANT_POS = 559        # A559W 변이 위치(1-based) = C-cluster 근방. 번호 체계가 다르면 여기만 고친다.
+
 # primary bait 지정 (ChCODH2)
 cands = [k for k in BAIT_SEQ if "CODH" in k.upper() or "A559W" in k.upper()]
 assert cands, "ChCODH2 bait 를 찾을 수 없습니다. 이름에 'CODH' 또는 'A559W' 를 넣으세요."
@@ -528,15 +530,17 @@ print("\nprimary bait =", BAIT_KEY)
 
 # A559W 변이 확인
 s = BAIT_SEQ[BAIT_KEY]
-if len(s) >= 559:
-    print(f"  559번 잔기 = {s[558]}   (A559W 변이체라면 'W' 여야 함)")
+if len(s) >= VARIANT_POS:
+    aa = s[VARIANT_POS - 1]
+    print(f"  {VARIANT_POS}번 잔기 = {aa}   " +
+          ("(A559W 변이 확인)" if aa == "W" else "⚠ 'W' 가 아님 — 야생형이거나 번호 체계가 다름"))
 else:
-    print(f"  ⚠ 길이 {len(s)} < 559 — 서열/번호 체계 재확인 필요")
+    print(f"  ⚠ 길이 {len(s)} < {VARIANT_POS} — 서열/번호 체계 재확인 필요")
 
-# ---- segment bait: C-cluster 주변(559 중심) + 전체 타일링 ----
+# ---- segment bait: C-cluster 주변(변이 위치 중심) + 전체 타일링 ----
 SEG_WIN, SEG_STEP = 200, 100
 SEGMENTS = {}
-c = 559
+c = VARIANT_POS
 lo, hi = max(0, c - 120), min(len(s), c + 80)          # C-cluster 주변
 SEGMENTS[f"{BAIT_KEY}_seg{lo+1}-{hi}"] = s[lo:hi]
 for st in range(0, max(1, len(s) - SEG_WIN + 1), SEG_STEP):
@@ -678,13 +682,13 @@ else:
     fa_prey = PROTEOMES[PREY_STRAIN]["faa"]
     fa_ref  = PROTEOMES[REF_STRAIN]["faa"]
     FWD, REV = f"{PREY_STRAIN}_vs_{REF_STRAIN}", f"{REF_STRAIN}_vs_{PREY_STRAIN}"
-    fmt = "query,target,fident,alnlen,evalue,bits,qlen,tlen,qcov,tcov"
+    FMT_EASY = "query,target,fident,alnlen,evalue,bits,qlen,tlen,qcov,tcov"  # 10컬럼 (CELL 11 의 COLS 와 짝)
     S, T = DIR["search"], DIR["tmp"]
     script = f"""
     mmseqs easy-search "{fa_prey}" "{fa_ref}" "{S}/{FWD}.m8" "{T}/fwd" \\
-      --format-output "{fmt}" -s 7.5 -e 1e-5 --max-seqs 5 --threads {THREADS}
+      --format-output "{FMT_EASY}" -s 7.5 -e 1e-5 --max-seqs 5 --threads {THREADS}
     mmseqs easy-search "{fa_ref}" "{fa_prey}" "{S}/{REV}.m8" "{T}/rev" \\
-      --format-output "{fmt}" -s 7.5 -e 1e-5 --max-seqs 5 --threads {THREADS}
+      --format-output "{FMT_EASY}" -s 7.5 -e 1e-5 --max-seqs 5 --threads {THREADS}
     wc -l "{S}/{FWD}.m8" "{S}/{REV}.m8"
     echo DONE_easy_search
     """
@@ -853,14 +857,16 @@ print("### GPU ###");   sh("nvidia-smi --query-gpu=index,utilization.gpu,memory.
 #   - paired MSA 깊이 상한 = min(bait orthologue genome 수, prey orthologue genome 수)
 #   - CooS 는 CO-oxidizing anaerobe 에만 분포 -> 이 값이 낮을 수 있다. 절대 건너뛰지 말 것.
 # =============================================================================
-fmt = "query,target,fident,evalue,bits,qstart,qend,qlen,tstart,tend,tlen,qaln,taln"
+# 13컬럼. CELL 17/20 의 AC 컬럼명과 반드시 같아야 한다 (어긋나면 조용히 잘못 파싱된다)
+FMT_ALN = "query,target,fident,evalue,bits,qstart,qend,qlen,tstart,tend,tlen,qaln,taln"
 script = f"""
 cd "{DIR['db']}"
+rm -f baitDB*                      # 재실행 시 기존 DB 와 충돌 방지
 mmseqs createdb "{DIR['seq']}/baits.fasta" baitDB
 mmseqs search baitDB bactDB "{DIR['search']}/bait_res" "{DIR['tmp']}/bs" \\
   -s 7.5 --num-iterations 3 -e 1e-3 --max-seqs 20000 --threads {THREADS}
 mmseqs convertalis baitDB bactDB "{DIR['search']}/bait_res" "{DIR['search']}/bait_hits.m8" \\
-  --format-output "{fmt}" --threads {THREADS}
+  --format-output "{FMT_ALN}" --threads {THREADS}
 wc -l "{DIR['search']}/bait_hits.m8"
 echo DONE_gate
 """
@@ -933,13 +939,15 @@ pd.DataFrame(skipped, columns=["protein","length"]).to_csv(
 # CELL 19 | Part 4-2. prey homolog 검색 — 이 파이프라인에서 가장 오래 걸린다 (4~10h)
 #   - 반드시 백그라운드. 이 시간 동안 다른 GPU 에서 Track B(CELL 25~)를 먼저 돌려도 된다.
 # =============================================================================
+FMT_ALN = "query,target,fident,evalue,bits,qstart,qend,qlen,tstart,tend,tlen,qaln,taln"  # CELL 16 과 동일해야 함
 script = f"""
 cd "{DIR['db']}"
+rm -f preyDB*
 mmseqs createdb "{DIR['seq']}/prey_trackA.fasta" preyDB
 mmseqs search preyDB bactDB "{DIR['search']}/prey_res" "{DIR['tmp']}/ps" \\
   -s 7.5 --num-iterations 3 -e 1e-3 --max-seqs 20000 --threads {THREADS}
 mmseqs convertalis preyDB bactDB "{DIR['search']}/prey_res" "{DIR['search']}/prey_hits.m8" \\
-  --format-output "{fmt}" --threads {THREADS}
+  --format-output "{FMT_ALN}" --threads {THREADS}
 wc -l "{DIR['search']}/prey_hits.m8"
 echo DONE_prey
 """
@@ -1002,30 +1010,53 @@ print("prey 개수:", len(PREY_MSA))
 MIN_PAIRED = 50
 paired_dir = DIR["paired"]; paired_dir.mkdir(exist_ok=True)
 
-BAITS_TO_RUN = [BAIT_KEY] + ([k for k in SEGMENTS] if USE_SEGMENT_BAIT else [])
-BAITS_TO_RUN = [b for b in BAITS_TO_RUN if b in BAIT_MSA]
-print("돌릴 bait:", len(BAITS_TO_RUN), "개")
+def make_pair(bkey, bseq, brows, pname, pseq, prows):
+    """같은 organism(taxid) 끼리 이어 붙여 a3m 생성. 깊이 부족하면 (None, 공유수)."""
+    shared = set(brows) & set(prows)
+    if len(shared) < MIN_PAIRED:
+        return None, len(shared)
+    raw = paired_dir / f"{bkey}__{pname.replace('|','_')}.raw.a3m"
+    with open(raw, "w") as fh:
+        fh.write(f">query\n{bseq}{pseq}\n")
+        for tx in sorted(shared):
+            fh.write(f">{tx}\n{brows[tx][1]}{prows[tx][1]}\n")
+    flt = str(raw).replace(".raw.a3m", ".a3m")
+    subprocess.run(["hhfilter", "-i", str(raw), "-o", flt, "-id", "90", "-M", "first"],
+                   check=True, capture_output=True)
+    depth = sum(1 for l in open(flt) if l.startswith(">"))
+    raw.unlink()
+    return flt, depth
+
+BAITS_TO_RUN = [b for b in ([BAIT_KEY] + (list(SEGMENTS) if USE_SEGMENT_BAIT else []))
+                if b in BAIT_MSA]
+CTRL_BAITS = [k for k in BAIT_SEQ
+              if k != BAIT_KEY and k.upper().startswith(("COOC", "COOT", "COOJ", "COOF"))
+              and k in BAIT_MSA]
+print(f"bait {len(BAITS_TO_RUN)}개 x prey {len(PREY_MSA)}개, 양성대조군 {len(CTRL_BAITS)}개")
 
 input_lines, stats = [], []
 for bkey in BAITS_TO_RUN:
     bseq, brows = BAIT_ALL[bkey], BAIT_MSA[bkey]
-    L1 = len(bseq)
     for pid, prows in PREY_MSA.items():
-        shared = set(brows) & set(prows)
-        if len(shared) < MIN_PAIRED:
-            stats.append((bkey, pid, len(shared), "skip")); continue
-        raw = paired_dir / f"{bkey}__{pid.replace('|','_')}.raw.a3m"
-        with open(raw, "w") as fh:
-            fh.write(f">query\n{bseq}{sel[pid]}\n")
-            for tx in sorted(shared):
-                fh.write(f">{tx}\n{brows[tx][1]}{prows[tx][1]}\n")
-        flt = str(raw).replace(".raw.a3m", ".a3m")
-        subprocess.run(["hhfilter", "-i", str(raw), "-o", flt, "-id", "90", "-M", "first"],
-                       check=True, capture_output=True)
-        depth = sum(1 for l in open(flt) if l.startswith(">"))
-        input_lines.append(f"{flt} {L1}")
-        stats.append((bkey, pid, depth, "ok"))
-        raw.unlink()
+        flt, depth = make_pair(bkey, bseq, brows, pid, sel[pid], prows)
+        stats.append((bkey, pid, depth, "skip" if flt is None else "ok"))
+        if flt:
+            input_lines.append(f"{flt} {len(bseq)}")
+
+# ★양성대조군: CooC/CooT/CooJ 를 bait, ChCODH2 를 prey 로 두고 같은 절차로 만든다.
+#   CooC-CooS 는 알려진 상호작용이다. 여기서 높은 점수가 안 나오면
+#   E. coli 스크리닝 결과 전체를 신뢰할 수 없다. CELL 24 에서 판정한다.
+for ck in CTRL_BAITS:
+    flt, depth = make_pair(ck, BAIT_SEQ[ck], BAIT_MSA[ck],
+                           BAIT_KEY, BAIT_SEQ[BAIT_KEY], BAIT_MSA[BAIT_KEY])
+    stats.append((ck, BAIT_KEY, depth, "skip" if flt is None else "ok"))
+    if flt:
+        input_lines.append(f"{flt} {len(BAIT_SEQ[ck])}")
+    print(f"  대조군 {ck} - {BAIT_KEY}: paired depth={depth} "
+          f"({'생성' if flt else 'MIN_PAIRED 미만 — 스킵'})")
+if not CTRL_BAITS:
+    print("  ⚠ 양성대조군 bait 가 없다. CELL 05 에 CooC/CooT/CooJ 서열을 넣지 않으면\n"
+          "     이 스크리닝은 검증 없이 돌아간다.")
 
 (DIR["rf2ppi"]/"input_file").write_text("\n".join(input_lines) + "\n")
 sdf = pd.DataFrame(stats, columns=["bait","prey","paired_depth","status"])
@@ -1081,13 +1112,19 @@ for rep in range(1, N_REPLICATE + 1):
     d["prey"] = stem.apply(lambda s: s.split("__")[-1])
     reps_df.append(d.set_index(["bait","prey"])["prob"].rename(f"rep{rep}"))
 
+assert reps_df, "replicate 로그가 없습니다. CELL 22 가 끝났는지 CELL 15 로 확인하세요."
 R = pd.concat(reps_df, axis=1)
 R["mean"], R["sd"] = R.mean(axis=1), R.std(axis=1)
 R = R.sort_values("mean", ascending=False)
 
-# full-length / segment 를 prey 단위로 합집합(최대값)까지 같이 본다
-R_best = R.reset_index().groupby("prey").agg(
-    best_bait=("bait", lambda s: s.iloc[0]), mean=("mean","max"), sd=("sd","first")
+# 양성대조군(prey = ChCODH2)은 스크리닝 랭킹에서 분리한다 — CELL 24 에서 따로 본다
+RP     = R.reset_index()
+R_ctrl = RP[RP.prey == BAIT_KEY].copy()
+R_scr  = RP[RP.prey != BAIT_KEY]
+
+# full-length / segment 를 prey 단위로 합집합(최대값)으로 묶는다
+R_best = R_scr.sort_values("mean", ascending=False).groupby("prey").agg(
+    best_bait=("bait", "first"), mean=("mean", "max"), sd=("sd", "first")
 ).sort_values("mean", ascending=False)
 
 meta = cls_prey.set_index("protein")
@@ -1119,20 +1156,26 @@ print("  mean >= 0.74 : strict. 논문 기준 95% precision. 최우선 검증 �
 print("  0.30 ~ 0.74  : 회색지대. Boltz-2 로 재검증 후 판단.")
 print("  mean <  0.30 : 배제 (단 paired_depth<200 이면 위음성 가능 -> Track B 로 넘김)\n")
 
-ctrl = [k for k in BAIT_SEQ if k.upper().startswith(("COOC","COOT","COOJ"))]
-if ctrl:
-    print("양성대조군 bait:", ctrl)
-    print("  ※ CooC-CooS 쌍은 CELL 21 에서 bait-bait paired MSA 를 따로 만들어 돌려야 한다.")
-    print("     (BAITS_TO_RUN 에 대조군 bait 를 넣고 prey 자리에 ChCODH2 를 두는 방식)")
+print("[양성대조군 판정] CooC/CooT/CooJ - ChCODH2 (CELL 21 에서 생성한 쌍)")
+if len(R_ctrl):
+    print(R_ctrl[["bait", "prey", "mean", "sd"]].to_string(index=False))
+    top = float(R_ctrl["mean"].max())
+    if top >= 0.7:
+        print(f"\n  최고 {top:.3f} >= 0.70 -> 파이프라인 검증 통과. 아래 결과를 그대로 해석해도 된다.")
+    else:
+        print(f"\n  ⚠ 최고 {top:.3f} < 0.70 -> paired MSA 깊이가 부족하다는 뜻이다.")
+        print("     아래 스크리닝 결과 전체의 신뢰도를 낮춰 해석하고, Track B 결과를 주로 본다.")
 else:
-    print("⚠ 양성대조군 bait 가 없다 — 이 상태의 결과는 검증되지 않은 값이다.")
+    print("  ⚠ 대조군 결과가 없다. CELL 05 에 CooC/CooT/CooJ 서열을 넣고")
+    print("     CELL 07 -> 16 -> 21 -> 22 를 다시 돌려야 검증된 결과가 된다.")
+    print("     이 상태의 순위표는 '검증되지 않은 값'으로 취급할 것.")
 
 import matplotlib.pyplot as plt
 d = R_best.dropna(subset=["paired_depth"])
 fig, ax = plt.subplots(1, 2, figsize=(11, 4))
 ax[0].scatter(d.paired_depth, d["mean"], s=6, alpha=.4)
 ax[0].set_xlabel("paired MSA depth"); ax[0].set_ylabel("RF2-PPI prob (mean)")
-ax[0].set_title("depth vs score (상관 있으면 artifact 의심)")
+ax[0].set_title("depth vs score")   # 라벨은 영문 — 서버에 한글 폰트가 없으면 네모로 깨진다
 ax[1].hist(R_best["mean"], bins=60); ax[1].set_yscale("log")
 ax[1].set_xlabel("RF2-PPI prob"); ax[1].set_title("score distribution")
 plt.tight_layout(); plt.show()
@@ -1188,16 +1231,25 @@ def write_boltz_yaml(name, seqA, seqB, msaA=None, msaB=None, with_ni=True):
     p.write_text(yaml.safe_dump({"version": 1, "sequences": seqs}, sort_keys=False))
     return p
 
+# Track A 는 segment bait 를 쓰는데 Track B 는 기본적으로 full-length 만 쓴다.
+# 설계문서상 segment 가 더 민감할 수 있지만 GPU 시간이 segment 개수만큼 배로 든다
+# (342쌍 x 7 segment = 2,400쌍, 수일). Feasibility 를 보고 True 로 켠다.
+BOLTZ_USE_SEGMENT = False
+BOLTZ_BAITS = [BAIT_KEY] + (list(SEGMENTS) if BOLTZ_USE_SEGMENT else [])
+
 n, long_skip = 0, []
-for pid in TRACK_B:
-    s = hdr2seq[pid]
-    if len(s) > MAX_B_LEN:
-        long_skip.append((pid, len(s))); continue
-    write_boltz_yaml(f"{BAIT_KEY}__{pid.replace('|','_')}",
-                     BAIT_SEQ[BAIT_KEY], s, with_ni=True)
-    n += 1
-print(f"Boltz-2 입력 {n}개 생성 -> {boltz_in}")
-print(f"길이>{MAX_B_LEN} 제외: {len(long_skip)}개  {long_skip[:5]}")
+for bk in BOLTZ_BAITS:
+    bseq = BAIT_ALL[bk]
+    for pid in TRACK_B:
+        s = hdr2seq[pid]
+        if len(bseq) + len(s) > MAX_B_LEN + 630:
+            if bk == BAIT_KEY:
+                long_skip.append((pid, len(s)))
+            continue
+        write_boltz_yaml(f"{bk}__{pid.replace('|','_')}", bseq, s, with_ni=True)
+        n += 1
+print(f"Boltz-2 입력 {n}개 생성 (bait {len(BOLTZ_BAITS)}종) -> {boltz_in}")
+print(f"길이 초과 제외: {len(long_skip)}개  {long_skip[:5]}")
 ```
 
 ---
@@ -1271,6 +1323,9 @@ FD_OUT = DIR["folddisco"]; FD_OUT.mkdir(exist_ok=True)
 RESIDUES_METAL = "A112,A114"     # <- CELL 06 에서 확인한 체인으로 수정
 RESIDUES_ATP   = ""              # <- Walker A 등 지정 후 run02 실행 (비우면 스킵)
 
+# ⚠ MG1655 인덱스는 공식 배포본이라 우리 구조 DB(structures_UP*)에 대응 파일이 없다.
+#    -> CELL 30 crosswalk 로 GenBank ID 를 못 붙이므로 CELL 31 에서 제외된다.
+#    MG1655 결과는 "BL21 에만 있는 모티프인가"를 눈으로 비교하는 용도로만 쓴다.
 IDX = {"BL21": ASSET["fd_idx_bl21"], "Y19": ASSET["fd_idx_y19"], "MG1655": ASSET["fd_idx_mg"]}
 
 def folddisco_query(tag, residues, top=2000, rmsd=1.0):
@@ -1395,11 +1450,16 @@ def fd_to_csv(tsv_paths, out_csv, score_col="idf"):
     if not frames:
         print("변환할 결과 없음"); return pd.DataFrame(columns=["protein","score"])
     A = pd.concat(frames)
+    rep = A.groupby("strain").agg(hits=("tid", "size"),
+                                  mapped=("protein", lambda x: x.notna().sum()))
+    print(rep.to_string())
+    if "MG1655" in rep.index and rep.loc["MG1655", "mapped"] == 0:
+        print("  (MG1655 0건 매칭은 정상 — 구조 DB 가 없어 crosswalk 불가. 비교용으로만 본다)")
     out = (A.dropna(subset=["protein"]).groupby("protein", as_index=False)
              .score.max().sort_values("score", ascending=False))
     out.to_csv(out_csv, index=False)
     A.to_csv(str(out_csv).replace(".csv", "_detail.csv"), index=False)
-    print(f"{out_csv.name}: {len(out)}개 단백질 (매칭 실패 {A.protein.isna().sum()}행 제외)")
+    print(f"{out_csv.name}: {len(out)}개 단백질 (미매칭 {int(A.protein.isna().sum())}행 제외)")
     return out
 
 FOLDDISCO_NI  = DIR["table"]/"folddisco_metal_motif.csv"
