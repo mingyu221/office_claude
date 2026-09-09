@@ -8,7 +8,8 @@
 셀 사이에 변수가 이어지므로 순서대로 실행해야 한다.
 
 원본 노트북과 달라진 핵심 4가지:
-1. `BASE`를 `/data/chcodh2_ppi` → `/mnt/af2results/mingyu/chcodh2_ppi` 로 변경 (서버에 `/data` 없음)
+1. `BASE`를 `/data/chcodh2_ppi` → `/mnt/af2results/mingyu/workspace/ppi_discovery` 로 변경.
+   서버 workspace 관례(`seek_ni_insertase`, `ppi_discovery`)대로 **`input/` `result/` `script/`** 3층 구조
 2. BL21 proteome ID를 **UP000503272**(우리 구조 DB 기준)로 통일, Y19(UP000034085) 추가
 3. 프로테옴 서열·4-category 분류는 **UniProt 재다운로드 대신 기존 GenBank 자산 재사용** (ID 체계를 GenBank로 통일)
 4. Folddisco 결과(tid = `AF-<UniProt>` / `cf_<UniParc>`)를 **서열 매칭 crosswalk**로 GenBank ID에 붙여 Part 8 통합
@@ -75,6 +76,26 @@ PLAN = """
  CELL 32  Track A + B + C 통합 랭킹
  CELL 33  최종 리포트 + 남은 TODO
 
+[디렉터리 구조 — 서버 workspace 관례(input/result/script)]
+  /mnt/af2results/mingyu/workspace/ppi_discovery/
+  |-- input/
+  |   |-- seq/         baits.fasta, prey_trackA.fasta
+  |   |-- db/          mmseqs DB (bactDB, baitDB, preyDB)  <- 대용량 ~50GB
+  |   +-- external/    Mac 에서 가져온 BLASTp 분류 TSV
+  |-- result/
+  |   |-- search/      *.m8 (homolog 검색 결과)
+  |   |-- paired/      paired MSA (.a3m)
+  |   |-- rf2ppi/      input_file, replicate 로그
+  |   |-- boltz/       inputs/, out/
+  |   |-- folddisco/   run01(metal) / run02(atp) TSV
+  |   |-- table/       ★최종 CSV (분류·랭킹·crosswalk)
+  |   +-- log/         백그라운드 실행 로그
+  |-- script/          생성된 .sh (설치·검색·추론)
+  +-- tmp/             mmseqs 스크래치 — 디스크 빠듯하면 1순위로 삭제
+
+  ※ RF2-PPI 코드는 워크스페이스가 아니라 /mnt/af2results/mingyu/RoseTTAFold2-PPI 에 설치한다
+    (folddisco 바이너리와 같은 층 — 툴은 밖, 데이터는 워크스페이스 안)
+
 [지금 없는 것 = 블로커]
   1. ChCODH2(A559W) native 서열      -> CELL 05 (필수, 실험에 쓰는 그 서열로)
   2. CooC1/2/CooT/CooJ 양성대조군 서열 -> CELL 05-06
@@ -106,24 +127,41 @@ print(PLAN)
 # =============================================================================
 # CELL 01 | CONFIG — 경로/스레드/GPU + 백그라운드 실행 헬퍼
 #   - 이 셀만 환경에 맞게 고치면 나머지는 그대로 실행 가능
-#   - 원본 노트북의 BASE=/data/chcodh2_ppi 는 이 서버에 없어 /mnt/af2results 로 변경
+#   - 원본 BASE=/data/chcodh2_ppi 는 서버에 없어 workspace/ppi_discovery 로 변경
 # =============================================================================
 import os, re, json, gzip, shutil, subprocess, textwrap, glob, time
 from pathlib import Path
 
 # ---------------- 작업 루트 ----------------
-BASE      = Path("/mnt/af2results/mingyu/chcodh2_ppi")   # 디스크 여유 있는 곳 (/data 없음)
+# 서버 workspace 관례(seek_ni_insertase, ppi_discovery)를 따라 input / result / script 3층으로 잡는다.
+BASE      = Path("/mnt/af2results/mingyu/workspace/ppi_discovery")
+TOOLS     = Path("/mnt/af2results/mingyu")      # folddisco 바이너리와 같은 층. 툴은 워크스페이스 밖에 둔다.
 THREADS   = 24
 GPU_ID    = 0
 CONDA_ENV_RF2 = "rf2ppi"
 CONDA_ENV_BOLTZ = "boltz"
 
-DIR = {k: BASE / k for k in
-       ["seq", "db", "search", "msa", "paired", "rf2ppi", "boltz",
-        "results", "tmp", "scripts", "logs", "folddisco"]}
-for p in DIR.values():
-    p.mkdir(parents=True, exist_ok=True)
-RF2PPI_DIR = BASE / "RoseTTAFold2-PPI"
+DIR = {
+    # --- input/ : 넣는 것 ---
+    "seq":       BASE/"input"/"seq",         # baits.fasta, prey_trackA.fasta
+    "db":        BASE/"input"/"db",          # mmseqs DB (bactDB/baitDB/preyDB) — 대용량
+    "external":  BASE/"input"/"external",    # Mac 에서 가져온 BLASTp 분류 TSV
+    # --- result/ : 나오는 것 ---
+    "search":    BASE/"result"/"search",     # *.m8
+    "paired":    BASE/"result"/"paired",     # paired MSA (.a3m)
+    "rf2ppi":    BASE/"result"/"rf2ppi",     # input_file, *.log
+    "boltz":     BASE/"result"/"boltz",      # inputs/, out/
+    "folddisco": BASE/"result"/"folddisco",  # run01/run02 TSV
+    "table":     BASE/"result"/"table",      # 최종 CSV (분류·랭킹·crosswalk)
+    "log":       BASE/"result"/"log",        # 백그라운드 실행 로그
+    # --- script/ : 돌리는 것 ---
+    "script":    BASE/"script",              # 생성된 .sh
+    # --- tmp/ : mmseqs 스크래치. 언제든 지워도 되는 곳 (디스크 빠듯할 때 1순위) ---
+    "tmp":       BASE/"tmp",
+}
+for _p in DIR.values():
+    _p.mkdir(parents=True, exist_ok=True)
+RF2PPI_DIR = TOOLS / "RoseTTAFold2-PPI"       # 워크스페이스가 아니라 툴 디렉터리에 설치
 
 # ---------------- 이미 구축된 자산 (인계문서 §1) ----------------
 ASSET = {
@@ -148,10 +186,9 @@ ASSET = {
 # BLASTp 4-category 분류 결과(원본은 Mac 로컬). 서버로 복사한 경로를 지정.
 # 없으면 CELL 10-11 에서 mmseqs 로 재산출한다.
 CATEGORY_TSV = {
-    "BL21": BASE / "external" / "bl21_mg1655_category_detail.tsv",
-    "Y19":  BASE / "external" / "y19_mg1655_category_detail.tsv",
+    "BL21": DIR["external"] / "bl21_mg1655_category_detail.tsv",
+    "Y19":  DIR["external"] / "y19_mg1655_category_detail.tsv",
 }
-(BASE / "external").mkdir(exist_ok=True)
 
 # ---------------- 대상 프로테옴 ----------------
 # ★ 원본 노트북의 BL21 = UP000002032 는 우리 구조 DB(UP000503272)와 단백질 세트가 어긋난다.
@@ -184,8 +221,8 @@ def sh(cmd, cwd=None, check=True, quiet=False):
 
 def sh_bg(name, script, env=None):
     """긴 작업용 백그라운드 실행. scripts/<name>.sh 로 저장하고 nohup 실행."""
-    sp = DIR["scripts"] / f"{name}.sh"
-    lg = DIR["logs"] / f"{name}.log"
+    sp = DIR["script"] / f"{name}.sh"
+    lg = DIR["log"] / f"{name}.log"
     header = "#!/usr/bin/env bash\nset -euo pipefail\n"
     if env:
         header += f'source "$(conda info --base)/etc/profile.d/conda.sh"\nconda activate {env}\n'
@@ -199,7 +236,7 @@ def sh_bg(name, script, env=None):
     return lg
 
 def bg_tail(name, n=40):
-    lg = DIR["logs"] / f"{name}.log"
+    lg = DIR["log"] / f"{name}.log"
     pidf = Path(str(lg) + ".pid")
     alive = False
     if pidf.exists():
@@ -218,9 +255,13 @@ def conda_run(env, cmd, cwd=None, check=True):
             f'conda activate {env} && {cmd}')
     return sh(full, cwd=cwd, check=check)
 
-print("BASE =", BASE)
-for k, v in DIR.items():
-    print(f"  {k:10s} {v}")
+print("BASE  =", BASE)
+print("TOOLS =", TOOLS, "(RF2-PPI 설치 위치, folddisco 와 같은 층)")
+for grp in ["input", "result", "script", "tmp"]:
+    print(f"  {grp}/")
+    for k, v in DIR.items():
+        if v.parent.name == grp or (grp == "tmp" and k == "tmp") or (grp == "script" and k == "script"):
+            print(f"    {k:10s} {v}")
 print("\nprey strain =", PREY_STRAIN, "| ID space =", ID_SPACE)
 print("BL21 proteome ID =", PROTEOMES['BL21DE3']['upid'], "(구조 DB와 통일)")
 ```
@@ -272,6 +313,10 @@ for t in ["mmseqs", "hhfilter", "aria2c", "conda", "curl"]:
 
 if missing:
     print("\n⚠ 없는 자산:", ", ".join(missing))
+print("\n### 워크스페이스 구조 (CELL 01 에서 생성됨) ###")
+sh(f"find {BASE} -maxdepth 2 -type d | sort | sed 's|{BASE}|  .|'", check=False)
+print(f"  RF2-PPI 설치 위치: {RF2PPI_DIR}  [{'O' if RF2PPI_DIR.exists() else 'X — CELL 03 필요'}]")
+
 print("\n⚠ 인계문서 경고: `sudo apt-mark hold nvidia-*` 미적용 — 커널 업데이트 시 드라이버 재발 가능")
 ```
 
@@ -298,19 +343,19 @@ pip install torch==1.12.1+cu113 -f https://download.pytorch.org/whl/torch_stable
 pip install jupyter ipykernel matplotlib seaborn tqdm pyyaml
 python -m ipykernel install --user --name {CONDA_ENV_RF2} --display-name "Python ({CONDA_ENV_RF2})"
 
-# ---- 2) RF2-PPI 코드 + 가중치 ----
-cd "{BASE}"
+# ---- 2) RF2-PPI 코드 + 가중치 (워크스페이스가 아니라 툴 디렉터리에) ----
+cd "{TOOLS}"
 [ -d RoseTTAFold2-PPI ] || git clone https://github.com/CongLabCode/RoseTTAFold2-PPI.git
 cd RoseTTAFold2-PPI/src/models
 [ -f RF2-PPI.pt ] || wget --no-check-certificate https://conglab.swmed.edu/humanPPI/downloads/RF2-PPI.pt
 
 # ---- 3) 예제 실행 (검증은 CELL 04 에서) ----
-cd "{BASE}/RoseTTAFold2-PPI/examples"
+cd "{RF2PPI_DIR}/examples"
 python ../src/predict_list_PPI.py -list_fn segment_pairs_input \\
        -model_file ../src/models/RF2-PPI.pt
 echo "설치 스크립트 완료"
 """
-p = DIR["scripts"] / "install_rf2ppi.sh"
+p = DIR["script"] / "install_rf2ppi.sh"
 p.write_text("#!/usr/bin/env bash\nset -euo pipefail\n" + textwrap.dedent(install_sh))
 p.chmod(0o755)
 print("터미널에서 실행하세요:\n")
@@ -618,13 +663,13 @@ else:
     fa_bl = PROTEOMES["BL21DE3"]["faa"]
     fa_mg = PROTEOMES["MG1655"]["faa"]
     fmt = "query,target,fident,alnlen,evalue,bits,qlen,tlen,qcov,tcov"
+    S, T = DIR["search"], DIR["tmp"]
     script = f"""
-    cd "{BASE}"
-    mmseqs easy-search "{fa_bl}" "{fa_mg}" search/BL21_vs_MG.m8 tmp/bm \\
+    mmseqs easy-search "{fa_bl}" "{fa_mg}" "{S}/BL21_vs_MG.m8" "{T}/bm" \\
       --format-output "{fmt}" -s 7.5 -e 1e-5 --max-seqs 5 --threads {THREADS}
-    mmseqs easy-search "{fa_mg}" "{fa_bl}" search/MG_vs_BL21.m8 tmp/mb \\
+    mmseqs easy-search "{fa_mg}" "{fa_bl}" "{S}/MG_vs_BL21.m8" "{T}/mb" \\
       --format-output "{fmt}" -s 7.5 -e 1e-5 --max-seqs 5 --threads {THREADS}
-    wc -l search/BL21_vs_MG.m8 search/MG_vs_BL21.m8
+    wc -l "{S}/BL21_vs_MG.m8" "{S}/MG_vs_BL21.m8"
     echo DONE_easy_search
     """
     sh_bg("easy_search", script)
@@ -666,7 +711,7 @@ else:
     print("=== BL21 기준 ===");   print(cls_BL.category.value_counts().to_string())
     print("\n=== MG1655 기준 (BL21 결손 = 억제자 후보) ===")
     print(cls_MG.category.value_counts().to_string())
-    cls_MG.to_csv(DIR["results"]/"classify_MG1655_vs_BL21.csv", index=False)
+    cls_MG.to_csv(DIR["table"]/"classify_MG1655_vs_BL21.csv", index=False)
     print("\n기대값(BL21): 2171 / 1575 / 125 / 217, (MG1655 역방향): 2199 / 1569 / 152 / 380")
 ```
 
@@ -682,7 +727,7 @@ else:
 #   ※ Track A 는 균주 특이성을 못 잡는다. 균주 특이성은 이 분류 자체가 잡는 것이다.
 # =============================================================================
 assert cls_BL is not None, "분류 결과가 없습니다. CELL 09 또는 CELL 10-11 을 먼저 실행하세요."
-cls_BL.to_csv(DIR["results"]/"classify_BL21_vs_MG1655.csv", index=False)
+cls_BL.to_csv(DIR["table"]/"classify_BL21_vs_MG1655.csv", index=False)
 
 known = set(hdr2seq)
 cls_BL["in_proteome"] = cls_BL.protein.isin(known)
@@ -694,11 +739,11 @@ if (~cls_BL.in_proteome).any():
 TRACK_A = cls_BL.query("category in ['identical','high-similarity'] and in_proteome").protein.tolist()
 TRACK_B = cls_BL.query("category in ['low-similarity','strain-specific'] and in_proteome").protein.tolist()
 
-pd.Series(TRACK_A).to_csv(DIR["results"]/"track_A_ids.txt", index=False, header=False)
-pd.Series(TRACK_B).to_csv(DIR["results"]/"track_B_ids.txt", index=False, header=False)
+pd.Series(TRACK_A).to_csv(DIR["table"]/"track_A_ids.txt", index=False, header=False)
+pd.Series(TRACK_B).to_csv(DIR["table"]/"track_B_ids.txt", index=False, header=False)
 print(f"Track A (RF2-PPI): {len(TRACK_A):5d}   (기대 ~3,746)")
 print(f"Track B (Boltz-2): {len(TRACK_B):5d}   (기대 ~342)")
-print("저장:", DIR["results"]/"track_A_ids.txt", "/", DIR["results"]/"track_B_ids.txt")
+print("저장:", DIR["table"]/"track_A_ids.txt", "/", DIR["table"]/"track_B_ids.txt")
 ```
 
 ---
@@ -713,7 +758,7 @@ print("저장:", DIR["results"]/"track_A_ids.txt", "/", DIR["results"]/"track_B_
 #   - 백그라운드 30~60분
 # =============================================================================
 script = f"""
-cd "{BASE}/db"
+cd "{DIR['db']}"
 REL=https://ftp.uniprot.org/pub/databases/uniprot/current_release/knowledgebase/reference_proteomes
 FN=$(curl -s "$REL/" | grep -o 'Reference_Proteomes_[0-9_]*\\.tar\\.gz' | sort -u | tail -1)
 echo "release file = $FN"
@@ -743,7 +788,7 @@ sh(f"df -h {BASE}", check=False)
 #   - CELL 13 의 DONE_download 확인 후 실행. 1~2시간.
 # =============================================================================
 script = f"""
-cd "{BASE}/db"
+cd "{DIR['db']}"
 OUT=bacteria_ref.fasta
 : > "$OUT"
 find Bacteria -name '*.fasta.gz' ! -name '*_DNA*' ! -name '*additional*' | while read f; do
@@ -753,7 +798,7 @@ done >> "$OUT"
 echo "sequences: $(grep -c '^>' "$OUT")"
 echo "proteomes: $(grep '^>' "$OUT" | cut -d'|' -f1 | tr -d '>' | sort -u | wc -l)"
 mmseqs createdb "$OUT" bactDB
-mmseqs createindex bactDB "{BASE}/tmp/idx" --threads {THREADS} --search-type 1 || true
+mmseqs createindex bactDB "{DIR['tmp']}/idx" --threads {THREADS} --search-type 1 || true
 ls -la
 echo DONE_bactdb
 """
@@ -770,7 +815,7 @@ sh_bg("part2_bactdb", script, env=CONDA_ENV_RF2)
 # =============================================================================
 for job in ["easy_search", "part2_download", "part2_bactdb",
             "part3_gate", "part4_prey", "part6_rf2ppi", "part7_boltz"]:
-    if (DIR["logs"] / f"{job}.log").exists():
+    if (DIR["log"] / f"{job}.log").exists():
         bg_tail(job, n=8)
         print("-" * 70)
 
@@ -791,13 +836,13 @@ print("### GPU ###");   sh("nvidia-smi --query-gpu=index,utilization.gpu,memory.
 # =============================================================================
 fmt = "query,target,fident,evalue,bits,qstart,qend,qlen,tstart,tend,tlen,qaln,taln"
 script = f"""
-cd "{BASE}"
-mmseqs createdb seq/baits.fasta db/baitDB
-mmseqs search db/baitDB db/bactDB search/bait_res tmp/bs \\
+cd "{DIR['db']}"
+mmseqs createdb "{DIR['seq']}/baits.fasta" baitDB
+mmseqs search baitDB bactDB "{DIR['search']}/bait_res" "{DIR['tmp']}/bs" \\
   -s 7.5 --num-iterations 3 -e 1e-3 --max-seqs 20000 --threads {THREADS}
-mmseqs convertalis db/baitDB db/bactDB search/bait_res search/bait_hits.m8 \\
+mmseqs convertalis baitDB bactDB "{DIR['search']}/bait_res" "{DIR['search']}/bait_hits.m8" \\
   --format-output "{fmt}" --threads {THREADS}
-wc -l search/bait_hits.m8
+wc -l "{DIR['search']}/bait_hits.m8"
 echo DONE_gate
 """
 sh_bg("part3_gate", script, env=CONDA_ENV_RF2)
@@ -857,7 +902,7 @@ print(f"Track A prey: {len(sel)}개  (길이>{MAX_PREY_LEN} 제외: {len(skipped
 if skipped:
     print("제외된 긴 단백질 상위 10:", sorted(skipped, key=lambda x: -x[1])[:10])
 pd.DataFrame(skipped, columns=["protein","length"]).to_csv(
-    DIR["results"]/"trackA_skipped_long.csv", index=False)
+    DIR["table"]/"trackA_skipped_long.csv", index=False)
 ```
 
 ---
@@ -870,13 +915,13 @@ pd.DataFrame(skipped, columns=["protein","length"]).to_csv(
 #   - 반드시 백그라운드. 이 시간 동안 다른 GPU 에서 Track B(CELL 25~)를 먼저 돌려도 된다.
 # =============================================================================
 script = f"""
-cd "{BASE}"
-mmseqs createdb seq/prey_trackA.fasta db/preyDB
-mmseqs search db/preyDB db/bactDB search/prey_res tmp/ps \\
+cd "{DIR['db']}"
+mmseqs createdb "{DIR['seq']}/prey_trackA.fasta" preyDB
+mmseqs search preyDB bactDB "{DIR['search']}/prey_res" "{DIR['tmp']}/ps" \\
   -s 7.5 --num-iterations 3 -e 1e-3 --max-seqs 20000 --threads {THREADS}
-mmseqs convertalis db/preyDB db/bactDB search/prey_res search/prey_hits.m8 \\
+mmseqs convertalis preyDB bactDB "{DIR['search']}/prey_res" "{DIR['search']}/prey_hits.m8" \\
   --format-output "{fmt}" --threads {THREADS}
-wc -l search/prey_hits.m8
+wc -l "{DIR['search']}/prey_hits.m8"
 echo DONE_prey
 """
 sh_bg("part4_prey", script, env=CONDA_ENV_RF2)
@@ -965,7 +1010,7 @@ for bkey in BAITS_TO_RUN:
 
 (DIR["rf2ppi"]/"input_file").write_text("\n".join(input_lines) + "\n")
 sdf = pd.DataFrame(stats, columns=["bait","prey","paired_depth","status"])
-sdf.to_csv(DIR["results"]/"paired_msa_stats.csv", index=False)
+sdf.to_csv(DIR["table"]/"paired_msa_stats.csv", index=False)
 print(f"\n생성 {len(input_lines)}개 / 스킵 {(sdf.status=='skip').sum()}개")
 print(sdf.query("status=='ok'").paired_depth.describe().to_string())
 ```
@@ -982,7 +1027,7 @@ print(sdf.query("status=='ok'").paired_depth.describe().to_string())
 # =============================================================================
 reps = " ".join(str(i) for i in range(1, N_REPLICATE + 1))
 script = f"""
-cd "{BASE}/rf2ppi"
+cd "{DIR['rf2ppi']}"
 for rep in {reps}; do
   cp input_file input_rep${{rep}}
   CUDA_VISIBLE_DEVICES={GPU_ID} python "{RF2PPI_DIR}/src/predict_list_PPI.py" \\
@@ -1031,8 +1076,8 @@ R_best = R_best.join(meta[["category","pident"]], how="left")
 R_best = R_best.join(sdf.query("status=='ok'").groupby("prey").paired_depth.max(), how="left")
 R_best["desc"] = [hdr2desc.get(i, "")[:70] for i in R_best.index]
 
-R.to_csv(DIR["results"]/"trackA_RF2PPI_all_pairs.csv")
-R_best.to_csv(DIR["results"]/"trackA_RF2PPI_ranked.csv")
+R.to_csv(DIR["table"]/"trackA_RF2PPI_all_pairs.csv")
+R_best.to_csv(DIR["table"]/"trackA_RF2PPI_ranked.csv")
 print("=== 상위 40 후보 (bait 합집합) ===")
 print(R_best.head(40).to_string())
 print("\nmean>=0.74 (strict):", int((R_best["mean"] >= 0.74).sum()))
@@ -1093,7 +1138,7 @@ pip install boltz -U
 pip install pyyaml pandas
 python -c "import boltz; print('boltz ok')"
 """
-p = DIR["scripts"] / "install_boltz.sh"
+p = DIR["script"] / "install_boltz.sh"
 p.write_text("#!/usr/bin/env bash\nset -euo pipefail\n" + textwrap.dedent(boltz_sh))
 p.chmod(0o755)
 print(f"터미널에서 실행:\n\n    bash {p}\n")
@@ -1149,7 +1194,7 @@ print(f"길이>{MAX_B_LEN} 제외: {len(long_skip)}개  {long_skip[:5]}")
 # =============================================================================
 BOLTZ_GPU = GPU_ID
 script = f"""
-cd "{BASE}/boltz"
+cd "{DIR['boltz']}"
 CUDA_VISIBLE_DEVICES={BOLTZ_GPU} boltz predict inputs \\
   --out_dir out \\
   --use_msa_server \\
@@ -1186,7 +1231,7 @@ B = pd.DataFrame(rows).sort_values("iptm", ascending=False)
 if len(B):
     B["category"] = B.prey.map(cls_BL.set_index("protein")["category"])
     B["desc"] = B.prey.map(lambda i: hdr2desc.get(i, "")[:70])
-B.to_csv(DIR["results"]/"trackB_boltz2_ranked.csv", index=False)
+B.to_csv(DIR["table"]/"trackB_boltz2_ranked.csv", index=False)
 print(f"파싱 {len(B)}건")
 print(B.head(40).to_string(index=False))
 ```
@@ -1243,7 +1288,7 @@ print("\n기존 run01 결과:", [p.name for p in prev])
 #   해법: 구조 파일에서 CA 기준 서열을 뽑아 프로테옴 서열과 "완전일치" 매칭 (오프라인·정확)
 #   - 5,000여 개 파싱에 수 분. 결과는 CSV 로 캐시하므로 한 번만 돌리면 된다.
 # =============================================================================
-XWALK_CSV = DIR["results"]/"id_crosswalk_struct_to_genbank.csv"
+XWALK_CSV = DIR["table"]/"id_crosswalk_struct_to_genbank.csv"
 
 def struct_seq(path):
     """cif/pdb 에서 첫 체인의 CA 기준 서열."""
@@ -1338,8 +1383,8 @@ def fd_to_csv(tsv_paths, out_csv, score_col="idf"):
     print(f"{out_csv.name}: {len(out)}개 단백질 (매칭 실패 {A.protein.isna().sum()}행 제외)")
     return out
 
-FOLDDISCO_NI  = DIR["results"]/"folddisco_metal_motif.csv"
-FOLDDISCO_ATP = DIR["results"]/"folddisco_atp_motif.csv"
+FOLDDISCO_NI  = DIR["table"]/"folddisco_metal_motif.csv"
+FOLDDISCO_ATP = DIR["table"]/"folddisco_atp_motif.csv"
 ni_df  = fd_to_csv(FD_METAL, FOLDDISCO_NI)
 atp_df = fd_to_csv(FD_ATP,   FOLDDISCO_ATP)
 print("\n상위 10 (metal motif):")
@@ -1390,7 +1435,7 @@ M["n_evidence"] = ((M.rf2ppi > 0.3).fillna(False).astype(int)
                    + (M.boltz_iptm > 0.6).fillna(False).astype(int)
                    + M.ni_motif.notna().astype(int) + M.atp_motif.notna().astype(int))
 M = M.sort_values(["priority", "n_evidence"], ascending=False)
-M.to_csv(DIR["results"]/"INTEGRATED_candidate_ranking.csv")
+M.to_csv(DIR["table"]/"INTEGRATED_candidate_ranking.csv")
 print(M.head(50).to_string())
 print("\n독립적 2개 이상 증거를 가진 후보:", int((M.n_evidence >= 2).sum()))
 ```
@@ -1404,7 +1449,7 @@ print("\n독립적 2개 이상 증거를 가진 후보:", int((M.n_evidence >= 2
 # CELL 33 | 최종 요약 + 남은 TODO
 # =============================================================================
 print("### 산출물 ###")
-for f in sorted(DIR["results"].glob("*.csv")):
+for f in sorted(DIR["table"].glob("*.csv")):
     print(f"  {f.name:44s} {f.stat().st_size/1e3:8.1f} KB")
 
 print(f"""
