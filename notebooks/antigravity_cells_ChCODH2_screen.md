@@ -203,10 +203,17 @@ PROTEOMES = {
     "CHY":     {"upid": "UP000001320", "taxid": 246194,
                 "name": "Carboxydothermus hydrogenoformans Z-2901", "faa": None},
 }
-PREY_STRAIN = "BL21DE3"        # prey 프로테옴 (Y19로 바꾸려면 여기만 변경)
-ID_SPACE    = "GenBank"        # 이 파이프라인의 표준 ID 체계
+# ---------------- 스크리닝 대상 스위치 ----------------
+# PREY_STRAIN 만 바꾸면 CELL 08~12(서열 로드·분류·Track 배정)가 전부 따라간다.
+#   "BL21DE3" = 이 프로젝트의 기본값. in vivo 에서 BL21 lysate 만 활성을 회복시켰으므로 정답에 가장 가깝다.
+#   "Y19"     = Citrobacter amalonaticus Y19 로 같은 스크리닝을 돌릴 때만 변경.
+PREY_STRAIN  = "BL21DE3"
+REF_STRAIN   = "MG1655"        # 차등 분류의 기준 균주 (BL21/Y19 를 이것과 비교)
+CATEGORY_KEY = {"BL21DE3": "BL21", "Y19": "Y19"}[PREY_STRAIN]   # CATEGORY_TSV 선택용
 
-os.environ["MMSEQS_NUM_THREADS"] = str(THREADS)
+# 아래 둘은 고칠 일이 없다.
+ID_SPACE = "GenBank"                            # 표시용 상수. 코드가 분기에 쓰지 않는다.
+os.environ["MMSEQS_NUM_THREADS"] = str(THREADS)  # 위 THREADS 에서 자동 반영
 
 # ---------------- 공용 헬퍼 ----------------
 def sh(cmd, cwd=None, check=True, quiet=False):
@@ -597,8 +604,10 @@ for k, n in exp.items():
 ```python
 # =============================================================================
 # CELL 09 | Part 1-3a. 기존 BLASTp 4-category 분류 로드 (재계산 스킵)
-#   - 기대값 BL21->MG1655: identical 2171 / high 1575 / low 125 / specific 217 (합 4088)
-#   - 파일이 없으면 cls_BL = None 이 되고, CELL 10-11 fallback 으로 넘어간다
+#   - 기대값(BL21->MG1655): 2171 / 1575 / 125 / 217 (합 4088)
+#   - 기대값(Y19->MG1655) :   39 / 1856 / 2067 / 1363 (합 5325)
+#   - PREY_STRAIN 에 맞는 TSV 를 자동 선택한다 (CELL 01 의 CATEGORY_KEY)
+#   - 파일이 없으면 cls_prey = None 이 되고, CELL 10-11 fallback 으로 넘어간다
 # =============================================================================
 import pandas as pd, numpy as np
 
@@ -627,16 +636,22 @@ def load_category_tsv(path):
         if c: out[name] = df[c]
     return out
 
-cls_BL = None
-p = CATEGORY_TSV["BL21"]
+EXPECT_CAT = {   # 인계문서 §1-2 의 확정값
+    "BL21DE3": {"identical": 2171, "high-similarity": 1575,
+                "low-similarity": 125, "strain-specific": 217},
+    "Y19":     {"identical": 39,   "high-similarity": 1856,
+                "low-similarity": 2067, "strain-specific": 1363},
+}
+
+cls_prey = None
+p = CATEGORY_TSV[CATEGORY_KEY]
 if p.exists():
-    cls_BL = load_category_tsv(p)
-    vc = cls_BL.category.value_counts()
-    print("=== BL21 -> MG1655 (로드) ===")
+    cls_prey = load_category_tsv(p)
+    vc = cls_prey.category.value_counts()
+    print(f"=== {PREY_STRAIN} -> {REF_STRAIN} (로드) ===")
     print(vc.to_string())
-    print("총:", len(cls_BL))
-    expected = {"identical": 2171, "high-similarity": 1575,
-                "low-similarity": 125, "strain-specific": 217}
+    print("총:", len(cls_prey))
+    expected = EXPECT_CAT[PREY_STRAIN]
     print("\n기대값 대조:")
     for k, v in expected.items():
         g = int(vc.get(k, 0))
@@ -655,21 +670,22 @@ else:
 # =============================================================================
 # CELL 10 | Part 1-3b. [fallback] 분류 TSV 가 없을 때만 — 양방향 mmseqs easy-search
 #   - 역방향(MG1655->BL21)도 산출한다: MG1655 에만 있는 단백질 = 억제자 후보(rcnAB 등)
-#   - CELL 09 에서 cls_BL 이 로드됐으면 이 셀은 건너뛴다
+#   - CELL 09 에서 cls_prey 이 로드됐으면 이 셀은 건너뛴다
 # =============================================================================
-if cls_BL is not None:
+if cls_prey is not None:
     print("CELL 09 에서 이미 로드됨 — 이 셀은 건너뜁니다.")
 else:
-    fa_bl = PROTEOMES["BL21DE3"]["faa"]
-    fa_mg = PROTEOMES["MG1655"]["faa"]
+    fa_prey = PROTEOMES[PREY_STRAIN]["faa"]
+    fa_ref  = PROTEOMES[REF_STRAIN]["faa"]
+    FWD, REV = f"{PREY_STRAIN}_vs_{REF_STRAIN}", f"{REF_STRAIN}_vs_{PREY_STRAIN}"
     fmt = "query,target,fident,alnlen,evalue,bits,qlen,tlen,qcov,tcov"
     S, T = DIR["search"], DIR["tmp"]
     script = f"""
-    mmseqs easy-search "{fa_bl}" "{fa_mg}" "{S}/BL21_vs_MG.m8" "{T}/bm" \\
+    mmseqs easy-search "{fa_prey}" "{fa_ref}" "{S}/{FWD}.m8" "{T}/fwd" \\
       --format-output "{fmt}" -s 7.5 -e 1e-5 --max-seqs 5 --threads {THREADS}
-    mmseqs easy-search "{fa_mg}" "{fa_bl}" "{S}/MG_vs_BL21.m8" "{T}/mb" \\
+    mmseqs easy-search "{fa_ref}" "{fa_prey}" "{S}/{REV}.m8" "{T}/rev" \\
       --format-output "{fmt}" -s 7.5 -e 1e-5 --max-seqs 5 --threads {THREADS}
-    wc -l "{S}/BL21_vs_MG.m8" "{S}/MG_vs_BL21.m8"
+    wc -l "{S}/{FWD}.m8" "{S}/{REV}.m8"
     echo DONE_easy_search
     """
     sh_bg("easy_search", script)
@@ -701,18 +717,21 @@ def classify(m8_path, all_ids):
         rows.append((pid, r.target, pident, cov, cat))
     return pd.DataFrame(rows, columns=["protein","best_hit","pident","cov","category"])
 
-if cls_BL is not None:
+if cls_prey is not None:
     print("이미 분류가 로드되어 있어 건너뜁니다.")
 else:
-    bl_ids = list(PROTEOMES["BL21DE3"]["seqs"])
-    mg_ids = list(PROTEOMES["MG1655"]["seqs"])
-    cls_BL = classify(DIR["search"]/"BL21_vs_MG.m8", bl_ids)
-    cls_MG = classify(DIR["search"]/"MG_vs_BL21.m8", mg_ids)
-    print("=== BL21 기준 ===");   print(cls_BL.category.value_counts().to_string())
-    print("\n=== MG1655 기준 (BL21 결손 = 억제자 후보) ===")
-    print(cls_MG.category.value_counts().to_string())
-    cls_MG.to_csv(DIR["table"]/"classify_MG1655_vs_BL21.csv", index=False)
-    print("\n기대값(BL21): 2171 / 1575 / 125 / 217, (MG1655 역방향): 2199 / 1569 / 152 / 380")
+    FWD, REV = f"{PREY_STRAIN}_vs_{REF_STRAIN}", f"{REF_STRAIN}_vs_{PREY_STRAIN}"
+    prey_ids = list(PROTEOMES[PREY_STRAIN]["seqs"])
+    ref_ids  = list(PROTEOMES[REF_STRAIN]["seqs"])
+    cls_prey = classify(DIR["search"]/f"{FWD}.m8", prey_ids)
+    cls_rev  = classify(DIR["search"]/f"{REV}.m8", ref_ids)
+    print(f"=== {PREY_STRAIN} 기준 ===")
+    print(cls_prey.category.value_counts().to_string())
+    print(f"\n=== {REF_STRAIN} 기준 ({PREY_STRAIN} 결손 = 억제자 후보) ===")
+    print(cls_rev.category.value_counts().to_string())
+    cls_rev.to_csv(DIR["table"]/f"classify_{REV}.csv", index=False)
+    print(f"\n기대값({PREY_STRAIN}):", EXPECT_CAT[PREY_STRAIN])
+    print("역방향 MG1655->BL21 기대값: 2199 / 1569 / 152 / 380")
 ```
 
 ---
@@ -726,18 +745,18 @@ else:
 #   Track B (Boltz-2, 공진화 불가)  = low-similarity + strain-specific (~342)
 #   ※ Track A 는 균주 특이성을 못 잡는다. 균주 특이성은 이 분류 자체가 잡는 것이다.
 # =============================================================================
-assert cls_BL is not None, "분류 결과가 없습니다. CELL 09 또는 CELL 10-11 을 먼저 실행하세요."
-cls_BL.to_csv(DIR["table"]/"classify_BL21_vs_MG1655.csv", index=False)
+assert cls_prey is not None, "분류 결과가 없습니다. CELL 09 또는 CELL 10-11 을 먼저 실행하세요."
+cls_prey.to_csv(DIR["table"]/f"classify_{PREY_STRAIN}_vs_{REF_STRAIN}.csv", index=False)
 
 known = set(hdr2seq)
-cls_BL["in_proteome"] = cls_BL.protein.isin(known)
-if (~cls_BL.in_proteome).any():
-    n = int((~cls_BL.in_proteome).sum())
+cls_prey["in_proteome"] = cls_prey.protein.isin(known)
+if (~cls_prey.in_proteome).any():
+    n = int((~cls_prey.in_proteome).sum())
     print(f"⚠ 분류에는 있으나 프로테옴 FASTA 에 없는 ID {n}개 — ID 체계(GenBank 버전 .1 등) 확인")
-    print("  예시:", cls_BL.loc[~cls_BL.in_proteome, "protein"].head(5).tolist())
+    print("  예시:", cls_prey.loc[~cls_prey.in_proteome, "protein"].head(5).tolist())
 
-TRACK_A = cls_BL.query("category in ['identical','high-similarity'] and in_proteome").protein.tolist()
-TRACK_B = cls_BL.query("category in ['low-similarity','strain-specific'] and in_proteome").protein.tolist()
+TRACK_A = cls_prey.query("category in ['identical','high-similarity'] and in_proteome").protein.tolist()
+TRACK_B = cls_prey.query("category in ['low-similarity','strain-specific'] and in_proteome").protein.tolist()
 
 pd.Series(TRACK_A).to_csv(DIR["table"]/"track_A_ids.txt", index=False, header=False)
 pd.Series(TRACK_B).to_csv(DIR["table"]/"track_B_ids.txt", index=False, header=False)
@@ -1071,7 +1090,7 @@ R_best = R.reset_index().groupby("prey").agg(
     best_bait=("bait", lambda s: s.iloc[0]), mean=("mean","max"), sd=("sd","first")
 ).sort_values("mean", ascending=False)
 
-meta = cls_BL.set_index("protein")
+meta = cls_prey.set_index("protein")
 R_best = R_best.join(meta[["category","pident"]], how="left")
 R_best = R_best.join(sdf.query("status=='ok'").groupby("prey").paired_depth.max(), how="left")
 R_best["desc"] = [hdr2desc.get(i, "")[:70] for i in R_best.index]
@@ -1229,7 +1248,7 @@ for f in glob.glob(str(DIR["boltz"]/"out"/"**"/"confidence_*.json"), recursive=T
                  "confidence_score": c.get("confidence_score")})
 B = pd.DataFrame(rows).sort_values("iptm", ascending=False)
 if len(B):
-    B["category"] = B.prey.map(cls_BL.set_index("protein")["category"])
+    B["category"] = B.prey.map(cls_prey.set_index("protein")["category"])
     B["desc"] = B.prey.map(lambda i: hdr2desc.get(i, "")[:70])
 B.to_csv(DIR["table"]/"trackB_boltz2_ranked.csv", index=False)
 print(f"파싱 {len(B)}건")
@@ -1411,7 +1430,7 @@ def safe_series(df, key, col):
         return pd.Series(dtype=float)
 
 M = pd.DataFrame(index=sorted(set(TRACK_A) | set(TRACK_B)))
-M["category"]      = cls_BL.set_index("protein")["category"]
+M["category"]      = cls_prey.set_index("protein")["category"]
 M["desc"]          = [hdr2desc.get(i, "")[:70] for i in M.index]
 M["rf2ppi"]        = R_best["mean"]        if "R_best" in dir() else np.nan
 M["rf2ppi_sd"]     = R_best["sd"]          if "R_best" in dir() else np.nan
