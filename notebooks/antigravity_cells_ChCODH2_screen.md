@@ -91,7 +91,7 @@ PLAN = """
   |   |-- table/       ★최종 CSV (분류·랭킹·crosswalk)
   |   +-- log/         백그라운드 실행 로그
   |-- script/          생성된 .sh (설치·검색·추론)
-  +-- tmp/             mmseqs 스크래치 — 디스크 빠듯하면 1순위로 삭제
+  +-- tmp/             mmseqs 스크래치 — Part 2 끝나면 지워도 되는 곳
 
   ※ RF2-PPI 코드는 워크스페이스가 아니라 /mnt/af2results/mingyu/RoseTTAFold2-PPI 에 설치한다
     (folddisco 바이너리와 같은 층 — 툴은 밖, 데이터는 워크스페이스 안)
@@ -156,7 +156,7 @@ DIR = {
     "log":       BASE/"result"/"log",        # 백그라운드 실행 로그
     # --- script/ : 돌리는 것 ---
     "script":    BASE/"script",              # 생성된 .sh
-    # --- tmp/ : mmseqs 스크래치. 언제든 지워도 되는 곳 (디스크 빠듯할 때 1순위) ---
+    # --- tmp/ : mmseqs 스크래치. Part 2 가 끝나면 언제든 지워도 되는 곳 ---
     "tmp":       BASE/"tmp",
 }
 for _p in DIR.values():
@@ -311,7 +311,7 @@ print("\n### GPU ###")
 sh("nvidia-smi --query-gpu=index,name,driver_version,memory.total,memory.used "
    "--format=csv,noheader || echo 'nvidia-smi 실패 — 드라이버 확인 필요'", check=False)
 
-print("\n### 디스크 (여유 빠듯: /mnt/af2results 93% 사용 중이었음) ###")
+print("\n### 디스크 (2026-09-09 휴지통 4.6T 정리 후: 8.1T 사용 / 5.7T 여유 / 59%) ###")
 sh(f"df -h {BASE} /mnt/af2results 2>/dev/null | sort -u", check=False)
 
 print("\n### 툴 확인 ###")
@@ -777,7 +777,8 @@ print("저장:", DIR["table"]/"track_A_ids.txt", "/", DIR["table"]/"track_B_ids.
 # =============================================================================
 # CELL 13 | Part 2-1. UniProt Reference Proteomes (Bacteria) 다운로드
 #   - paired MSA 는 "같은 genome 안의 bait/prey orthologue 짝짓기"라 이 DB 가 필요하다
-#   - 약 12GB 다운로드 + 압축해제 ~40GB. ⚠ /mnt/af2results 여유 ~1.1T 확인하고 시작할 것
+#   - 약 12GB 다운로드 + 압축해제 ~40GB + mmseqs DB/인덱스. 합쳐서 ~150GB 본다.
+#     2026-09-09 기준 /mnt/af2results 여유 5.7T — 충분하다. createindex 도 그대로 둔다.
 #   - 백그라운드 30~60분
 # =============================================================================
 script = f"""
