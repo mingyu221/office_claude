@@ -425,6 +425,16 @@ BAIT_SEQ = {
     # "CooC1": "...", "CooC2": "...", "CooT": "...", "CooJ": "...",   # 양성대조군
 }
 
+# ChCODH2 WT 는 636 aa, 559번이 A 인 것을 확인했다 (A559W 번호 체계와 일치).
+# 기본은 WT 로 간다 — RF2-PPI 는 공진화(paired MSA)로 작동하므로 점 돌연변이 1개는
+# 점수에 사실상 영향이 없고, Boltz-2 구조 예측에서도 마찬가지다.
+# BAIT_WT = "MAKQNLKSTDRAVQQ...ERRAGLGLPW"          # WT 붙여넣기
+# assert BAIT_WT[558] == "A", f"559번이 A 가 아님: {BAIT_WT[558]}"
+# BAIT_SEQ["ChCODH2_WT"] = BAIT_WT
+#
+# 변이체로 돌리고 싶다면 (실험과 서열을 정확히 맞추려는 경우):
+# BAIT_SEQ["ChCODH2_A559W"] = BAIT_WT[:558] + "W" + BAIT_WT[559:]
+
 # --- 아직 없으면 UniProt 에서 후보 목록만 조회해 본다 (인터넷 필요) ---
 import urllib.request, urllib.parse
 import pandas as pd
@@ -532,8 +542,9 @@ print("\nprimary bait =", BAIT_KEY)
 s = BAIT_SEQ[BAIT_KEY]
 if len(s) >= VARIANT_POS:
     aa = s[VARIANT_POS - 1]
-    print(f"  {VARIANT_POS}번 잔기 = {aa}   " +
-          ("(A559W 변이 확인)" if aa == "W" else "⚠ 'W' 가 아님 — 야생형이거나 번호 체계가 다름"))
+    tag = {"W": "A559W 변이체",
+           "A": "야생형(WT) — 번호 체계 정상"}.get(aa, f"⚠ A 도 W 도 아님 — 번호 체계 재확인 필요")
+    print(f"  {VARIANT_POS}번 잔기 = {aa}   ({tag})")
 else:
     print(f"  ⚠ 길이 {len(s)} < {VARIANT_POS} — 서열/번호 체계 재확인 필요")
 
@@ -917,6 +928,32 @@ if not TRACK_A_GO:
 #   - bait(~630) + prey 합이 너무 길면 GPU 메모리 초과. 긴 건 제외 후 별도 segment 처리.
 # =============================================================================
 MAX_PREY_LEN = 1000
+
+# ---- 파일럿 모드 ----
+# 전체 3,750개를 돌리기 전에 알려진 후보 몇 개로 파이프라인을 먼저 검증할 때 쓴다.
+# 비워두면 Track A 전체. 유전자/제품명 키워드를 넣으면 그것만 추린다.
+PILOT_GENES = []   # 예: ["hypB","slyD","mrp","yeiR","yjiA","hypA","nikA","iscU","erpA","nfuA"]
+
+if PILOT_GENES:
+    import re
+    cat_of = cls_prey.set_index("protein")["category"].to_dict()
+    hit, miss = {}, []
+    for g in PILOT_GENES:
+        pat = re.compile(rf"(?<![A-Za-z]){re.escape(g)}(?![A-Za-z])", re.I)
+        found = [pid for pid in (TRACK_A + TRACK_B) if pat.search(hdr2desc.get(pid, ""))]
+        (hit.setdefault(g, found) if found else miss.append(g))
+    for g, v in hit.items():
+        for pid in v[:3]:
+            print(f"  {g:8s} {pid:16s} [{cat_of.get(pid,'?'):15s}] {hdr2desc[pid][:55]}")
+    if miss:
+        print(f"\n  ⚠ 못 찾은 유전자: {miss}")
+        print("     GenBank .faa 헤더는 gene symbol 이 아니라 product 설명이다.")
+        print("     'nickel', 'metallochaperone', 'ATP-binding', 'Fe-S' 같은 product 키워드로 다시 찾을 것:")
+        print("     [d for d in hdr2desc.values() if 'nickel' in d.lower()][:10]")
+    TRACK_A_FULL = TRACK_A
+    TRACK_A = sorted({pid for v in hit.values() for pid in v})
+    print(f"\n파일럿 모드: Track A {len(TRACK_A_FULL)} -> {len(TRACK_A)}개")
+
 sel, skipped = {}, []
 for pid in TRACK_A:
     s = hdr2seq[pid]
