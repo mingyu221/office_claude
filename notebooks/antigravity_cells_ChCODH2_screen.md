@@ -129,7 +129,7 @@ print(PLAN)
 #   - 이 셀만 환경에 맞게 고치면 나머지는 그대로 실행 가능
 #   - 원본 BASE=/data/chcodh2_ppi 는 서버에 없어 workspace/ppi_discovery 로 변경
 # =============================================================================
-import os, re, json, gzip, shutil, subprocess, textwrap, glob, time
+import os, re, sys, json, gzip, shutil, subprocess, textwrap, glob, time
 from pathlib import Path
 
 # ---------------- 작업 루트 ----------------
@@ -286,6 +286,7 @@ print("BL21 proteome ID =", PROTEOMES['BL21DE3']['upid'], "(구조 DB와 통일)
 # ---- 커널 확인 (제일 먼저) ----
 # 노트북이 rf2ppi 환경이 아닌 다른 파이썬으로 돌면 뒤에서 ImportError 가 난다.
 # 예전 환경의 ~/.local/lib/pythonX.Y/site-packages 를 물고 도는 경우가 흔하다.
+import sys                     # CELL 01 을 건너뛰고 이 셀만 돌려도 되게 여기서도 import
 print("### 커널 ###")
 print("  python  :", sys.executable)
 print("  version :", sys.version.split()[0])
