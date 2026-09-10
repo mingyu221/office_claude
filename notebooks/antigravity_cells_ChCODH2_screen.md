@@ -587,20 +587,34 @@ else:
 #   - 실제 발현·정제하는 그 서열을 쓴다 (A559W 변이체, His-tag 등 제거한 native)
 #   - C. hydrogenoformans Z-2901 은 CODH 가 5개(I~V)라 gene name 만으로 II번 특정 불가
 # =============================================================================
-BAIT_SEQ = {
-    # "ChCODH2_A559W": "MSEK...",     # <<<< 여기에 붙여넣기 (필수)
-    # "CooC1": "...", "CooC2": "...", "CooT": "...", "CooJ": "...",   # 양성대조군
-}
+BAIT_SEQ = {}
 
-# ChCODH2 WT 는 636 aa, 559번이 A 인 것을 확인했다 (A559W 번호 체계와 일치).
-# 기본은 WT 로 간다 — RF2-PPI 는 공진화(paired MSA)로 작동하므로 점 돌연변이 1개는
+# ---- ChCODH2 (C. hydrogenoformans CODH-II), 636 aa ----
+# 559번이 A 인 것을 확인했다. A559W 변이의 번호 체계와 일치한다.
+BAIT_WT = (
+    "MAKQNLKSTDRAVQQMLDKAKREGIQTVWDRYEAMKPQCGFGETGLCCRHCLQGPCRINPFGDEPKVGIC"
+    "GATAEVIVARGLDRSIAAGAAGHSGHAKHLAHTLKKAVQGKAASYMIKDRTKLHSIAKRLGIPTEGQKDE"
+    "DIALEVAKAALADFHEKDTPVLWVTTVLPPSRVKVLSAHGLIPAGIDHEIAEIMHRTSMGCDADAQNLLL"
+    "GGLRCSLADLAGCYMGTDLADILFGTPAPVVTESNLGVLKADAVNVAVHGHNPVLSDIIVSVSKEMENEA"
+    "RAAGATGINVVGICCTGNEVLMRHGIPACTHSVSQEMAMITGALDAMILDYQCIQPSVATIAECTGTTVI"
+    "TTMEMSKITGATHVNFAEEAAVENAKQILRLAIDTFKRRKGKPVEIPNIKTKVVAGFSTEAIINALSKLN"
+    "ANDPLKPLIDNVVNGNIRGVCLFAGCNNVKVPQDQNFTTIARKLLKQNVLVVATGCGAGALMRHGFMDPA"
+    "NVDELCGDGLKAVLTAIGEANGLGGPLPPVLHMGSCVDNSRAVALVAALANRLGVDLDRLPVVASAAEAM"
+    "HEKAVAIGTWAVTIGLPTHIGVLPPITGSLPVTQILTSSVKDITGGYFIVELDPETAADKLLAAINERRA"
+    "GLGLPW"
+)
+assert len(BAIT_WT) == 636 and BAIT_WT[558] == "A", "서열이 다릅니다"
+
+# 기본은 WT. RF2-PPI 는 공진화(paired MSA)로 작동하므로 점 돌연변이 1개는
 # 점수에 사실상 영향이 없고, Boltz-2 구조 예측에서도 마찬가지다.
-# BAIT_WT = "MAKQNLKSTDRAVQQ...ERRAGLGLPW"          # WT 붙여넣기
-# assert BAIT_WT[558] == "A", f"559번이 A 가 아님: {BAIT_WT[558]}"
-# BAIT_SEQ["ChCODH2_WT"] = BAIT_WT
-#
-# 변이체로 돌리고 싶다면 (실험과 서열을 정확히 맞추려는 경우):
+BAIT_SEQ["ChCODH2_WT"] = BAIT_WT
+
+# 실험 서열과 정확히 맞추려면 위 줄 대신 아래를 쓴다:
 # BAIT_SEQ["ChCODH2_A559W"] = BAIT_WT[:558] + "W" + BAIT_WT[559:]
+
+# 양성대조군: CooC1 은 CELL 06 이 3kji.pdb 에서 자동으로 뽑는다.
+# CooC2 / CooT / CooJ 는 아래 UniProt 조회로 찾아 여기에 직접 넣는다.
+# BAIT_SEQ["CooT"] = "..."
 
 # --- 아직 없으면 UniProt 에서 후보 목록만 조회해 본다 (인터넷 필요) ---
 import urllib.request, urllib.parse
@@ -615,7 +629,10 @@ def uniprot_tsv(query, fields="accession,id,gene_names,protein_name,length,seque
     rows = [l.split("\t") for l in txt.strip().split("\n")]
     return pd.DataFrame(rows[1:], columns=rows[0])
 
-if not BAIT_SEQ:
+LOOKUP_CONTROLS = False   # True 면 CooC/CooT/CooJ 후보를 UniProt 에서 조회한다
+print("bait 등록:", {k: len(v) for k, v in BAIT_SEQ.items()})
+
+if LOOKUP_CONTROLS:
     try:
         df_coo = uniprot_tsv("organism_id:246194 AND "
                              "(gene:cooS OR gene:cooC OR gene:cooT OR gene:cooJ OR gene:cooF)")
@@ -626,9 +643,7 @@ if not BAIT_SEQ:
         print(">> 서열은 UNIPROT_COO['<Entry>'] 로 꺼낼 수 있습니다.")
         print(">> ⚠ gene name 만으로 II번 특정 불가 — 실험에 쓰는 서열로 직접 대조 필수.")
     except Exception as e:
-        print("UniProt 조회 실패:", e, "\n-> BAIT_SEQ 를 수동으로 채우세요.")
-else:
-    print("BAIT_SEQ 입력됨:", {k: len(v) for k, v in BAIT_SEQ.items()})
+        print("UniProt 조회 실패:", e)
 ```
 
 ---
