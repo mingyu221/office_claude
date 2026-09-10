@@ -339,42 +339,63 @@ print("\n⚠ 인계문서 경고: `sudo apt-mark hold nvidia-*` 미적용 — �
 #   - conda create 는 노트북 커널보다 터미널이 안정적이라 "스크립트만 만들고" 출력한다
 #   - 실행: 터미널에서 bash <출력된 경로>   (약 20~40분)
 # =============================================================================
-install_sh = f"""
-# ---- 1) conda 환경 (RF2-PPI 공식 스펙: python 3.9 / torch 1.12.1+cu113) ----
+# 기존 환경이 이미 동작하면 False 로 두고 코드/가중치만 받는다.
+# True 로 두면 torch/numpy 를 RF2-PPI 공식 스펙으로 덮어쓴다 — 잘 붙어 있는
+# CUDA 조합이 있다면 그게 되돌아가니 주의.
+INSTALL_PY_DEPS = True
+
+env_block = f"""
 source "$(conda info --base)/etc/profile.d/conda.sh"
 # 같은 이름의 환경이 이미 있으면 create 가 실패한다(set -e 로 스크립트 중단).
-# 그 경우 기존 환경에 부족한 패키지만 채운다. 처음부터 다시 만들려면 먼저:
-#   conda env remove -n {CONDA_ENV_RF2}
+# 처음부터 다시 만들려면 먼저:  conda env remove -n {CONDA_ENV_RF2}
 if conda env list | awk '{{print $1}}' | grep -qx "{CONDA_ENV_RF2}"; then
   echo "[info] 기존 {CONDA_ENV_RF2} 환경을 그대로 쓴다"
 else
   conda create -y -n {CONDA_ENV_RF2} python=3.9
 fi
 conda activate {CONDA_ENV_RF2}
+"""
+
+if INSTALL_PY_DEPS:
+    deps_block = f"""
+# ---- 파이썬 의존성 (RF2-PPI 공식 스펙: python 3.9 / torch 1.12.1+cu113) ----
 conda install -y -c conda-forge -c bioconda hhsuite mmseqs2 aria2
 pip install numpy==1.21.2 pandas==1.5.3 biopython==1.79 scipy==1.7.1 einops
 pip install torch==1.12.1+cu113 -f https://download.pytorch.org/whl/torch_stable.html
-# 드라이버가 CUDA 13 (580.173.02) 이라 cu113 wheel 이 안 뜨면 아래로 교체:
+# 드라이버가 최신(CUDA 13)이라 cu113 이 안 붙으면 위 줄 대신:
 # pip install torch==2.1.2 --index-url https://download.pytorch.org/whl/cu118
 pip install jupyter ipykernel matplotlib seaborn tqdm pyyaml
 python -m ipykernel install --user --name {CONDA_ENV_RF2} --display-name "Python ({CONDA_ENV_RF2})"
+"""
+else:
+    deps_block = """
+# ---- INSTALL_PY_DEPS=False : 기존 환경의 torch/numpy 를 건드리지 않는다 ----
+command -v hhfilter >/dev/null || conda install -y -c conda-forge -c bioconda hhsuite
+python -c "import torch, numpy; print('numpy', numpy.__version__, '| torch', torch.__version__, \
+'| cuda', torch.cuda.is_available()); torch.zeros(3).numpy(); print('numpy<->torch OK')"
+"""
 
-# ---- 2) RF2-PPI 코드 + 가중치 (워크스페이스가 아니라 툴 디렉터리에) ----
+code_block = f"""
+# ---- RF2-PPI 코드 + 가중치 (워크스페이스가 아니라 툴 디렉터리에) ----
 cd "{TOOLS}"
 [ -d RoseTTAFold2-PPI ] || git clone https://github.com/CongLabCode/RoseTTAFold2-PPI.git
 cd RoseTTAFold2-PPI/src/models
 [ -f RF2-PPI.pt ] || wget --no-check-certificate https://conglab.swmed.edu/humanPPI/downloads/RF2-PPI.pt
+ls -la RF2-PPI.pt
 
-# ---- 3) 예제 실행 (검증은 CELL 04 에서) ----
+# ---- 예제 실행 (판정은 CELL 04 에서) ----
 cd "{RF2PPI_DIR}/examples"
 python ../src/predict_list_PPI.py -list_fn segment_pairs_input \\
        -model_file ../src/models/RF2-PPI.pt
-echo "설치 스크립트 완료"
+echo "=== 설치 스크립트 완료 ==="
 """
+
 p = DIR["script"] / "install_rf2ppi.sh"
-p.write_text("#!/usr/bin/env bash\nset -euo pipefail\n" + textwrap.dedent(install_sh))
+p.write_text("#!/usr/bin/env bash\nset -euo pipefail\n"
+             + textwrap.dedent(env_block + deps_block + code_block))
 p.chmod(0o755)
-print("터미널에서 실행하세요:\n")
+print(f"INSTALL_PY_DEPS = {INSTALL_PY_DEPS}")
+print("\n※ 이 셀은 스크립트를 만들기만 한다. 설치는 아래를 터미널에서 실행할 때 일어난다:\n")
 print(f"    bash {p}\n")
 print("-" * 70)
 print(p.read_text())
