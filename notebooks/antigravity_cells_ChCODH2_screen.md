@@ -1451,8 +1451,11 @@ print(B.head(40).to_string(index=False))
 # =============================================================================
 FD = ASSET["folddisco"]
 FD_OUT = DIR["folddisco"]; FD_OUT.mkdir(exist_ok=True)
-RESIDUES_METAL = "A112,A114"     # <- CELL 06 에서 확인한 체인으로 수정
-RESIDUES_ATP   = ""              # <- Walker A 등 지정 후 run02 실행 (비우면 스킵)
+# 3kji.pdb ATOM 레코드로 직접 확인한 값 (체인 A, 잔기번호 1-254, SEQRES 와 어긋남 없음):
+#   A112=CYS, A114=CYS            -> metal-binding motif
+#   A12=GLY, A13=LYS, A14=THR     -> Walker A (GKGGVGKT 의 G-K-T). CooC 가 ATPase 인 것과 일치
+RESIDUES_METAL = "A112,A114"
+RESIDUES_ATP   = "A12,A13,A14"   # 잔기 2개면 관계쌍이 1개뿐이라 위양성이 많다 -> 3개로 특이성 확보
 
 # ⚠ MG1655 인덱스는 공식 배포본이라 우리 구조 DB(structures_UP*)에 대응 파일이 없다.
 #    -> CELL 30 crosswalk 로 GenBank ID 를 못 붙이므로 CELL 31 에서 제외된다.
@@ -1687,8 +1690,8 @@ print(f"""
 
 ### 남은 TODO (인계문서 §7) ###
   [ ] BL21 proteome ID: 이 노트북은 UP000503272 로 통일했다. 협업팀 확인 남음
-  [ ] Folddisco ATP-binding motif residue 지정 (CELL 29 RESIDUES_ATP)
-  [ ] 3kji.pdb 체인 ID 확정 (CELL 06 출력으로 확인)
+  [x] Folddisco ATP-binding motif residue 지정 -> A12,A13,A14 (Walker A) 확정
+  [x] 3kji.pdb 체인 ID 확정 -> 체인 A, A112/A114 = CYS 확인
   [ ] crosswalk 미매칭분 UniProt idmapping 으로 보완 (CELL 30)
   [ ] apt-mark hold nvidia-* (드라이버 재발 방지)
   [ ] 정량 프로테오믹스 병행 — 서열 동일·발현량만 다를 경우의 보험
