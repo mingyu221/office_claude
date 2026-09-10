@@ -339,10 +339,11 @@ print("\n⚠ 인계문서 경고: `sudo apt-mark hold nvidia-*` 미적용 — �
 #   - conda create 는 노트북 커널보다 터미널이 안정적이라 "스크립트만 만들고" 출력한다
 #   - 실행: 터미널에서 bash <출력된 경로>   (약 20~40분)
 # =============================================================================
-# 기존 환경이 이미 동작하면 False 로 두고 코드/가중치만 받는다.
-# True 로 두면 torch/numpy 를 RF2-PPI 공식 스펙으로 덮어쓴다 — 잘 붙어 있는
-# CUDA 조합이 있다면 그게 되돌아가니 주의.
-INSTALL_PY_DEPS = True
+# False(기본) = 기존 rf2ppi 환경을 그대로 쓰고, RF2-PPI 가 직접 쓰는 경량 패키지와
+#               코드/가중치만 받는다. epel-af2 는 이미 환경이 잡혀 있으므로 이쪽이다.
+# True        = torch/numpy 를 RF2-PPI 공식 스펙(1.12.1+cu113 / 1.21.2)으로 덮어쓴다.
+#               환경을 처음부터 만들 때만 쓸 것. 잘 붙어 있는 CUDA 조합이 되돌아간다.
+INSTALL_PY_DEPS = False
 
 env_block = f"""
 source "$(conda info --base)/etc/profile.d/conda.sh"
