@@ -122,6 +122,33 @@ PLAN = """
   - insertase는 apo 중간체에 결합할 수 있다 -> segment bait 병행, ipTM 컷오프 완화 후 수동 검토.
 """
 print(PLAN)
+
+
+def stage():
+    """커널 재시작 후 어디까지 돼 있는지 확인하고 다음에 돌릴 셀을 알려준다."""
+    g = globals()
+    steps = [
+        ("CELL 05-07  bait 서열",        "BAIT_ALL"),
+        ("CELL 08     프로테옴 로드",     "hdr2seq"),
+        ("CELL 09/11  4-category 분류",  "cls_prey"),
+        ("CELL 12     Track A/B 배정",   "TRACK_A"),
+        ("CELL 17     feasibility gate", "BAIT_DEPTH"),
+        ("CELL 18     prey FASTA",       "sel"),
+        ("CELL 20     best-hit 정리",     "PREY_MSA"),
+        ("CELL 21     paired MSA",       "sdf"),
+        ("CELL 23     RF2-PPI 집계",      "R_best"),
+        ("CELL 28     Boltz 파싱",        "B"),
+        ("CELL 30     ID crosswalk",     "XW"),
+    ]
+    nxt = None
+    for label, var in steps:
+        ok = var in g and g[var] is not None
+        print(f"  [{'O' if ok else ' '}] {label}")
+        if not ok and nxt is None:
+            nxt = label
+    print(f"\n  -> 다음에 돌릴 것: {nxt}" if nxt else "\n  -> 전부 완료")
+
+# 커널을 재시작했거나 어디까지 돌았는지 헷갈릴 때 아무 셀에서나 stage() 를 부르면 된다.
 ```
 
 ---
@@ -267,30 +294,6 @@ def bg_tail(name, n=40):
     else:
         print("(로그 없음)")
     return alive
-
-def stage():
-    """커널 재시작 후 어디까지 돼 있는지 확인하고 다음에 돌릴 셀을 알려준다."""
-    g = globals()
-    steps = [
-        ("CELL 05-07  bait 서열",        "BAIT_ALL"),
-        ("CELL 08     프로테옴 로드",     "hdr2seq"),
-        ("CELL 09/11  4-category 분류",  "cls_prey"),
-        ("CELL 12     Track A/B 배정",   "TRACK_A"),
-        ("CELL 17     feasibility gate", "BAIT_DEPTH"),
-        ("CELL 18     prey FASTA",       "sel"),
-        ("CELL 20     best-hit 정리",     "PREY_MSA"),
-        ("CELL 21     paired MSA",       "sdf"),
-        ("CELL 23     RF2-PPI 집계",      "R_best"),
-        ("CELL 28     Boltz 파싱",        "B"),
-        ("CELL 30     ID crosswalk",     "XW"),
-    ]
-    nxt = None
-    for label, var in steps:
-        ok = var in g and g[var] is not None
-        print(f"  [{'O' if ok else ' '}] {label}")
-        if not ok and nxt is None:
-            nxt = label
-    print(f"\n  -> 다음에 돌릴 것: {nxt}" if nxt else "\n  -> 전부 완료")
 
 def conda_run(env, cmd, cwd=None, check=True):
     """지정 conda 환경에서 포그라운드 실행."""
@@ -977,9 +980,6 @@ for job in ["easy_search", "part2_download", "part2_bactdb",
     if (DIR["log"] / f"{job}.log").exists():
         bg_tail(job, n=8)
         print("-" * 70)
-
-print("\n### 파이프라인 진행 상태 ###")
-stage()
 
 print("\n### 디스크 ###"); sh(f"df -h {BASE}", check=False)
 print("### GPU ###");   sh("nvidia-smi --query-gpu=index,utilization.gpu,memory.used,memory.total "
