@@ -24,64 +24,63 @@
 #   - 실행해도 아무것도 바꾸지 않는다. 전체 흐름과 "지금 없는 것"을 확인만 한다.
 # =============================================================================
 PLAN = """
-[ChCODH2 Ni-insertase in silico 스크리닝 — 셀 실행 순서]
+[ChCODH2 Ni-insertase in silico 스크리닝 — 실행 절차서]
 
- CELL 01  CONFIG (경로/스레드/GPU/헬퍼 함수)            <- 여기만 본인 환경에 맞게 수정
- CELL 02  기존 자산 + 환경 점검 (GPU/디스크/인덱스/서열)
+■ 규칙 3가지
+  1. 위에서부터 순서대로. 건너뛰면 각 셀 맨 앞의 need() 가 막고 무엇을 먼저 할지 알려준다.
+  2. (BG) 표시된 셀은 "시작만" 한다. 끝나기 전에 다음 단계로 가면 안 된다.
+     완료 확인 = CELL 15 를 돌려 로그에 DONE_ 이 보이는지 본다.
+  3. 커널을 재시작했으면 CELL 01, 02 부터 다시. stage() 로 어디까지 됐는지 확인한다.
 
- [Part 0] 설치
- CELL 03  RF2-PPI 설치 스크립트 생성 (터미널에서 실행)
- CELL 04  설치 검증 — 예제 재현            ★체크포인트 1
+──────────────────────────────────────────────────────────────────────
+단계 A. 준비                                                  (한 번만)
+  CELL 01 → 02                설정, 자산·커널·GPU 점검
+  CELL 03 → [터미널에서 bash] → CELL 04
+                              RF2-PPI 설치          ★체크포인트 1
+                              예제 판정 구간이 5/5 일치해야 통과
 
- [Part 1] 서열 확보
- CELL 05  bait 서열 입력 (ChCODH2 A559W)   ★없으면 아무것도 안 돌아감
- CELL 06  CooC1 서열을 3kji.pdb에서 추출 (양성대조군)
- CELL 07  bait 검증 + segment bait 생성 + baits.fasta 저장
+단계 B. bait 서열                                               (5분)
+  CELL 05 → 06 → 07           ChCODH2 서열 입력, CooC1 추출, segment 생성
+                              ★서열을 안 넣으면 여기서 멈춘다
 
- [Part 1-2/1-3] 프로테옴 · 차등 분류  (기존 자산 재사용)
- CELL 08  기존 프로테옴 서열 로드 (BL21/Y19/MG1655, GenBank ID)
- CELL 09  기존 BLASTp 4-category 분류 로드 + 값 검증 (2171/1575/125/217)
- CELL 10  (fallback) mmseqs easy-search 재실행
- CELL 11  (fallback) m8 -> 4-category 분류
- CELL 12  Track A / Track B 확정 및 저장
+단계 C. 프로테옴·차등 분류                             (5분 또는 1시간)
+  CELL 08                     프로테옴 로드 (BL21 4088 / Y19 5325)
+  CELL 09                     분류 TSV 가 있으면 여기서 끝
+    └ [없음] 이면 → CELL 10 (BG, 30~60분) → DONE_easy_search 대기 → CELL 11
+  CELL 12                     Track A / Track B 확정
 
- [Part 2] paired MSA용 세균 레퍼런스 DB
- CELL 13  Bacteria reference proteome 다운로드   (백그라운드, ~1h)
- CELL 14  병합 + mmseqs createdb                 (백그라운드, ~2h)
- CELL 15  백그라운드 작업 모니터 (수시 실행)
+단계 D. 세균 레퍼런스 DB                              (2~3시간, 최장)
+  CELL 13 (BG, ~1시간)        17,992개 세균 프로테옴 다운로드 (~16GB)
+    ↓ DONE_download 확인 (CELL 15)          ※ 확인 전에 14 로 가면 반쪽 DB 가 된다
+  CELL 14 (BG, 1~2시간)       병합 + mmseqs DB + 인덱스
+    ↓ DONE_bactdb 확인
+  ※ 이 두 시간 동안 단계 F(Track B)를 병렬로 돌릴 수 있다. GPU 와 CPU 라 안 겹친다.
 
- [Part 3] Feasibility gate
- CELL 16  bait homolog 검색
- CELL 17  깊이 판정 — Track A 진행 여부 결정      ★체크포인트 2
+단계 E. Track A — RF2-PPI                        (gate 통과 시에만)
+  CELL 16 (1분) → CELL 17     ★체크포인트 2 — 여기서 진행 여부가 갈린다
+                              깊이 >= 500 진행 / 200~500 진행하되 replicate 5회
+                              200 미만 → 단계 E 를 건너뛰고 단계 F 에 집중
+  CELL 18 → CELL 19 (BG, 4~10시간) → DONE_prey 대기
+  CELL 20 → 21 → CELL 22 (BG·GPU, 6~15시간) → DONE_rf2ppi 대기
+  CELL 23 → 24                랭킹 + 양성대조군 판정
 
- [Part 4-6] Track A = RF2-PPI (공진화)
- CELL 18  Track A prey FASTA
- CELL 19  prey homolog 검색                       (백그라운드, 4~10h, 최장 단계)
- CELL 20  organism별 best-hit 정리
- CELL 21  paired MSA 생성 + hhfilter
- CELL 22  RF2-PPI x3 replicate 실행               (GPU)
- CELL 23  결과 집계 (mean/sd 랭킹)
- CELL 24  양성대조군 검증 + depth-score 상관 진단
+단계 F. Track B — Boltz-2                  (레퍼런스 DB 불필요, 병렬 가능)
+  CELL 25 → [터미널에서 bash] Boltz-2 설치
+  CELL 26 → CELL 27 (BG·GPU, 10~20시간) → DONE_boltz 대기 → CELL 28
+  CELL 28b → 28c              (선택) Foldseek-Interface 계면 대조
 
- [Part 7] Track B = Boltz-2 (구조 co-folding, 공진화 불필요) ★주력 가능성 높음
- CELL 25  Boltz-2 설치 스크립트
- CELL 26  입력 YAML 생성 (Ni을 ligand CCD:NI로 명시)
- CELL 27  boltz predict 실행                      (GPU)
- CELL 28  결과 파싱 (ipTM / ligand_ipTM)
- CELL 28b 계면 검색 — Foldseek-Interface (선택)
- CELL 28c 계면 일치 표 -> PDB 에 전례가 있는 결합 방식인가
+단계 G. Track C + 통합                                       (수십 분)
+  CELL 29                     Folddisco metal/ATP 모티프 검색
+  CELL 30                     구조 tid → GenBank ID crosswalk (수 분)
+  CELL 31 → 32 → 33           모티프 CSV 변환 → 통합 랭킹 → 최종 리포트
+──────────────────────────────────────────────────────────────────────
 
-   ※ Foldseek-Interface 는 PPI 예측 도구가 아니다. 예측된 복합체의 계면을
-     PDB 의 77,167개 계면 클러스터와 대조해 "알려진 결합 방식인가"를 묻는다.
-     ipTM 과 독립적인 축이라 Boltz-2 위양성을 걸러내는 데 쓴다.
-     금속 샤페론 계면(HypA-HypB, UreE-UreG 등)에 걸리면 강한 방증.
-
-[Part 8] Track C 연계 + 통합
- CELL 29  Folddisco 검색 (metal motif / ATP motif)
- CELL 30  ID crosswalk: 구조 tid(UniProt/UniParc) -> GenBank protein ID
- CELL 31  Folddisco 결과 -> folddisco_*_motif.csv 변환
- CELL 32  Track A + B + C 통합 랭킹
- CELL 33  최종 리포트 + 남은 TODO
+■ 상황별 대처
+  "어디까지 했더라"          → stage()
+  "백그라운드 다 됐나"        → CELL 15
+  "선행조건 미충족 에러"      → 메시지가 지목한 셀을 먼저 돌린다
+  "결과가 이상하다"           → 산출물 시각을 확인한다. 입력보다 오래된 결과는 무효다
+  "GPU 두 장 쓰고 싶다"       → 단계 E 는 GPU_ID=1, 단계 F 는 CELL 27 의 BOLTZ_GPU=0
 
 [디렉터리 구조 — 서버 workspace 관례(input/result/script)]
   /mnt/af2results/mingyu/workspace/ppi_discovery/
@@ -989,10 +988,17 @@ cd "{RB}"
 rm -f bactDB* bacteria_ref.fasta
 OUT=bacteria_ref.fasta
 : > "$OUT"
+# 진행률은 stderr 로 보낸다 (stdout 은 $OUT 으로 리다이렉트되므로).
+# 이게 없으면 병합이 끝날 때까지 로그가 비어 있어 멈춘 것처럼 보인다.
+TOT=$(ls fasta/*.fasta.gz | wc -l)
+N=0
 for f in fasta/*.fasta.gz; do
   tax=$(basename "$f" .fasta.gz | cut -d_ -f2)
   zcat "$f" | awk -v t="$tax" '/^>/{{split($1,a,"|"); acc=(length(a)>=2?a[2]:substr($1,2)); print ">"t"|"acc; next}}{{print}}'
+  N=$((N+1))
+  [ $((N % 1000)) -eq 0 ] && echo "  병합 $N/$TOT" >&2
 done >> "$OUT"
+echo "병합 완료: $TOT 개" >&2
 echo "sequences: $(grep -c '^>' "$OUT")"
 echo "proteomes: $(grep '^>' "$OUT" | cut -d'|' -f1 | tr -d '>' | sort -u | wc -l)"
 mmseqs createdb "$OUT" bactDB
