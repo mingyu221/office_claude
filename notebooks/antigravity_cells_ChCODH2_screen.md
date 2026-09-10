@@ -283,7 +283,19 @@ print("BL21 proteome ID =", PROTEOMES['BL21DE3']['upid'], "(구조 DB와 통일)
 # CELL 02 | 기존 자산 존재 확인 + GPU/디스크 상태
 #   - 여기서 빨간 [X]가 뜨는 항목은 그 항목을 쓰는 Part에서 반드시 막힌다
 # =============================================================================
-print("### 기존 자산 ###")
+# ---- 커널 확인 (제일 먼저) ----
+# 노트북이 rf2ppi 환경이 아닌 다른 파이썬으로 돌면 뒤에서 ImportError 가 난다.
+# 예전 환경의 ~/.local/lib/pythonX.Y/site-packages 를 물고 도는 경우가 흔하다.
+print("### 커널 ###")
+print("  python  :", sys.executable)
+print("  version :", sys.version.split()[0])
+_env_ok = CONDA_ENV_RF2 in sys.executable
+print(f"  판정    : {'OK' if _env_ok else '⚠ rf2ppi 환경이 아니다'}")
+if not _env_ok:
+    print(f"    -> 커널을 'Python ({CONDA_ENV_RF2})' 로 다시 선택하거나 Antigravity 를 재시작할 것.")
+    print(f"    -> 커널 등록 확인: cat ~/.local/share/jupyter/kernels/{CONDA_ENV_RF2}/kernel.json")
+
+print("\n### 기존 자산 ###")
 missing = []
 for k, p in ASSET.items():
     ok = p.exists()
