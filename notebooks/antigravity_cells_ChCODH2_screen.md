@@ -311,12 +311,14 @@ print("\n### GPU ###")
 sh("nvidia-smi --query-gpu=index,name,driver_version,memory.total,memory.used "
    "--format=csv,noheader || echo 'nvidia-smi 실패 — 드라이버 확인 필요'", check=False)
 
-print("\n### 디스크 (2026-09-09 휴지통 4.6T 정리 후: 8.1T 사용 / 5.7T 여유 / 59%) ###")
-sh(f"df -h {BASE} /mnt/af2results 2>/dev/null | sort -u", check=False)
+print("\n### 디스크 (워크스페이스 / 홈=conda 환경) ###")
+sh(f'df -h "{BASE}" "$HOME"', check=False)
 
 print("\n### 툴 확인 ###")
 for t in ["mmseqs", "hhfilter", "aria2c", "conda", "curl"]:
     sh(f"command -v {t} >/dev/null && echo '  [O] {t}' || echo '  [X] {t} (미설치)'", check=False)
+print("  ※ hhfilter 는 hhsuite 패키지에 들어 있다 (CELL 21 paired MSA 에서 필수).")
+print("     없으면: conda install -y -c conda-forge -c bioconda hhsuite")
 
 if missing:
     print("\n⚠ 없는 자산:", ", ".join(missing))
@@ -340,7 +342,14 @@ print("\n⚠ 인계문서 경고: `sudo apt-mark hold nvidia-*` 미적용 — �
 install_sh = f"""
 # ---- 1) conda 환경 (RF2-PPI 공식 스펙: python 3.9 / torch 1.12.1+cu113) ----
 source "$(conda info --base)/etc/profile.d/conda.sh"
-conda create -y -n {CONDA_ENV_RF2} python=3.9
+# 같은 이름의 환경이 이미 있으면 create 가 실패한다(set -e 로 스크립트 중단).
+# 그 경우 기존 환경에 부족한 패키지만 채운다. 처음부터 다시 만들려면 먼저:
+#   conda env remove -n {CONDA_ENV_RF2}
+if conda env list | awk '{{print $1}}' | grep -qx "{CONDA_ENV_RF2}"; then
+  echo "[info] 기존 {CONDA_ENV_RF2} 환경을 그대로 쓴다"
+else
+  conda create -y -n {CONDA_ENV_RF2} python=3.9
+fi
 conda activate {CONDA_ENV_RF2}
 conda install -y -c conda-forge -c bioconda hhsuite mmseqs2 aria2
 pip install numpy==1.21.2 pandas==1.5.3 biopython==1.79 scipy==1.7.1 einops
