@@ -80,7 +80,7 @@ PLAN = """
   /mnt/af2results/mingyu/workspace/ppi_discovery/
   |-- input/
   |   |-- seq/         baits.fasta, prey_trackA.fasta
-  |   |-- db/          mmseqs DB (bactDB, baitDB, preyDB)  <- 대용량 ~50GB
+  |   |-- db/          프로젝트 mmseqs DB (baitDB, preyDB)
   |   +-- external/    Mac 에서 가져온 BLASTp 분류 TSV
   |-- result/
   |   |-- search/      *.m8 (homolog 검색 결과)
@@ -93,6 +93,8 @@ PLAN = """
   |-- script/          생성된 .sh (설치·검색·추론)
   +-- tmp/             mmseqs 스크래치 — Part 2 끝나면 지워도 되는 곳
 
+  ※ 세균 레퍼런스 DB(~90GB)는 공용이라 워크스페이스 밖에 둔다:
+    /mnt/af2results/mingyu/database/reference_proteomes/  (Bacteria/, bacteria_ref.fasta, bactDB)
   ※ RF2-PPI 코드는 워크스페이스가 아니라 /mnt/af2results/mingyu/RoseTTAFold2-PPI 에 설치한다
     (folddisco 바이너리와 같은 층 — 툴은 밖, 데이터는 워크스페이스 안)
 
@@ -163,6 +165,11 @@ DIR = {
 for _p in DIR.values():
     _p.mkdir(parents=True, exist_ok=True)
 RF2PPI_DIR = TOOLS / "RoseTTAFold2-PPI"       # 워크스페이스가 아니라 툴 디렉터리에 설치
+
+# 공용 레퍼런스 DB — 이 프로젝트 전용이 아니므로 database/ 아래에 두고 재사용한다.
+# (colabfold_db, bacteriaDB, folddisco 인덱스와 같은 층)
+REFDB = TOOLS / "database" / "reference_proteomes"
+REFDB.mkdir(parents=True, exist_ok=True)
 
 # ---------------- 이미 구축된 자산 (인계문서 §1) ----------------
 ASSET = {
@@ -265,6 +272,7 @@ def conda_run(env, cmd, cwd=None, check=True):
 
 print("BASE  =", BASE)
 print("TOOLS =", TOOLS, "(RF2-PPI 설치 위치, folddisco 와 같은 층)")
+print("REFDB =", REFDB, "(공용 세균 레퍼런스 DB)")
 for grp in ["input", "result", "script", "tmp"]:
     print(f"  {grp}/")
     for k, v in DIR.items():
@@ -316,6 +324,11 @@ for k in ["fd_idx_bl21", "fd_idx_y19", "fd_idx_mg"]:
     parts = {ext: (Path(str(base) + ext)).exists() for ext in ["", ".lookup", ".offset", ".type"]}
     print(f"  {k:12s} {base.name:16s} " + " ".join(f"{e or 'body'}={'O' if v else 'X'}"
                                                   for e, v in parts.items()))
+
+print("\n### 공용 레퍼런스 DB (Part 2) ###")
+for n in ["Bacteria", "bacteria_ref.fasta", "bactDB"]:
+    q = REFDB / n
+    print(f"  [{'O' if q.exists() else 'X'}] {n:20s} {q}")
 
 print("\n### 분류 TSV (없으면 CELL 10-11 fallback) ###")
 for k, p in CATEGORY_TSV.items():
@@ -877,7 +890,7 @@ print("저장:", DIR["table"]/"track_A_ids.txt", "/", DIR["table"]/"track_B_ids.
 #   - 백그라운드 30~60분
 # =============================================================================
 script = f"""
-cd "{DIR['db']}"
+cd "{REFDB}"
 REL=https://ftp.uniprot.org/pub/databases/uniprot/current_release/knowledgebase/reference_proteomes
 FN=$(curl -s "$REL/" | grep -o 'Reference_Proteomes_[0-9_]*\\.tar\\.gz' | sort -u | tail -1)
 echo "release file = $FN"
@@ -907,7 +920,7 @@ sh(f"df -h {BASE}", check=False)
 #   - CELL 13 의 DONE_download 확인 후 실행. 1~2시간.
 # =============================================================================
 script = f"""
-cd "{DIR['db']}"
+cd "{REFDB}"
 OUT=bacteria_ref.fasta
 : > "$OUT"
 find Bacteria -name '*.fasta.gz' ! -name '*_DNA*' ! -name '*additional*' | while read f; do
@@ -959,9 +972,9 @@ script = f"""
 cd "{DIR['db']}"
 rm -f baitDB*                      # 재실행 시 기존 DB 와 충돌 방지
 mmseqs createdb "{DIR['seq']}/baits.fasta" baitDB
-mmseqs search baitDB bactDB "{DIR['search']}/bait_res" "{DIR['tmp']}/bs" \\
+mmseqs search baitDB "{REFDB}/bactDB" "{DIR['search']}/bait_res" "{DIR['tmp']}/bs" \\
   -s 7.5 --num-iterations 3 -e 1e-3 --max-seqs 20000 --threads {THREADS}
-mmseqs convertalis baitDB bactDB "{DIR['search']}/bait_res" "{DIR['search']}/bait_hits.m8" \\
+mmseqs convertalis baitDB "{REFDB}/bactDB" "{DIR['search']}/bait_res" "{DIR['search']}/bait_hits.m8" \\
   --format-output "{FMT_ALN}" --threads {THREADS}
 wc -l "{DIR['search']}/bait_hits.m8"
 echo DONE_gate
@@ -1066,9 +1079,9 @@ script = f"""
 cd "{DIR['db']}"
 rm -f preyDB*
 mmseqs createdb "{DIR['seq']}/prey_trackA.fasta" preyDB
-mmseqs search preyDB bactDB "{DIR['search']}/prey_res" "{DIR['tmp']}/ps" \\
+mmseqs search preyDB "{REFDB}/bactDB" "{DIR['search']}/prey_res" "{DIR['tmp']}/ps" \\
   -s 7.5 --num-iterations 3 -e 1e-3 --max-seqs 20000 --threads {THREADS}
-mmseqs convertalis preyDB bactDB "{DIR['search']}/prey_res" "{DIR['search']}/prey_hits.m8" \\
+mmseqs convertalis preyDB "{REFDB}/bactDB" "{DIR['search']}/prey_res" "{DIR['search']}/prey_hits.m8" \\
   --format-output "{FMT_ALN}" --threads {THREADS}
 wc -l "{DIR['search']}/prey_hits.m8"
 echo DONE_prey
