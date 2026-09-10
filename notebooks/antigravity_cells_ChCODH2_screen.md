@@ -157,10 +157,15 @@ def stage():
 
 # 커널을 재시작했거나 어디까지 돌았는지 헷갈릴 때 아무 셀에서나 stage() 를 부르면 된다.
 
-def done(job):
-    """백그라운드 작업이 정상 종료됐는가 (로그 끝에 DONE_ 표시가 있는가)."""
+def done(job, *artifacts):
+    """작업이 끝났는가. 로그의 DONE_ 표시가 1순위,
+    없으면 산출물 존재로 판정한다. 로그는 재실행 때 덮어써지므로
+    산출물이 더 믿을 만한 증거다 (실측: 다운로드를 다시 눌렀다 끊어
+    DONE_download 가 사라졌는데 파일 17,992개는 멀쩡했다)."""
     lg = DIR["log"] / f"{job}.log"
-    return lg.exists() and "DONE_" in lg.read_text(errors="ignore")[-4000:]
+    if lg.exists() and "DONE_" in lg.read_text(errors="ignore")[-4000:]:
+        return True
+    return bool(artifacts) and all(Path(a).exists() for a in artifacts)
 
 def have(*names):
     """앞 셀이 만든 변수가 살아 있는가 (커널 재시작 후 확인용)."""
@@ -993,7 +998,7 @@ du -sh fasta
 echo DONE_download
 """
 _n_fa = len(list((RB/"fasta").glob("*.fasta.gz")))
-if not already(done("part2_download") and _n_fa >= 17000,
+if not already(_n_fa >= 17000,
                f"세균 프로테옴 {_n_fa}개", f"rm -rf {RB}/fasta"):
     sh_bg("part2_download", script)
 print("\n디스크 여유:")
@@ -1010,8 +1015,7 @@ sh(f'df -h "{REFDB}"', check=False)
 #   - 헤더를 ">taxid|accession" 으로 만들어 두면 pairing 시 organism key 가 공짜
 #   - CELL 13 의 DONE_download 확인 후 실행. 병합 10~20분 + createdb/index 1~2시간.
 # =============================================================================
-need((done("part2_download"), "CELL 13 다운로드 미완료 — 로그에 DONE_download 가 없다"),
-     (len(list((RB/"fasta").glob("*.fasta.gz"))) >= 17000,
+need((len(list((RB/"fasta").glob("*.fasta.gz"))) >= 17000,
       f"fasta 파일이 부족하다 ({len(list((RB/'fasta').glob('*.fasta.gz')))}개) — CELL 13 을 끝낼 것"))
 script = f"""
 cd "{RB}"
@@ -1038,7 +1042,7 @@ mmseqs createindex bactDB "{DIR['tmp']}/idx" --threads {THREADS} --search-type 1
 ls -la
 echo DONE_bactdb
 """
-if not already(done("part2_bactdb") and (RB/"bactDB").exists(),
+if not already(done("part2_bactdb", RB/"bactDB.index"),
                "bactDB", f"rm -f {RB}/bactDB* {RB}/bacteria_ref.fasta"):
     sh_bg("part2_bactdb", script, env=CONDA_ENV_RF2)
 ```
@@ -1072,7 +1076,8 @@ print("### GPU ###");   sh("nvidia-smi --query-gpu=index,utilization.gpu,memory.
 #   - paired MSA 깊이 상한 = min(bait orthologue genome 수, prey orthologue genome 수)
 #   - CooS 는 CO-oxidizing anaerobe 에만 분포 -> 이 값이 낮을 수 있다. 절대 건너뛰지 말 것.
 # =============================================================================
-need((done("part2_bactdb"), "CELL 14 미완료 — 로그에 DONE_bactdb 가 없다. 미완성 DB 로 검색하면 결과가 조용히 틀어진다"),
+need((done("part2_bactdb", RB/"bactDB.index"),
+      "CELL 14 미완료 — 미완성 DB 로 검색하면 결과가 조용히 틀어진다"),
      ((RB/"bactDB").exists(), "bactDB 가 없다 — CELL 14 를 먼저 돌릴 것"),
      ((DIR["seq"]/"baits.fasta").exists(), "baits.fasta 가 없다 — CELL 07 을 먼저 돌릴 것"))
 # 13컬럼. CELL 17/20 의 AC 컬럼명과 반드시 같아야 한다 (어긋나면 조용히 잘못 파싱된다)
@@ -1190,7 +1195,7 @@ pd.DataFrame(skipped, columns=["protein","length"]).to_csv(
 #   - 반드시 백그라운드. 이 시간 동안 다른 GPU 에서 Track B(CELL 25~)를 먼저 돌려도 된다.
 # =============================================================================
 need(((DIR["seq"]/"prey_trackA.fasta").exists(), "CELL 18 을 먼저 돌릴 것"),
-     (done("part2_bactdb"), "CELL 14 미완료 — bactDB 가 완성되지 않았다"))
+     (done("part2_bactdb", RB/"bactDB.index"), "CELL 14 미완료 — bactDB 가 완성되지 않았다"))
 FMT_ALN = "query,target,fident,evalue,bits,qstart,qend,qlen,tstart,tend,tlen,qaln,taln"  # CELL 16 과 동일해야 함
 script = f"""
 cd "{DIR['db']}"
@@ -1203,7 +1208,7 @@ mmseqs convertalis preyDB "{RB}/bactDB" "{DIR['search']}/prey_res" "{DIR['search
 wc -l "{DIR['search']}/prey_hits.m8"
 echo DONE_prey
 """
-if not already(done("part4_prey") and (DIR["search"]/"prey_hits.m8").exists(),
+if not already(done("part4_prey", DIR["search"]/"prey_hits.m8"),
                "prey_hits.m8", f"rm {DIR['search']}/prey_hits.m8"):
     sh_bg("part4_prey", script, env=CONDA_ENV_RF2)
 print("\n※ Track B 는 이 DB 가 필요 없다 — CELL 25~28 을 지금 병렬로 시작할 수 있다.")
@@ -1219,7 +1224,7 @@ print("\n※ Track B 는 이 DB 가 필요 없다 — CELL 25~28 을 지금 병�
 #   - 정렬을 query 좌표계로 투영해 고정폭 행으로 만든다 (query gap 컬럼은 버림)
 #   - prey_hits.m8 이 수 GB 라 chunk 로 읽는다. 수 분~십수 분.
 # =============================================================================
-need((done("part4_prey"), "CELL 19 미완료 — 로그에 DONE_prey 가 없다"),
+need((done("part4_prey", DIR["search"]/"prey_hits.m8"), "CELL 19 미완료"),
      ((DIR["search"]/"prey_hits.m8").exists(), "prey_hits.m8 이 없다"))
 from collections import defaultdict
 
@@ -1348,7 +1353,7 @@ done
 ls -la *.log
 echo DONE_rf2ppi
 """
-if not already(done("part6_rf2ppi"), "RF2-PPI replicate 결과",
+if not already(done("part6_rf2ppi", DIR["rf2ppi"]/"input_rep1.log"), "RF2-PPI replicate 결과",
                f"rm {DIR['rf2ppi']}/input_rep*.log"):
     sh_bg("part6_rf2ppi", script, env=CONDA_ENV_RF2)
 print(f"\nreplicate {N_REPLICATE}회. GPU {GPU_ID} 사용. 6~15시간 예상.")
@@ -1363,7 +1368,7 @@ print(f"\nreplicate {N_REPLICATE}회. GPU {GPU_ID} 사용. 6~15시간 예상.")
 # CELL 23 | Part 6-2. replicate 집계 -> mean/sd 랭킹
 #   컷오프: mean>=0.74 strict(95% precision) / 0.30-0.74 회색지대 / <0.30 배제
 # =============================================================================
-need((done("part6_rf2ppi"), "CELL 22 미완료 — 로그에 DONE_rf2ppi 가 없다"))
+need((done("part6_rf2ppi", DIR["rf2ppi"]/"input_rep1.log"), "CELL 22 미완료"))
 reps_df = []
 for rep in range(1, N_REPLICATE + 1):
     log = DIR["rf2ppi"]/f"input_rep{rep}.log"
@@ -1549,7 +1554,7 @@ CUDA_VISIBLE_DEVICES={BOLTZ_GPU} boltz predict inputs \\
   --num_workers 4
 echo DONE_boltz
 """
-if not already(done("part7_boltz"), "Boltz-2 예측 결과", f"rm -rf {DIR['boltz']}/out"):
+if not already(done("part7_boltz", DIR["boltz"]/"out"), "Boltz-2 예측 결과", f"rm -rf {DIR['boltz']}/out"):
     sh_bg("part7_boltz", script, env=CONDA_ENV_BOLTZ)
 ```
 
@@ -1564,7 +1569,7 @@ if not already(done("part7_boltz"), "Boltz-2 예측 결과", f"rm -rf {DIR['bolt
 #   ligand_ipTM: Ni 이 두 사슬 경계면에 놓였는가 -> 'Ni 전달 복합체' 시나리오와 부합
 #   ⚠ 설계문서: insertase 는 apo 중간체에 붙을 수 있으니 컷오프를 낮춰 수동 검토할 것
 # =============================================================================
-need((done("part7_boltz"), "CELL 27 미완료 — 로그에 DONE_boltz 가 없다"))
+need((done("part7_boltz", DIR["boltz"]/"out"), "CELL 27 미완료"))
 rows = []
 for f in glob.glob(str(DIR["boltz"]/"out"/"**"/"confidence_*.json"), recursive=True):
     c = json.load(open(f))
