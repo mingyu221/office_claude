@@ -157,6 +157,28 @@ def stage():
     print(f"\n  -> 다음에 돌릴 것: {nxt}" if nxt else "\n  -> 전부 완료")
 
 # 커널을 재시작했거나 어디까지 돌았는지 헷갈릴 때 아무 셀에서나 stage() 를 부르면 된다.
+
+def done(job):
+    """백그라운드 작업이 정상 종료됐는가 (로그 끝에 DONE_ 표시가 있는가)."""
+    lg = DIR["log"] / f"{job}.log"
+    return lg.exists() and "DONE_" in lg.read_text(errors="ignore")[-4000:]
+
+def have(*names):
+    """앞 셀이 만든 변수가 살아 있는가 (커널 재시작 후 확인용)."""
+    g = globals()
+    return all(n in g and g[n] is not None for n in names)
+
+def newer(a, b):
+    """a 가 b 보다 나중에 만들어졌는가. 오래된 DB 로 검색한 결과를 걸러낸다."""
+    a, b = Path(a), Path(b)
+    return a.exists() and b.exists() and a.stat().st_mtime >= b.stat().st_mtime
+
+def need(*conds):
+    """셀 맨 앞에서 선행조건을 검사한다. 어긋나면 무엇을 먼저 해야 하는지 알리고 멈춘다."""
+    bad = [m for ok, m in conds if not ok]
+    if bad:
+        raise RuntimeError("선행조건 미충족 — 아래를 먼저 해결할 것:\n  - " + "\n  - ".join(bad))
+    print("[선행조건 OK]")
 ```
 
 ---
@@ -957,8 +979,14 @@ sh(f'df -h "{REFDB}"', check=False)
 #   - 헤더를 ">taxid|accession" 으로 만들어 두면 pairing 시 organism key 가 공짜
 #   - CELL 13 의 DONE_download 확인 후 실행. 병합 10~20분 + createdb/index 1~2시간.
 # =============================================================================
+need((done("part2_download"), "CELL 13 다운로드 미완료 — 로그에 DONE_download 가 없다"),
+     (len(list((RB/"fasta").glob("*.fasta.gz"))) >= 17000,
+      f"fasta 파일이 부족하다 ({len(list((RB/'fasta').glob('*.fasta.gz')))}개) — CELL 13 을 끝낼 것"))
 script = f"""
 cd "{RB}"
+# 이전 실행이 남긴 DB/인덱스를 먼저 치운다.
+# 반쪽 DB 위에 덮어쓰면 조각이 섞여 검색이 조용히 틀어진다 (실측: 28M vs 60M 서열).
+rm -f bactDB* bacteria_ref.fasta
 OUT=bacteria_ref.fasta
 : > "$OUT"
 for f in fasta/*.fasta.gz; do
@@ -1004,6 +1032,9 @@ print("### GPU ###");   sh("nvidia-smi --query-gpu=index,utilization.gpu,memory.
 #   - paired MSA 깊이 상한 = min(bait orthologue genome 수, prey orthologue genome 수)
 #   - CooS 는 CO-oxidizing anaerobe 에만 분포 -> 이 값이 낮을 수 있다. 절대 건너뛰지 말 것.
 # =============================================================================
+need((done("part2_bactdb"), "CELL 14 미완료 — 로그에 DONE_bactdb 가 없다. 미완성 DB 로 검색하면 결과가 조용히 틀어진다"),
+     ((RB/"bactDB").exists(), "bactDB 가 없다 — CELL 14 를 먼저 돌릴 것"),
+     ((DIR["seq"]/"baits.fasta").exists(), "baits.fasta 가 없다 — CELL 07 을 먼저 돌릴 것"))
 # 13컬럼. CELL 17/20 의 AC 컬럼명과 반드시 같아야 한다 (어긋나면 조용히 잘못 파싱된다)
 FMT_ALN = "query,target,fident,evalue,bits,qstart,qend,qlen,tstart,tend,tlen,qaln,taln"
 script = f"""
@@ -1030,6 +1061,9 @@ sh_bg("part3_gate", script, env=CONDA_ENV_RF2)
 #   >=500 : Track A 진행 / 200-500 : 진행하되 replicate 5회, 경계 점수 불신
 #   <200  : Track A 포기, Track B(CELL 25~)에 자원 집중
 # =============================================================================
+need(((DIR["search"]/"bait_hits.m8").exists(), "CELL 16 을 먼저 돌릴 것"),
+     (newer(DIR["search"]/"bait_hits.m8", RB/"bactDB"),
+      "bait_hits.m8 이 bactDB 보다 오래됐다 — 옛 DB 로 검색한 결과다. CELL 16 재실행 필요"))
 AC = ["query","target","fident","evalue","bits","qstart","qend","qlen",
       "tstart","tend","tlen","qaln","taln"]
 bh = pd.read_csv(DIR["search"]/"bait_hits.m8", sep="\t", names=AC)
@@ -1062,6 +1096,7 @@ if not TRACK_A_GO:
 # CELL 18 | Part 4-1. Track A prey FASTA (길이 필터)
 #   - bait(~630) + prey 합이 너무 길면 GPU 메모리 초과. 긴 건 제외 후 별도 segment 처리.
 # =============================================================================
+need((have("TRACK_A", "hdr2seq"), "CELL 08 과 CELL 12 를 먼저 돌릴 것 (stage() 로 확인)"))
 MAX_PREY_LEN = 1000
 
 # ---- 파일럿 모드 ----
@@ -1112,6 +1147,8 @@ pd.DataFrame(skipped, columns=["protein","length"]).to_csv(
 # CELL 19 | Part 4-2. prey homolog 검색 — 이 파이프라인에서 가장 오래 걸린다 (4~10h)
 #   - 반드시 백그라운드. 이 시간 동안 다른 GPU 에서 Track B(CELL 25~)를 먼저 돌려도 된다.
 # =============================================================================
+need(((DIR["seq"]/"prey_trackA.fasta").exists(), "CELL 18 을 먼저 돌릴 것"),
+     (done("part2_bactdb"), "CELL 14 미완료 — bactDB 가 완성되지 않았다"))
 FMT_ALN = "query,target,fident,evalue,bits,qstart,qend,qlen,tstart,tend,tlen,qaln,taln"  # CELL 16 과 동일해야 함
 script = f"""
 cd "{DIR['db']}"
@@ -1138,6 +1175,8 @@ print("\n※ Track B 는 이 DB 가 필요 없다 — CELL 25~28 을 지금 병�
 #   - 정렬을 query 좌표계로 투영해 고정폭 행으로 만든다 (query gap 컬럼은 버림)
 #   - prey_hits.m8 이 수 GB 라 chunk 로 읽는다. 수 분~십수 분.
 # =============================================================================
+need((done("part4_prey"), "CELL 19 미완료 — 로그에 DONE_prey 가 없다"),
+     ((DIR["search"]/"prey_hits.m8").exists(), "prey_hits.m8 이 없다"))
 from collections import defaultdict
 
 def to_query_frame(qaln, taln, qstart, qlen):
@@ -1180,6 +1219,8 @@ print("prey 개수:", len(PREY_MSA))
 #   - MIN_PAIRED 미만이면 예측 자체를 스킵한다 (얕은 MSA 의 점수는 신뢰 불가)
 #   - USE_SEGMENT_BAIT 이면 full-length + segment bait 를 모두 돌린다 (설계문서 대응 b/c)
 # =============================================================================
+need((have("BAIT_MSA", "PREY_MSA"), "CELL 20 을 먼저 돌릴 것"),
+     (have("sel"), "CELL 18 을 먼저 돌릴 것"))
 MIN_PAIRED = 50
 paired_dir = DIR["paired"]; paired_dir.mkdir(exist_ok=True)
 
@@ -1248,6 +1289,8 @@ print(sdf.query("status=='ok'").paired_depth.describe().to_string())
 #   - 비결정적 모델이다. README 기준 ~5% 쌍에서 SD>0.1, 중간 점수대 변동이 크다.
 #   - N_REPLICATE 는 CELL 17 gate 결과에 따라 3 또는 5 (깊이 200-500 이면 5회)
 # =============================================================================
+need(((DIR["rf2ppi"]/"input_file").exists(), "CELL 21 을 먼저 돌릴 것"),
+     (have("N_REPLICATE"), "CELL 17 을 먼저 돌릴 것 (replicate 횟수가 gate 결과로 정해진다)"))
 reps = " ".join(str(i) for i in range(1, N_REPLICATE + 1))
 script = f"""
 cd "{DIR['rf2ppi']}"
@@ -1274,6 +1317,7 @@ print(f"\nreplicate {N_REPLICATE}회. GPU {GPU_ID} 사용. 6~15시간 예상.")
 # CELL 23 | Part 6-2. replicate 집계 -> mean/sd 랭킹
 #   컷오프: mean>=0.74 strict(95% precision) / 0.30-0.74 회색지대 / <0.30 배제
 # =============================================================================
+need((done("part6_rf2ppi"), "CELL 22 미완료 — 로그에 DONE_rf2ppi 가 없다"))
 reps_df = []
 for rep in range(1, N_REPLICATE + 1):
     log = DIR["rf2ppi"]/f"input_rep{rep}.log"
@@ -1398,6 +1442,7 @@ print(p.read_text())
 # CELL 26 | Part 7-2. Track B 입력 YAML 생성 — Ni 을 ligand 로 명시
 #   - bait 630 + prey 1200 = 1830 잔기가 24GB 상한 근처. 더 긴 건 제외.
 # =============================================================================
+need((have("TRACK_B", "hdr2seq", "BAIT_ALL"), "CELL 08/12 와 CELL 07 을 먼저 돌릴 것"))
 import yaml
 boltz_in = DIR["boltz"]/"inputs"; boltz_in.mkdir(parents=True, exist_ok=True)
 MAX_B_LEN = 1200
@@ -1445,6 +1490,7 @@ print(f"길이 초과 제외: {len(long_skip)}개  {long_skip[:5]}")
 #     가능하면 Part 4 의 mmseqs MSA 를 a3m 으로 변환해 yaml 의 msa: 필드로 넣는 게 낫다.
 #   - Track A 가 다른 GPU 를 쓰고 있으면 GPU_ID 를 1 로 바꿔 병렬 실행.
 # =============================================================================
+need((len(list((DIR["boltz"]/"inputs").glob("*.yaml"))) > 0, "CELL 26 을 먼저 돌릴 것"))
 BOLTZ_GPU = GPU_ID
 script = f"""
 cd "{DIR['boltz']}"
@@ -1471,6 +1517,7 @@ sh_bg("part7_boltz", script, env=CONDA_ENV_BOLTZ)
 #   ligand_ipTM: Ni 이 두 사슬 경계면에 놓였는가 -> 'Ni 전달 복합체' 시나리오와 부합
 #   ⚠ 설계문서: insertase 는 apo 중간체에 붙을 수 있으니 컷오프를 낮춰 수동 검토할 것
 # =============================================================================
+need((done("part7_boltz"), "CELL 27 미완료 — 로그에 DONE_boltz 가 없다"))
 rows = []
 for f in glob.glob(str(DIR["boltz"]/"out"/"**"/"confidence_*.json"), recursive=True):
     c = json.load(open(f))
