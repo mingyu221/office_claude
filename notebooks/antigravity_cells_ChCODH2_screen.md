@@ -371,6 +371,9 @@ else:
     deps_block = """
 # ---- INSTALL_PY_DEPS=False : 기존 환경의 torch/numpy 를 건드리지 않는다 ----
 command -v hhfilter >/dev/null || conda install -y -c conda-forge -c bioconda hhsuite
+# RF2-PPI 가 직접 import 하는 경량 의존성만 채운다.
+# "numpy<2" 를 함께 적어야 pip 이 numpy 2.x 를 끌어올려 torch 연결을 깨뜨리지 않는다.
+pip install "numpy<2" scipy einops biopython pandas
 python -c "import torch, numpy; print('numpy', numpy.__version__, '| torch', torch.__version__, \
 '| cuda', torch.cuda.is_available()); torch.zeros(3).numpy(); print('numpy<->torch OK')"
 """
