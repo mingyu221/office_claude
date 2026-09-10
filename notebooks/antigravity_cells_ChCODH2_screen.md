@@ -68,8 +68,15 @@ PLAN = """
  CELL 26  입력 YAML 생성 (Ni을 ligand CCD:NI로 명시)
  CELL 27  boltz predict 실행                      (GPU)
  CELL 28  결과 파싱 (ipTM / ligand_ipTM)
+ CELL 28b 계면 검색 — Foldseek-Interface (선택)
+ CELL 28c 계면 일치 표 -> PDB 에 전례가 있는 결합 방식인가
 
- [Part 8] Track C 연계 + 통합
+   ※ Foldseek-Interface 는 PPI 예측 도구가 아니다. 예측된 복합체의 계면을
+     PDB 의 77,167개 계면 클러스터와 대조해 "알려진 결합 방식인가"를 묻는다.
+     ipTM 과 독립적인 축이라 Boltz-2 위양성을 걸러내는 데 쓴다.
+     금속 샤페론 계면(HypA-HypB, UreE-UreG 등)에 걸리면 강한 방증.
+
+[Part 8] Track C 연계 + 통합
  CELL 29  Folddisco 검색 (metal motif / ATP motif)
  CELL 30  ID crosswalk: 구조 tid(UniProt/UniParc) -> GenBank protein ID
  CELL 31  Folddisco 결과 -> folddisco_*_motif.csv 변환
