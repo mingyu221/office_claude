@@ -1483,6 +1483,89 @@ print(B.head(40).to_string(index=False))
 
 ---
 
+## CELL 28b — Part 7e. Foldseek-Interface 검색 (선택, Track B 뒤)
+
+```python
+# =============================================================================
+# CELL 28b | Part 7e. Foldseek-Interface — 예측 복합체의 계면을 PDB 계면과 대조
+#   출처: Strom, Cha, Kim et al. "Foldseek-Interface reveals a protein interface
+#         universe far from complete" (bioRxiv 2026). 저자에 Cameron Gilchrist 포함.
+#   - 이건 PPI 예측 도구가 아니다. 이미 있는 복합체에서 계면 잔기만 뽑아 3Di 로
+#     인코딩하고, PDB 의 77,167개 계면 클러스터와 대조해 "이 계면이 알려진
+#     결합 방식인가"를 묻는다. ipTM 과 독립적인 증거 축이 하나 생긴다.
+#   - 논문의 humanPPI 워크플로(예측 복합체 21,048개 → PDB 계면 검색)와 같은 구조.
+#     다만 해석은 반대다. 그쪽은 hit 없는 것을 "novel"로 봤지만, 우리는
+#     금속 샤페론 계면(HypA-HypB, UreE-UreG, Atx1-Ccc2 등)에 걸리는 쪽이 신호다.
+#   - 전제 2가지: ① 계면 지원 foldseek  ② PDB 계면 대표 DB (Zenodo 22040892)
+# =============================================================================
+FOLDSEEK_BIN = "foldseek"                       # 계면 명령을 지원하는 버전이어야 한다
+PDB_INT_REP  = REFDB.parent / "foldseek_interface" / "PDB_int_rep"   # Zenodo 에서 받아 둘 곳
+IFACE_TM_CUT = 0.4                              # 논문 기준: qTM 또는 tTM >= 0.4 이면 hit
+
+ifc_dir = DIR["boltz"] / "interface"; ifc_dir.mkdir(parents=True, exist_ok=True)
+ok_bin = "multimersearch" in sh(f"{FOLDSEEK_BIN} --help 2>&1 || true", check=False, quiet=True)
+print(f"[{'O' if ok_bin else 'X'}] foldseek 계면 지원")
+print(f"[{'O' if PDB_INT_REP.exists() else 'X'}] PDB 계면 대표 DB  {PDB_INT_REP}")
+
+if not ok_bin:
+    print("\n-> foldseek 를 계면 지원 버전으로 올린다:")
+    print("   conda install -y -c conda-forge -c bioconda 'foldseek>=11'")
+    print("   (또는 https://github.com/steineggerlab/foldseek 최신 바이너리)")
+elif not PDB_INT_REP.exists():
+    print("\n-> PDB 계면 클러스터 자원을 먼저 받는다 (공용이므로 database/ 아래):")
+    print(f"   mkdir -p {PDB_INT_REP.parent} && cd {PDB_INT_REP.parent}")
+    print("   # https://doi.org/10.5281/zenodo.22040892 에서 PDB 계면 대표 DB 내려받기")
+else:
+    cif = sorted(glob.glob(str(DIR["boltz"]/"out"/"**"/"*.cif"), recursive=True))
+    print(f"\nBoltz-2 예측 구조 {len(cif)}개")
+    assert cif, "Boltz-2 출력이 없다. CELL 27 을 먼저 끝낼 것."
+    for f in cif:                                # foldseek 은 디렉터리 단위로 읽는다
+        shutil.copy(f, ifc_dir / Path(f).name)
+    script = f"""
+cd "{ifc_dir}"
+{FOLDSEEK_BIN} createinterfacedb . trackB_intdb
+{FOLDSEEK_BIN} easy-multimersearch trackB_intdb "{PDB_INT_REP}" aln tmp --cov-mode 0
+wc -l aln_report
+echo DONE_interface
+"""
+    sh_bg("part7_interface", script, env=CONDA_ENV_RF2)
+    print("\n검색이 끝나면 CELL 28c 로 결과를 표로 만든다.")
+```
+
+---
+
+## CELL 28c — Part 7f. 계면 일치 표 만들기
+
+```python
+# =============================================================================
+# CELL 28c | Part 7f. Foldseek-Interface 결과 -> prey 별 계면 일치 표
+#   aln_report 컬럼(easy-multimersearch): query target ... qTM tTM ...
+#   논문 기준대로 qTM 또는 tTM >= 0.4 를 hit 로 본다.
+# =============================================================================
+rep = ifc_dir / "aln_report"
+if not rep.exists():
+    print(f"[없음] {rep} — CELL 28b 가 끝났는지 CELL 15 로 확인할 것.")
+    IF = pd.DataFrame(columns=["prey", "iface_tm", "iface_hit"])
+else:
+    A = pd.read_csv(rep, sep="\t", header=None)
+    A.columns = [f"c{i}" for i in range(A.shape[1])]
+    # 6, 7번째 컬럼이 qTM / tTM (humanppi 스크립트의 $6, $7)
+    A["iface_tm"] = A[["c5", "c6"]].max(axis=1)
+    A["prey"] = A.c0.astype(str).apply(lambda x: Path(x).stem.split("__")[-1])
+    IF = (A.groupby("prey", as_index=False)
+            .agg(iface_tm=("iface_tm", "max"), best_pdb=("c1", "first")))
+    IF["iface_hit"] = (IF.iface_tm >= IFACE_TM_CUT).astype(int)
+    IF = IF.sort_values("iface_tm", ascending=False)
+    IF.to_csv(DIR["table"]/"trackB_interface_match.csv", index=False)
+    print(f"계면 검색된 prey {len(IF)}개, PDB 계면과 일치(>= {IFACE_TM_CUT}) {int(IF.iface_hit.sum())}개")
+    print(IF.head(25).to_string(index=False))
+    print("\n[해석] 일치가 있다 = 이 결합 방식이 PDB 에 전례가 있다.")
+    print("       금속 샤페론-표적 계면(HypA-HypB, UreE-UreG, Atx1-Ccc2 등)에 걸리면 강한 방증.")
+    print("       일치가 없다 = 새 계면일 수도, Boltz-2 위양성일 수도 있다. 단독으로는 근거가 약하다.")
+```
+
+---
+
 ## CELL 29 — Part 8a. Folddisco 검색 (Track C)
 
 ```python
@@ -1687,6 +1770,12 @@ W = {"strain": 0.30, "ni": 0.20, "atp": 0.15, "rf2": 0.20, "boltz": 0.15}
 M["strain_flag"] = M.category.isin(["strain-specific", "low-similarity"]).astype(float)
 M["priority"] = (W["strain"]*M.strain_flag + W["ni"]*nz(M.ni_motif) + W["atp"]*nz(M.atp_motif)
                  + W["rf2"]*nz(M.rf2ppi) + W["boltz"]*nz(M.boltz_iptm))
+# Foldseek-Interface (CELL 28b-c). 가중치에는 넣지 않고 참고 열로만 둔다 —
+# 계면 전례 유무는 결합의 증거라기보다 해석의 근거다.
+_ifp = DIR["table"]/"trackB_interface_match.csv"
+M["iface_tm"] = (pd.read_csv(_ifp).set_index("prey")["iface_tm"]
+                 if _ifp.exists() else np.nan)
+
 M["n_evidence"] = ((M.rf2ppi > 0.3).fillna(False).astype(int)
                    + (M.boltz_iptm > 0.6).fillna(False).astype(int)
                    + M.ni_motif.notna().astype(int) + M.atp_motif.notna().astype(int))
