@@ -137,7 +137,8 @@ from pathlib import Path
 BASE      = Path("/mnt/af2results/mingyu/workspace/ppi_discovery")
 TOOLS     = Path("/mnt/af2results/mingyu")      # folddisco 바이너리와 같은 층. 툴은 워크스페이스 밖에 둔다.
 THREADS   = 24
-GPU_ID    = 0
+GPU_ID    = 1          # ★GPU 0 은 디스플레이가 물려 있어 13배 느리다 (예제 47~84s vs 3.5~5s).
+                       #  Track A/B 를 두 GPU 에 나눠 돌릴 때만 0 을 쓴다.
 CONDA_ENV_RF2 = "rf2ppi"
 CONDA_ENV_BOLTZ = "boltz"
 
