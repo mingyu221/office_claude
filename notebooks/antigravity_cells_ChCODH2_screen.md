@@ -115,6 +115,7 @@ PLAN = """
   4. Boltz-2 설치                     -> CELL 25
   5. Bacteria reference proteome DB   -> CELL 13-14
   6. Feasibility gate 결과            -> CELL 16-17
+  7. (선택) 계면 지원 foldseek + PDB 계면 대표 DB(Zenodo) -> CELL 28b
 
 [이미 있는 것 = 재사용]
   - BL21/Y19/MG1655 프로테옴 서열 (GenBank ID)
