@@ -389,6 +389,9 @@ ls -la RF2-PPI.pt
 
 # ---- 예제 실행 (판정은 CELL 04 에서) ----
 cd "{RF2PPI_DIR}/examples"
+# 저장소 버그 보정: segment_pairs_input 이 존재하지 않는 segment_paired_msas_new/ 를
+# 가리킨다. 실제 폴더는 segment_paired_msas/ 이고 expected_output 도 그 경로를 쓴다.
+sed -i 's|segment_paired_msas_new/|segment_paired_msas/|' segment_pairs_input
 python ../src/predict_list_PPI.py -list_fn segment_pairs_input \\
        -model_file ../src/models/RF2-PPI.pt
 echo "=== 설치 스크립트 완료 ==="
@@ -425,17 +428,25 @@ if not log.exists():
               f'-list_fn segment_pairs_input -model_file ../src/models/RF2-PPI.pt')
 
 import pandas as pd
-got = pd.read_csv(log, sep=r"\s+", names=["msa", "prob", "sec"])
-exp_files = list((ex / "expected_output").glob("*.log"))
+def read_rf2_log(path):
+    """RF2-PPI 로그 읽기. 헤더 줄이 있을 수도 없을 수도 있어 숫자 행만 남긴다."""
+    d = pd.read_csv(path, sep=r"\s+", names=["msa", "prob", "sec"])
+    d = d[pd.to_numeric(d.prob, errors="coerce").notna()].copy()
+    d["prob"] = d.prob.astype(float)
+    d["key"] = d.msa.apply(lambda x: Path(x).name)      # 디렉터리 차이는 무시
+    return d
+
+got = read_rf2_log(log)
+exp_files = list((ex / "expected_output").glob("segment*.log"))
 print("=== 예제 실행 결과 ===")
-print(got.head(10).to_string(index=False))
+print(got[["key", "prob"]].to_string(index=False))
 
 if exp_files:
-    expd = pd.read_csv(exp_files[0], sep=r"\s+", names=["msa", "prob", "sec"])
-    m = got.merge(expd, on="msa", suffixes=("_got", "_exp"))
+    expd = read_rf2_log(exp_files[0])
+    m = got.merge(expd, on="key", suffixes=("_got", "_exp"))
     m["diff"] = (m.prob_got - m.prob_exp).abs()
     print("\n=== expected_output 대조 ===")
-    print(m[["msa", "prob_got", "prob_exp", "diff"]].to_string(index=False))
+    print(m[["key", "prob_got", "prob_exp", "diff"]].to_string(index=False))
     ok = (m["diff"] < 0.05).all()
     print(f"\n★체크포인트 1: {'통과' if ok else '실패 — CUDA/torch 버전 점검 필요'}"
           f" (최대 편차 {m['diff'].max():.4f})")
@@ -1179,6 +1190,8 @@ for rep in range(1, N_REPLICATE + 1):
     if not log.exists():
         print(f"[없음] {log}"); continue
     d = pd.read_csv(log, sep=r"\s+", names=["msa","prob","sec"])
+    d = d[pd.to_numeric(d.prob, errors="coerce").notna()].copy()   # 헤더 줄 제거
+    d["prob"] = d.prob.astype(float)
     stem = d.msa.apply(lambda p: Path(p).stem)
     d["bait"] = stem.apply(lambda s: s.split("__")[0])
     d["prey"] = stem.apply(lambda s: s.split("__")[-1])
