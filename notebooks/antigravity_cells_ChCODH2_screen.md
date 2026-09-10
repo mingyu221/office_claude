@@ -172,6 +172,15 @@ def newer(a, b):
     a, b = Path(a), Path(b)
     return a.exists() and b.exists() and a.stat().st_mtime >= b.stat().st_mtime
 
+def already(cond, what, redo=""):
+    """이미 만들어 둔 산출물이 있으면 True 를 돌려준다.
+    노트북을 새로 받아 CELL 01 부터 다시 돌릴 때 무거운 재계산을 건너뛰기 위한 것."""
+    if cond:
+        print(f"[건너뜀] {what} 이(가) 이미 있다.")
+        if redo:
+            print(f"  다시 만들려면: {redo}")
+    return cond
+
 def need(*conds):
     """셀 맨 앞에서 선행조건을 검사한다. 어긋나면 무엇을 먼저 해야 하는지 알리고 멈춘다."""
     bad = [m for ok, m in conds if not ok]
@@ -845,8 +854,13 @@ else:
 #   - 역방향(MG1655->BL21)도 산출한다: MG1655 에만 있는 단백질 = 억제자 후보(rcnAB 등)
 #   - CELL 09 에서 cls_prey 이 로드됐으면 이 셀은 건너뛴다
 # =============================================================================
+_FWD = f"{PREY_STRAIN}_vs_{REF_STRAIN}"
+_REV = f"{REF_STRAIN}_vs_{PREY_STRAIN}"
 if cls_prey is not None:
     print("CELL 09 에서 이미 로드됨 — 이 셀은 건너뜁니다.")
+elif already((DIR["search"]/f"{_FWD}.m8").exists() and (DIR["search"]/f"{_REV}.m8").exists(),
+             "mmseqs 검색 결과 (.m8)", f"rm {DIR['search']}/*_vs_*.m8"):
+    print("  -> CELL 11 로 바로 가면 된다. 30~60분을 아낀다.")
 else:
     fa_prey = PROTEOMES[PREY_STRAIN]["faa"]
     fa_ref  = PROTEOMES[REF_STRAIN]["faa"]
@@ -963,7 +977,10 @@ echo "받은 파일: $(ls fasta | wc -l)"
 du -sh fasta
 echo DONE_download
 """
-sh_bg("part2_download", script)
+_n_fa = len(list((RB/"fasta").glob("*.fasta.gz")))
+if not already(done("part2_download") and _n_fa >= 17000,
+               f"세균 프로테옴 {_n_fa}개", f"rm -rf {RB}/fasta"):
+    sh_bg("part2_download", script)
 print("\n디스크 여유:")
 sh(f'df -h "{REFDB}"', check=False)
 ```
@@ -1006,7 +1023,9 @@ mmseqs createindex bactDB "{DIR['tmp']}/idx" --threads {THREADS} --search-type 1
 ls -la
 echo DONE_bactdb
 """
-sh_bg("part2_bactdb", script, env=CONDA_ENV_RF2)
+if not already(done("part2_bactdb") and (RB/"bactDB").exists(),
+               "bactDB", f"rm -f {RB}/bactDB* {RB}/bacteria_ref.fasta"):
+    sh_bg("part2_bactdb", script, env=CONDA_ENV_RF2)
 ```
 
 ---
@@ -1054,7 +1073,9 @@ mmseqs convertalis baitDB "{RB}/bactDB" "{DIR['search']}/bait_res" "{DIR['search
 wc -l "{DIR['search']}/bait_hits.m8"
 echo DONE_gate
 """
-sh_bg("part3_gate", script, env=CONDA_ENV_RF2)
+if not already(newer(DIR["search"]/"bait_hits.m8", RB/"bactDB"),
+               "bait_hits.m8 (현재 bactDB 기준)", f"rm {DIR['search']}/bait_hits.m8"):
+    sh_bg("part3_gate", script, env=CONDA_ENV_RF2)
 ```
 
 ---
@@ -1167,7 +1188,9 @@ mmseqs convertalis preyDB "{RB}/bactDB" "{DIR['search']}/prey_res" "{DIR['search
 wc -l "{DIR['search']}/prey_hits.m8"
 echo DONE_prey
 """
-sh_bg("part4_prey", script, env=CONDA_ENV_RF2)
+if not already(done("part4_prey") and (DIR["search"]/"prey_hits.m8").exists(),
+               "prey_hits.m8", f"rm {DIR['search']}/prey_hits.m8"):
+    sh_bg("part4_prey", script, env=CONDA_ENV_RF2)
 print("\n※ Track B 는 이 DB 가 필요 없다 — CELL 25~28 을 지금 병렬로 시작할 수 있다.")
 ```
 
@@ -1310,7 +1333,9 @@ done
 ls -la *.log
 echo DONE_rf2ppi
 """
-sh_bg("part6_rf2ppi", script, env=CONDA_ENV_RF2)
+if not already(done("part6_rf2ppi"), "RF2-PPI replicate 결과",
+               f"rm {DIR['rf2ppi']}/input_rep*.log"):
+    sh_bg("part6_rf2ppi", script, env=CONDA_ENV_RF2)
 print(f"\nreplicate {N_REPLICATE}회. GPU {GPU_ID} 사용. 6~15시간 예상.")
 ```
 
@@ -1509,7 +1534,8 @@ CUDA_VISIBLE_DEVICES={BOLTZ_GPU} boltz predict inputs \\
   --num_workers 4
 echo DONE_boltz
 """
-sh_bg("part7_boltz", script, env=CONDA_ENV_BOLTZ)
+if not already(done("part7_boltz"), "Boltz-2 예측 결과", f"rm -rf {DIR['boltz']}/out"):
+    sh_bg("part7_boltz", script, env=CONDA_ENV_BOLTZ)
 ```
 
 ---
