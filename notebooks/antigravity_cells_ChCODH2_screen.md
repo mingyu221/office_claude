@@ -433,8 +433,10 @@ print(p.read_text())
 ```python
 # =============================================================================
 # CELL 04 | Part 0-2. 설치 검증 — 예제 결과가 expected_output 과 일치하는가
-#   ★체크포인트 1: 소수 둘째 자리까지 비슷해야 설치 성공.
-#     크게 다르면 CUDA/torch 버전 문제 -> 여기서 잡고 넘어간다 (뒤에서 못 잡는다)
+#   ★체크포인트 1: 판정 기준은 "값이 똑같은가"가 아니라 "같은 결론이 나오는가"다.
+#     RF2-PPI 는 비결정적이고(README: 약 5% 쌍에서 SD>0.1, 중간 점수대일수록 심함),
+#     expected_output 자체도 평균이 아니라 한 번의 추출값이다.
+#     그래서 (1) 판정 구간(high/gray/low)이 일치하는지, (2) 극단값 쌍이 잘 맞는지로 본다.
 # =============================================================================
 ex = RF2PPI_DIR / "examples"
 assert ex.exists(), f"RF2-PPI 미설치. CELL 03 스크립트를 터미널에서 먼저 실행하세요: {ex}"
@@ -465,9 +467,27 @@ if exp_files:
     m["diff"] = (m.prob_got - m.prob_exp).abs()
     print("\n=== expected_output 대조 ===")
     print(m[["key", "prob_got", "prob_exp", "diff"]].to_string(index=False))
-    ok = (m["diff"] < 0.05).all()
-    print(f"\n★체크포인트 1: {'통과' if ok else '실패 — CUDA/torch 버전 점검 필요'}"
-          f" (최대 편차 {m['diff'].max():.4f})")
+    BIN = lambda x: "high" if x >= 0.74 else ("gray" if x >= 0.30 else "low")
+    m["bin_got"], m["bin_exp"] = m.prob_got.apply(BIN), m.prob_exp.apply(BIN)
+    bins_ok = bool((m.bin_got == m.bin_exp).all())
+
+    # 극단값(확실히 붙거나 확실히 안 붙는 쌍)은 재현성이 높아야 한다
+    ext = m[(m.prob_exp >= 0.74) | (m.prob_exp < 0.15)]
+    ext_ok = bool((ext["diff"] < 0.10).all()) if len(ext) else True
+
+    print(f"\n  판정 구간 일치 : {int((m.bin_got == m.bin_exp).sum())}/{len(m)}")
+    print(f"  극단값 최대 편차: {ext['diff'].max():.4f}" if len(ext) else "  극단값 쌍 없음")
+    print(f"  전체 최대 편차  : {m['diff'].max():.4f}"
+          f"  (중간 점수대의 큰 편차는 문서화된 비결정성이다)")
+    if bins_ok and ext_ok:
+        print("\n★체크포인트 1: 통과 — 설치 정상. CELL 05 로 진행한다.")
+    else:
+        print("\n★체크포인트 1: 실패 — CUDA/torch 버전을 점검한다.")
+        if not bins_ok:
+            print("   판정 구간이 어긋난 쌍:")
+            print(m.loc[m.bin_got != m.bin_exp, ["key","prob_got","prob_exp"]].to_string(index=False))
+        if not ext_ok:
+            print("   극단값 쌍이 0.10 이상 벗어났다 — 이건 비결정성으로 설명되지 않는다.")
 else:
     print("\nexpected_output 을 못 찾음 — 수동 대조 필요")
 ```
