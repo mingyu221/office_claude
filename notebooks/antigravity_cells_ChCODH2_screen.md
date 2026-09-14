@@ -1087,7 +1087,8 @@ need((done("part2_bactdb", RB/"bactDB.index"),
 FMT_ALN = "query,target,fident,evalue,bits,qstart,qend,qlen,tstart,tend,tlen,qaln,taln"
 script = f"""
 cd "{DIR['db']}"
-rm -f baitDB*                      # 재실행 시 기존 DB 와 충돌 방지
+# 재실행 시 mmseqs 가 "exists already!" 로 거부하므로 중간 산출물도 함께 치운다
+rm -f baitDB* "{DIR['search']}"/bait_res*
 mmseqs createdb "{DIR['seq']}/baits.fasta" baitDB
 mmseqs search baitDB "{RB}/bactDB" "{DIR['search']}/bait_res" "{DIR['tmp']}/bs" \\
   -s 7.5 --num-iterations 3 -e 1e-3 --max-seqs 20000 --threads {THREADS}
@@ -1205,7 +1206,7 @@ need(((DIR["seq"]/"prey_trackA.fasta").exists(), "CELL 18 을 먼저 돌릴 것"
 FMT_ALN = "query,target,fident,evalue,bits,qstart,qend,qlen,tstart,tend,tlen,qaln,taln"  # CELL 16 과 동일해야 함
 script = f"""
 cd "{DIR['db']}"
-rm -f preyDB*
+rm -f preyDB* "{DIR['search']}"/prey_res*
 mmseqs createdb "{DIR['seq']}/prey_trackA.fasta" preyDB
 mmseqs search preyDB "{RB}/bactDB" "{DIR['search']}/prey_res" "{DIR['tmp']}/ps" \\
   -s 7.5 --num-iterations 3 -e 1e-3 --max-seqs 20000 --threads {THREADS}
