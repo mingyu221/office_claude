@@ -1497,13 +1497,26 @@ except Exception as e:
 #   - 공진화 불필요. strain-specific 217 + low-sim 125 = 342개가 대상.
 #   - Ni 을 ligand(CCD: NI)로 명시할 수 있는 게 이 문제에서 결정적 장점.
 # =============================================================================
+# pip install boltz 는 cuEquivariance 가속 커널을 안 딸려온다. 그게 없으면
+# triangular_mult 에서 ModuleNotFoundError 로 첫 쌍부터 죽는다. 커널을 끄면
+# (--no_kernels) 돌긴 하지만 중간 텐서를 전부 물어서 쌍당 VRAM 이 23.8GB 로
+# 뛰고, 3090(24.5GB)에서 15% 가 "ran out of memory, skipping batch" 로
+# 조용히 버려진다. 그래서 커널은 선택이 아니라 필수다.
+#   ops 휠은 torch 의 CUDA 메이저 버전과 맞춰야 한다 (cu13 빌드면 -cu13).
 boltz_sh = f"""
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda create -y -n {CONDA_ENV_BOLTZ} python=3.11
 conda activate {CONDA_ENV_BOLTZ}
 pip install boltz -U
 pip install pyyaml pandas
+
+# torch 가 어느 CUDA 로 빌드됐는지 보고 맞는 ops 휠을 고른다
+CU=$(python -c "import torch;print(torch.version.cuda.split('.')[0])")
+echo "torch CUDA major = $CU"
+pip install cuequivariance-torch "cuequivariance-ops-torch-cu${{CU}}"
+
 python -c "import boltz; print('boltz ok')"
+python -c "from cuequivariance_torch.primitives.triangle import triangle_multiplicative_update; print('kernel ok')"
 """
 p = DIR["script"] / "install_boltz.sh"
 p.write_text("#!/usr/bin/env bash\nset -euo pipefail\n" + textwrap.dedent(boltz_sh))
@@ -1570,24 +1583,31 @@ print(f"길이 초과 제외: {len(long_skip)}개  {long_skip[:5]}")
 #   - Track A 가 다른 GPU 를 쓰고 있으면 GPU_ID 를 1 로 바꿔 병렬 실행.
 # =============================================================================
 need((len(list((DIR["boltz"]/"inputs").glob("*.yaml"))) > 0, "CELL 26 을 먼저 돌릴 것"))
-BOLTZ_GPU = GPU_ID
+BOLTZ_GPU   = GPU_ID
+BOLTZ_MAXMSA = 2048     # 기본 8192. VRAM 을 가장 크게 좌우한다 (아래 설명)
 
-# pip install boltz 는 cuequivariance_torch 를 안 깐다. 그게 없으면
-# triangular_mult 커널에서 ModuleNotFoundError 로 즉사한다.
-# 이 환경의 torch 는 CUDA 13 빌드라 cu12 용 cuequivariance ops 와 안 맞으므로
-# 가속 커널을 끄고 순수 PyTorch 경로로 돈다 (조금 느리지만 결과는 동일).
-BOLTZ_NO_KERNELS = True
-_nk = "  --no_kernels \\\n" if BOLTZ_NO_KERNELS else ""
+# ---- VRAM 튜닝 근거 (RTX 3090 24.5GB, bait 636 + prey <=1200 = 최대 1836 토큰) ----
+# 실측 3단계:
+#   1) --no_kernels (커널 없이)      쌍당 23.8GB -> 15% 가 OOM 으로 버려짐
+#   2) cuEquivariance 커널 켬         쌍당 20.2GB -> 그래도 일부 OOM
+#   3) + --max_msa_seqs 2048          MSA 텐서가 1/4 로
+# (2)에서 실패한 할당이 4.24GB 였는데 MSA 표현 크기와 일치한다:
+#   8192(깊이) x 1836(토큰) x 64(채널) x 4바이트 = 3.85GB  -> 2048 이면 0.96GB
+# Boltz 는 OOM 이 나면 예외를 던지지 않고 그 쌍을 버린다
+# ("WARNING: ran out of memory, skipping batch"). 결과만 조용히 줄어드니
+# 끝난 뒤 반드시 입력 개수와 산출 개수를 대조할 것 (CELL 28 이 한다).
 
 script = f"""
 cd "{DIR['boltz']}"
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True   # 할당자 단편화 완화
 CUDA_VISIBLE_DEVICES={BOLTZ_GPU} boltz predict inputs \\
   --out_dir out \\
   --use_msa_server \\
-{_nk}  --recycling_steps 3 \\
+  --max_msa_seqs {BOLTZ_MAXMSA} \\
+  --recycling_steps 3 \\
   --diffusion_samples 1 \\
   --output_format mmcif \\
-  --num_workers 4
+  --num_workers 2
 echo DONE_boltz
 """
 
@@ -1598,8 +1618,15 @@ _n_in  = len(list((DIR["boltz"]/"inputs").glob("*.yaml")))
 _n_out = len(list((DIR["boltz"]/"out").rglob("*_model_0.cif")))
 print(f"입력 {_n_in}개 / 예측 완료 {_n_out}개")
 
-_finished = done("part7_boltz") or (_n_in > 0 and _n_out >= _n_in)
-if not already(_finished, "Boltz-2 예측 결과", f"rm -rf {DIR['boltz']}/out"):
+# 이미 돌고 있는 프로세스가 있는데 또 띄우면 같은 GPU 에 두 개가 붙어 즉시 OOM 이다.
+_busy = subprocess.run("pgrep -f 'boltz predict'", shell=True,
+                       capture_output=True, text=True).stdout.split()
+if _busy:
+    print(f"⚠ 이미 boltz 가 돌고 있다 (pid {' '.join(_busy)}). 새로 띄우지 않았다.")
+    print("  설정을 바꿔 다시 돌리려면 먼저:  pkill -9 -f 'boltz predict'")
+    print("  (Boltz 는 이미 끝낸 쌍을 건너뛰므로 재시작 비용은 작다)")
+elif not already(done("part7_boltz") or (_n_in > 0 and _n_out >= _n_in),
+                 "Boltz-2 예측 결과", f"rm -rf {DIR['boltz']}/out"):
     sh_bg("part7_boltz", script, env=CONDA_ENV_BOLTZ)
 ```
 
@@ -1630,6 +1657,20 @@ if len(B):
     B["desc"] = B.prey.map(lambda i: hdr2desc.get(i, "")[:70])
 B.to_csv(DIR["table"]/"trackB_boltz2_ranked.csv", index=False)
 print(f"파싱 {len(B)}건")
+
+# Boltz 는 VRAM 이 모자라면 예외 없이 그 쌍을 버린다 ("skipping batch").
+# 결과만 조용히 줄어드므로 입력과 대조해 누락을 드러낸다.
+_want = {f.stem for f in (DIR["boltz"]/"inputs").glob("*.yaml")}
+_miss = sorted(_want - set(B.pair)) if len(B) else sorted(_want)
+if _miss:
+    print(f"\n⚠ 누락 {len(_miss)}/{len(_want)}건 — OOM 으로 버려졌을 가능성이 높다.")
+    print("  로그에서 확인:  grep -c 'skipping batch' result/log/part7_boltz.log")
+    print(f"  회수: CELL 27 의 BOLTZ_MAXMSA 를 1024 로 낮춰 다시 돌린다")
+    print("        (이미 끝난 쌍은 건너뛰므로 누락분만 계산한다)")
+    print("  누락 예시:", _miss[:5])
+else:
+    print("누락 없음 — 입력 전량이 예측됐다.")
+
 print(B.head(40).to_string(index=False))
 ```
 
