@@ -1186,7 +1186,9 @@ if not already(newer(DIR["search"]/"bait_hits.m8", RB/"bactDB"),
 #   <200  : Track A 포기, Track B(CELL 25~)에 자원 집중
 # =============================================================================
 need(((DIR["search"]/"bait_hits.m8").exists(), "CELL 16 을 먼저 돌릴 것"),
-     (done("part3_gate"),
+     # 로그의 DONE_ 표시만 보면, 로그를 치운 뒤에는 멀쩡한 결과를 두고도 막힌다.
+     # 산출물이 더 믿을 만한 증거다 (CELL 14 에서 같은 이유로 한 번 막혔다).
+     (done("part3_gate", DIR["search"]/"bait_hits.m8"),
       "CELL 16 검색이 아직 돌고 있다 — CELL 15 에서 DONE_gate 를 확인한 뒤 다시 실행할 것 (1~2분)"),
      (newer(DIR["search"]/"bait_hits.m8", RB/"bactDB"),
       "bait_hits.m8 이 bactDB 보다 오래됐다 — 옛 DB 로 검색한 결과다. CELL 16 을 다시 돌릴 것"))
