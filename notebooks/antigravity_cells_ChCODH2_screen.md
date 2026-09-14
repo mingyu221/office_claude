@@ -1841,8 +1841,14 @@ print("\n기존 run01 결과:", [p.name for p in prev])
 #          정확하지만 9,000여 파일을 읽어 수 분 걸리고, isoform/부분서열은 놓친다.
 # =============================================================================
 XWALK_CSV = DIR["table"]/"id_crosswalk_struct_to_genbank.csv"
-XLSX      = DIR["external"]/"structure_accessions.xlsx"
 import pandas as pd
+
+# 대응표는 워크스페이스 안(external/)에 둘 수도, 구조 DB 옆에 둘 수도 있다.
+# 파일명 접두사도 제각각이라 두 자리를 다 훑는다.
+_XLSX_DIRS = [DIR["external"], TOOLS/"database"/"bacteriaDB", TOOLS/"database"]
+XLSX = next((f for d in _XLSX_DIRS if d.exists()
+             for f in sorted(d.glob("*structure_accessions*.xlsx"))), None)
+print("대응표:", XLSX if XLSX else f"없음 (찾은 자리: {[str(d) for d in _XLSX_DIRS]})")
 
 def xwalk_from_xlsx(path):
     """대응표에서 accession -> GenBank 사전을 만든다 (구조 파일을 안 읽는다)."""
@@ -1875,7 +1881,7 @@ if XWALK_CSV.exists():
     XW = pd.read_csv(XWALK_CSV)
     print("캐시 로드:", XWALK_CSV, len(XW), "행")
 
-elif XLSX.exists():
+elif XLSX is not None:
     acc2gb = {}
     for r in xwalk_from_xlsx(XLSX).itertuples(index=False):
         acc2gb[r.acc] = (r.protein, r.matched_strain)
@@ -1897,8 +1903,8 @@ elif XLSX.exists():
     print("저장:", XWALK_CSV)
 
 else:
-    print(f"[대응표 없음] {XLSX}")
-    print("  협업팀이 준 structure_accessions.xlsx 를 위 경로에 두면 즉시 끝난다.")
+    print("[대응표 없음]")
+    print(f"  협업팀이 준 *structure_accessions*.xlsx 를 {DIR['external']} 에 두면 즉시 끝난다.")
     print("  없으면 구조 서열을 직접 읽어 매칭한다 (9,000여 파일, 수 분).")
     seq2gb = {}
     for strain in ["BL21DE3", "Y19", "MG1655"]:
