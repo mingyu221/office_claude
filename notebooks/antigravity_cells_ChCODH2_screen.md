@@ -1910,6 +1910,11 @@ else:
     for strain in ["BL21DE3", "Y19", "MG1655"]:
         for pid, sq in PROTEOMES.get(strain, {}).get("seqs", {}).items():
             seq2gb.setdefault(sq.rstrip("*"), (pid, strain))
+    # 이 사전은 CELL 08 이 채운다. 비어 있는데 그냥 진행하면 9,000여 파일을 수 분간
+    # 읽고도 매칭 0건이 나오고, 그 0건이 캐시로 저장돼 이후 셀이 전부 빈손이 된다.
+    # 실측으로 한 번 당했다 (CELL 01 -> 29 -> 30 으로 건너뛴 경우).
+    need((bool(seq2gb), "CELL 08 을 먼저 돌릴 것 — 비교할 프로테옴 서열이 메모리에 없다"))
+    print(f"비교 대상 서열 {len(seq2gb)}개")
 
     def struct_seq(path):
         """cif/pdb 에서 첫 체인의 CA 기준 서열."""
@@ -1965,6 +1970,11 @@ if len(XW):
 # CELL 31 | Part 8-3. Folddisco TSV -> Part 8 이 기대하는 (protein, score) CSV 로 변환
 #   - score 는 idf 를 기본으로 쓰고, min_rmsd 는 낮을수록 좋으므로 역수로 보정 결합
 # =============================================================================
+# FD_METAL / FD_ATP 는 CELL 29 가 메모리에 올린다. tsv 파일이 디스크에 남아 있어도
+# 커널을 새로 띄웠으면 변수는 없다 — 그냥 두면 NameError 로 끝난다.
+need((have("XW"), "CELL 30 을 먼저 돌릴 것"),
+     (have("FD_METAL", "FD_ATP"), "CELL 29 를 먼저 돌릴 것 (tsv 가 있어도 커널에 변수가 없다)"))
+
 xw_map = XW.dropna(subset=["protein"]).set_index("tid")["protein"].to_dict() if len(XW) else {}
 
 def fd_to_csv(tsv_paths, out_csv, score_col="idf"):
