@@ -131,67 +131,8 @@ PLAN = """
 print(PLAN)
 
 
-def stage():
-    """커널 재시작 후 어디까지 돼 있는지 확인하고 다음에 돌릴 셀을 알려준다."""
-    g = globals()
-    steps = [
-        ("CELL 05-07  bait 서열",        "BAIT_ALL"),
-        ("CELL 08     프로테옴 로드",     "hdr2seq"),
-        ("CELL 09/11  4-category 분류",  "cls_prey"),
-        ("CELL 12     Track A/B 배정",   "TRACK_A"),
-        ("CELL 17     feasibility gate", "BAIT_DEPTH"),
-        ("CELL 18     prey FASTA",       "sel"),
-        ("CELL 20     best-hit 정리",     "PREY_MSA"),
-        ("CELL 21     paired MSA",       "sdf"),
-        ("CELL 23     RF2-PPI 집계",      "R_best"),
-        ("CELL 28     Boltz 파싱",        "B"),
-        ("CELL 30     ID crosswalk",     "XW"),
-    ]
-    nxt = None
-    for label, var in steps:
-        ok = var in g and g[var] is not None
-        print(f"  [{'O' if ok else ' '}] {label}")
-        if not ok and nxt is None:
-            nxt = label
-    print(f"\n  -> 다음에 돌릴 것: {nxt}" if nxt else "\n  -> 전부 완료")
-
-# 커널을 재시작했거나 어디까지 돌았는지 헷갈릴 때 아무 셀에서나 stage() 를 부르면 된다.
-
-def done(job, *artifacts):
-    """작업이 끝났는가. 로그의 DONE_ 표시가 1순위,
-    없으면 산출물 존재로 판정한다. 로그는 재실행 때 덮어써지므로
-    산출물이 더 믿을 만한 증거다 (실측: 다운로드를 다시 눌렀다 끊어
-    DONE_download 가 사라졌는데 파일 17,992개는 멀쩡했다)."""
-    lg = DIR["log"] / f"{job}.log"
-    if lg.exists() and "DONE_" in lg.read_text(errors="ignore")[-4000:]:
-        return True
-    return bool(artifacts) and all(Path(a).exists() for a in artifacts)
-
-def have(*names):
-    """앞 셀이 만든 변수가 살아 있는가 (커널 재시작 후 확인용)."""
-    g = globals()
-    return all(n in g and g[n] is not None for n in names)
-
-def newer(a, b):
-    """a 가 b 보다 나중에 만들어졌는가. 오래된 DB 로 검색한 결과를 걸러낸다."""
-    a, b = Path(a), Path(b)
-    return a.exists() and b.exists() and a.stat().st_mtime >= b.stat().st_mtime
-
-def already(cond, what, redo=""):
-    """이미 만들어 둔 산출물이 있으면 True 를 돌려준다.
-    노트북을 새로 받아 CELL 01 부터 다시 돌릴 때 무거운 재계산을 건너뛰기 위한 것."""
-    if cond:
-        print(f"[건너뜀] {what} 이(가) 이미 있다.")
-        if redo:
-            print(f"  다시 만들려면: {redo}")
-    return cond
-
-def need(*conds):
-    """셀 맨 앞에서 선행조건을 검사한다. 어긋나면 무엇을 먼저 해야 하는지 알리고 멈춘다."""
-    bad = [m for ok, m in conds if not ok]
-    if bad:
-        raise RuntimeError("선행조건 미충족 — 아래를 먼저 해결할 것:\n  - " + "\n  - ".join(bad))
-    print("[선행조건 OK]")
+# 진행 상태 확인과 선행조건 검사 함수는 CELL 01 에 있다 (stage(), need(), already()).
+# 커널 재시작 후 어디까지 됐는지 보려면 CELL 01 을 돌린 뒤 stage() 를 부른다.
 ```
 
 ---
@@ -337,6 +278,68 @@ def bg_tail(name, n=40):
     else:
         print("(로그 없음)")
     return alive
+
+def stage():
+    """커널 재시작 후 어디까지 돼 있는지 확인하고 다음에 돌릴 셀을 알려준다."""
+    g = globals()
+    steps = [
+        ("CELL 05-07  bait 서열",        "BAIT_ALL"),
+        ("CELL 08     프로테옴 로드",     "hdr2seq"),
+        ("CELL 09/11  4-category 분류",  "cls_prey"),
+        ("CELL 12     Track A/B 배정",   "TRACK_A"),
+        ("CELL 17     feasibility gate", "BAIT_DEPTH"),
+        ("CELL 18     prey FASTA",       "sel"),
+        ("CELL 20     best-hit 정리",     "PREY_MSA"),
+        ("CELL 21     paired MSA",       "sdf"),
+        ("CELL 23     RF2-PPI 집계",      "R_best"),
+        ("CELL 28     Boltz 파싱",        "B"),
+        ("CELL 30     ID crosswalk",     "XW"),
+    ]
+    nxt = None
+    for label, var in steps:
+        ok = var in g and g[var] is not None
+        print(f"  [{'O' if ok else ' '}] {label}")
+        if not ok and nxt is None:
+            nxt = label
+    print(f"\n  -> 다음에 돌릴 것: {nxt}" if nxt else "\n  -> 전부 완료")
+
+# 커널을 재시작했거나 어디까지 돌았는지 헷갈릴 때 아무 셀에서나 stage() 를 부르면 된다.
+
+def done(job, *artifacts):
+    """작업이 끝났는가. 로그의 DONE_ 표시가 1순위,
+    없으면 산출물 존재로 판정한다. 로그는 재실행 때 덮어써지므로
+    산출물이 더 믿을 만한 증거다 (실측: 다운로드를 다시 눌렀다 끊어
+    DONE_download 가 사라졌는데 파일 17,992개는 멀쩡했다)."""
+    lg = DIR["log"] / f"{job}.log"
+    if lg.exists() and "DONE_" in lg.read_text(errors="ignore")[-4000:]:
+        return True
+    return bool(artifacts) and all(Path(a).exists() for a in artifacts)
+
+def have(*names):
+    """앞 셀이 만든 변수가 살아 있는가 (커널 재시작 후 확인용)."""
+    g = globals()
+    return all(n in g and g[n] is not None for n in names)
+
+def newer(a, b):
+    """a 가 b 보다 나중에 만들어졌는가. 오래된 DB 로 검색한 결과를 걸러낸다."""
+    a, b = Path(a), Path(b)
+    return a.exists() and b.exists() and a.stat().st_mtime >= b.stat().st_mtime
+
+def already(cond, what, redo=""):
+    """이미 만들어 둔 산출물이 있으면 True 를 돌려준다.
+    노트북을 새로 받아 CELL 01 부터 다시 돌릴 때 무거운 재계산을 건너뛰기 위한 것."""
+    if cond:
+        print(f"[건너뜀] {what} 이(가) 이미 있다.")
+        if redo:
+            print(f"  다시 만들려면: {redo}")
+    return cond
+
+def need(*conds):
+    """셀 맨 앞에서 선행조건을 검사한다. 어긋나면 무엇을 먼저 해야 하는지 알리고 멈춘다."""
+    bad = [m for ok, m in conds if not ok]
+    if bad:
+        raise RuntimeError("선행조건 미충족 — 아래를 먼저 해결할 것:\n  - " + "\n  - ".join(bad))
+    print("[선행조건 OK]")
 
 def conda_run(env, cmd, cwd=None, check=True):
     """지정 conda 환경에서 포그라운드 실행."""
