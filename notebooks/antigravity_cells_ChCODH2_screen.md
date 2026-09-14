@@ -1619,7 +1619,10 @@ _n_out = len(list((DIR["boltz"]/"out").rglob("*_model_0.cif")))
 print(f"입력 {_n_in}개 / 예측 완료 {_n_out}개")
 
 # 이미 돌고 있는 프로세스가 있는데 또 띄우면 같은 GPU 에 두 개가 붙어 즉시 OOM 이다.
-_busy = subprocess.run("pgrep -f 'boltz predict'", shell=True,
+# 패턴을 "[b]oltz" 로 쓰는 이유: shell=True 가 띄우는 sh 의 cmdline 에도 검색어가
+# 그대로 들어가서, 평범하게 쓰면 pgrep 이 자기 자신을 잡아 항상 "돌고 있다"가 된다.
+# 대괄호는 정규식으로는 boltz 와 매칭되지만 문자열로는 달라 자기 매칭을 피한다.
+_busy = subprocess.run("pgrep -f '[b]oltz predict'", shell=True,
                        capture_output=True, text=True).stdout.split()
 if _busy:
     print(f"⚠ 이미 boltz 가 돌고 있다 (pid {' '.join(_busy)}). 새로 띄우지 않았다.")
