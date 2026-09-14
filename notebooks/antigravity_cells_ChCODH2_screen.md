@@ -1830,36 +1830,97 @@ print("\n기존 run01 결과:", [p.name for p in prev])
 # =============================================================================
 # CELL 30 | Part 8-2. ★ID crosswalk — Folddisco tid 를 GenBank ID 에 붙인다
 #   문제: 구조 파일명이 AF-<UniProtID>-F1-model_v6.cif / cf_<UniParcID>.pdb 인데
-#         우리 분류·프로테옴은 GenBank ID (QZI…, AAC…) 라 그냥은 조인이 안 된다.
-#   해법: 구조 파일에서 CA 기준 서열을 뽑아 프로테옴 서열과 "완전일치" 매칭 (오프라인·정확)
-#   - 5,000여 개 파싱에 수 분. 결과는 CSV 로 캐시하므로 한 번만 돌리면 된다.
+#         우리 분류·프로테옴은 GenBank ID (QJZ…, AKE…) 라 그냥은 조인이 안 된다.
+#   1순위: 구조 DB 를 만든 쪽이 준 대응표 structure_accessions.xlsx
+#          - 시트당 UniParc / UniProtKB / Genbank / Selected structure / AFDB index
+#          - "Selected structure" 가 AF 파일명의 accession. AFDB 에 없어 ColabFold 로
+#            직접 예측한 것은 그 칸이 "ColabFold predicted" 이고 UniParc 로 식별된다.
+#          - 실측: BL21 3,846 AF + 250 CF = 4,096 / Y19 5,262 AF + 21 CF = 5,283.
+#            키가 전부 1:1 이라 손실이 없다.
+#   2순위(대응표가 없을 때): 구조 파일에서 CA 서열을 뽑아 프로테옴과 완전일치 매칭.
+#          정확하지만 9,000여 파일을 읽어 수 분 걸리고, isoform/부분서열은 놓친다.
 # =============================================================================
 XWALK_CSV = DIR["table"]/"id_crosswalk_struct_to_genbank.csv"
+XLSX      = DIR["external"]/"structure_accessions.xlsx"
+import pandas as pd
 
-def struct_seq(path):
-    """cif/pdb 에서 첫 체인의 CA 기준 서열."""
-    txt = Path(path).read_text(errors="ignore")
-    if path.suffix == ".cif":
-        seq, seen = [], set()
-        for line in txt.splitlines():
-            if not line.startswith("ATOM"): continue
-            f = line.split()
-            if len(f) < 9 or f[3] != "CA": continue
-            key = (f[6], f[8]) if len(f) > 8 else (f[6],)
-            if key in seen: continue
-            seen.add(key); seq.append(AA3to1.get(f[5], "X"))
-        return "".join(seq)
-    chains, _ = pdb_chain_seqs(path)
-    return max(chains.values(), key=len) if chains else ""
+def xwalk_from_xlsx(path):
+    """대응표에서 accession -> GenBank 사전을 만든다 (구조 파일을 안 읽는다)."""
+    frames = []
+    for sheet in pd.ExcelFile(path).sheet_names:
+        d = pd.read_excel(path, sheet_name=sheet)
+        tag = ("BL21" if "UP000503272" in sheet else
+               "Y19"  if "UP000034085" in sheet else sheet.strip())
+        sel   = d["Selected structure"].astype(str).str.strip()
+        is_cf = sel.str.contains("ColabFold", case=False, na=False)
+        frames.append(pd.DataFrame({
+            "db":       tag,
+            "acc_type": is_cf.map({True: "UniParc", False: "UniProt"}),
+            # ColabFold 로 예측한 것은 Selected structure 가 accession 이 아니라
+            # 안내 문구다. 그 행은 UniParc 로 파일명(cf_<UniParc>.pdb)과 맞춘다.
+            "acc":      sel.where(~is_cf, d["UniParc accession"].astype(str).str.strip()),
+            "protein":  d["Genbank"].astype(str).str.strip(),
+            "matched_strain": {"BL21": "BL21DE3"}.get(tag, tag),
+        }))
+    return pd.concat(frames, ignore_index=True)
+
+def tid_to_acc(tid):
+    """구조 파일 stem 에서 accession 을 뽑는다."""
+    m = re.match(r"AF-([A-Z0-9]+)-F\d+", tid)
+    if m:              return "UniProt", m.group(1)
+    if tid.startswith("cf_"): return "UniParc", tid[3:]
+    return "unknown", tid
 
 if XWALK_CSV.exists():
     XW = pd.read_csv(XWALK_CSV)
     print("캐시 로드:", XWALK_CSV, len(XW), "행")
+
+elif XLSX.exists():
+    acc2gb = {}
+    for r in xwalk_from_xlsx(XLSX).itertuples(index=False):
+        acc2gb[r.acc] = (r.protein, r.matched_strain)
+    print(f"대응표 로드: {XLSX.name}  accession {len(acc2gb)}개")
+
+    rows = []
+    for tag, d in [("BL21", ASSET["struct_bl21"]), ("Y19", ASSET["struct_y19"])]:
+        if not d.exists():
+            print("[없음]", d); continue
+        files = sorted(list(d.glob("*.cif")) + list(d.glob("*.pdb")))
+        for f in files:                       # 파일명만 본다 — 내용을 안 읽으니 즉시 끝난다
+            acc_type, acc = tid_to_acc(f.stem)
+            gb, strain = acc2gb.get(acc, (None, None))
+            rows.append({"tid": f.stem, "db": tag, "acc_type": acc_type, "acc": acc,
+                         "protein": gb, "matched_strain": strain})
+        print(f"  {tag}: 구조 {len(files)}개")
+    XW = pd.DataFrame(rows)
+    XW.to_csv(XWALK_CSV, index=False)
+    print("저장:", XWALK_CSV)
+
 else:
+    print(f"[대응표 없음] {XLSX}")
+    print("  협업팀이 준 structure_accessions.xlsx 를 위 경로에 두면 즉시 끝난다.")
+    print("  없으면 구조 서열을 직접 읽어 매칭한다 (9,000여 파일, 수 분).")
     seq2gb = {}
     for strain in ["BL21DE3", "Y19", "MG1655"]:
-        for pid, s in PROTEOMES.get(strain, {}).get("seqs", {}).items():
-            seq2gb.setdefault(s.rstrip("*"), (pid, strain))
+        for pid, sq in PROTEOMES.get(strain, {}).get("seqs", {}).items():
+            seq2gb.setdefault(sq.rstrip("*"), (pid, strain))
+
+    def struct_seq(path):
+        """cif/pdb 에서 첫 체인의 CA 기준 서열."""
+        txt = Path(path).read_text(errors="ignore")
+        if path.suffix == ".cif":
+            seq, seen = [], set()
+            for line in txt.splitlines():
+                if not line.startswith("ATOM"): continue
+                f = line.split()
+                if len(f) < 9 or f[3] != "CA": continue
+                key = (f[6], f[8]) if len(f) > 8 else (f[6],)
+                if key in seen: continue
+                seen.add(key); seq.append(AA3to1.get(f[5], "X"))
+            return "".join(seq)
+        chains, _ = pdb_chain_seqs(path)
+        return max(chains.values(), key=len) if chains else ""
+
     rows = []
     for tag, d in [("BL21", ASSET["struct_bl21"]), ("Y19", ASSET["struct_y19"])]:
         if not d.exists():
@@ -1868,14 +1929,11 @@ else:
         print(f"{tag}: {len(files)} 구조 파싱 중...")
         for i, f in enumerate(files):
             if i and i % 1000 == 0: print(f"  {i}/{len(files)}")
-            tid = f.stem
-            m = re.match(r"AF-([A-Z0-9]+)-F\d+", tid)
-            acc_type, acc = ("UniProt", m.group(1)) if m else (
-                ("UniParc", tid[3:]) if tid.startswith("cf_") else ("unknown", tid))
-            s = struct_seq(f)
-            gb, strain = seq2gb.get(s, (None, None))
-            rows.append({"tid": tid, "db": tag, "acc_type": acc_type, "acc": acc,
-                         "struct_len": len(s), "protein": gb, "matched_strain": strain})
+            acc_type, acc = tid_to_acc(f.stem)
+            sq = struct_seq(f)
+            gb, strain = seq2gb.get(sq, (None, None))
+            rows.append({"tid": f.stem, "db": tag, "acc_type": acc_type, "acc": acc,
+                         "struct_len": len(sq), "protein": gb, "matched_strain": strain})
     XW = pd.DataFrame(rows)
     XW.to_csv(XWALK_CSV, index=False)
     print("저장:", XWALK_CSV)
@@ -1884,9 +1942,12 @@ if len(XW):
     hit = XW.protein.notna().mean()
     print(f"\n매칭률 {hit:.1%}  ({XW.protein.notna().sum()}/{len(XW)})")
     print(XW.groupby(["db","acc_type"]).agg(n=("tid","size"),
-                                            matched=("protein", lambda s: s.notna().sum())).to_string())
-    print("\n미매칭이 많으면: 구조가 isoform/부분서열이거나 프로테옴 버전이 다른 것.")
-    print("  -> UniProt idmapping API (UniProtKB_AC-ID -> EMBL-GenBank-DDBJ_CDS) 로 보완 가능")
+                                            matched=("protein", lambda x: x.notna().sum())).to_string())
+    if hit < 0.99:
+        print("\n미매칭이 남으면: 구조가 isoform/부분서열이거나 프로테옴 버전이 다른 것.")
+        print("  -> UniProt idmapping API (UniProtKB_AC-ID -> EMBL-GenBank-DDBJ_CDS) 로 보완 가능")
+    print("\n※ MG1655 는 공식 배포 인덱스라 구조 파일이 우리 DB 에 없다 -> crosswalk 대상이 아니다.")
+    print("   CELL 31 에서 MG1655 매칭 0건은 정상이며, 비교용으로만 본다.")
 ```
 
 ---
