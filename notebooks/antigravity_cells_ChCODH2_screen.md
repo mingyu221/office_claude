@@ -1917,8 +1917,13 @@ def fd_to_csv(tsv_paths, out_csv, score_col="idf"):
             sc = sc * (1.0 / (1.0 + d["min_rmsd"].astype(float)))
         d["score"] = sc
         d["strain"] = strain
+        # nres/plddt 는 여기서 거르지 않고 그대로 들고 간다. Folddisco 는 --sort-by idf
+        # 로 "희귀한" 기하를 위로 올리는데, AlphaFold DB 에서 희귀한 기하는 드문 기능이
+        # 아니라 엉망으로 예측된 단편인 경우가 많다 (실측: idf 1위가 nres=44, plddt=56.7).
+        # 판단은 CELL 32 통합 단계에서 하되, 판단 근거는 detail CSV 에 남겨둔다.
         frames.append(d[["protein","score","strain","tid","tid_stem"] +
-                        [c for c in ["idf","min_rmsd","plddt","matching_residues"] if c in d.columns]])
+                        [c for c in ["idf","min_rmsd","nres","plddt","matching_residues"]
+                         if c in d.columns]])
     if not frames:
         print("변환할 결과 없음"); return pd.DataFrame(columns=["protein","score"])
     A = pd.concat(frames)
