@@ -1618,6 +1618,21 @@ _n_in  = len(list((DIR["boltz"]/"inputs").glob("*.yaml")))
 _n_out = len(list((DIR["boltz"]/"out").rglob("*_model_0.cif")))
 print(f"입력 {_n_in}개 / 예측 완료 {_n_out}개")
 
+# ---- BOLTZ_MAXMSA 가 실제로 반영되는지 검사 -------------------------------
+# 함정: --max_msa_seqs 는 추론이 아니라 "전처리" 단계에서 적용된다. a3m 을 읽어
+# processed/ 밑에 npz 로 구울 때 깊이를 자른다. 그래서 이전 전처리 결과가 남아
+# 있으면 ("All inputs are already processed.") 값을 바꿔도 조용히 무시되고
+# VRAM 도 안 줄어든다. 실측으로 한 번 당했다.
+_proc = DIR["boltz"]/"out"/"boltz_results_inputs"/"processed"
+_mark = DIR["boltz"]/".maxmsa"
+_prev = _mark.read_text().strip() if _mark.exists() else None
+if _proc.exists() and _prev != str(BOLTZ_MAXMSA):
+    _was = f"max_msa_seqs={_prev}" if _prev else "알 수 없는 max_msa_seqs"
+    print(f"\n⚠ 기존 전처리({_was})가 남아 있어 BOLTZ_MAXMSA={BOLTZ_MAXMSA} 이 무시된다.")
+    print(f"  적용하려면 전처리만 지울 것:  rm -rf {_proc}")
+    print(f"  (형제 디렉터리 msa/ 는 ColabFold 에서 받은 a3m 이다. 남겨두면 서버에 다시 안 물어본다)")
+    print(f"  깊이를 통일하려면 predictions/ 도 함께 지운다 — 섞이면 ipTM 비교가 불공정해진다.")
+
 # 이미 돌고 있는 프로세스가 있는데 또 띄우면 같은 GPU 에 두 개가 붙어 즉시 OOM 이다.
 # 패턴을 "[b]oltz" 로 쓰는 이유: shell=True 가 띄우는 sh 의 cmdline 에도 검색어가
 # 그대로 들어가서, 평범하게 쓰면 pgrep 이 자기 자신을 잡아 항상 "돌고 있다"가 된다.
@@ -1630,6 +1645,7 @@ if _busy:
     print("  (Boltz 는 이미 끝낸 쌍을 건너뛰므로 재시작 비용은 작다)")
 elif not already(done("part7_boltz") or (_n_in > 0 and _n_out >= _n_in),
                  "Boltz-2 예측 결과", f"rm -rf {DIR['boltz']}/out"):
+    _mark.write_text(str(BOLTZ_MAXMSA))   # 다음 실행 때 깊이가 바뀌었는지 비교하려고
     sh_bg("part7_boltz", script, env=CONDA_ENV_BOLTZ)
 ```
 
