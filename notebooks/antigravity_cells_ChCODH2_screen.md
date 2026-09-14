@@ -1558,18 +1558,35 @@ print(f"길이 초과 제외: {len(long_skip)}개  {long_skip[:5]}")
 # =============================================================================
 need((len(list((DIR["boltz"]/"inputs").glob("*.yaml"))) > 0, "CELL 26 을 먼저 돌릴 것"))
 BOLTZ_GPU = GPU_ID
+
+# pip install boltz 는 cuequivariance_torch 를 안 깐다. 그게 없으면
+# triangular_mult 커널에서 ModuleNotFoundError 로 즉사한다.
+# 이 환경의 torch 는 CUDA 13 빌드라 cu12 용 cuequivariance ops 와 안 맞으므로
+# 가속 커널을 끄고 순수 PyTorch 경로로 돈다 (조금 느리지만 결과는 동일).
+BOLTZ_NO_KERNELS = True
+_nk = "  --no_kernels \\\n" if BOLTZ_NO_KERNELS else ""
+
 script = f"""
 cd "{DIR['boltz']}"
 CUDA_VISIBLE_DEVICES={BOLTZ_GPU} boltz predict inputs \\
   --out_dir out \\
   --use_msa_server \\
-  --recycling_steps 3 \\
+{_nk}  --recycling_steps 3 \\
   --diffusion_samples 1 \\
   --output_format mmcif \\
   --num_workers 4
 echo DONE_boltz
 """
-if not already(done("part7_boltz", DIR["boltz"]/"out"), "Boltz-2 예측 결과", f"rm -rf {DIR['boltz']}/out"):
+
+# out/ 디렉터리는 boltz 가 시작하자마자 만든다. 중간에 죽어도 남기 때문에
+# 디렉터리 존재만으로 "완료"로 보면 재실행이 영영 건너뛰어진다.
+# 실제로 나온 구조 개수를 세서 판정한다.
+_n_in  = len(list((DIR["boltz"]/"inputs").glob("*.yaml")))
+_n_out = len(list((DIR["boltz"]/"out").rglob("*_model_0.cif")))
+print(f"입력 {_n_in}개 / 예측 완료 {_n_out}개")
+
+_finished = done("part7_boltz") or (_n_in > 0 and _n_out >= _n_in)
+if not already(_finished, "Boltz-2 예측 결과", f"rm -rf {DIR['boltz']}/out"):
     sh_bg("part7_boltz", script, env=CONDA_ENV_BOLTZ)
 ```
 
