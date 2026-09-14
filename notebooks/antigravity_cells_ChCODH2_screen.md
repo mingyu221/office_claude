@@ -431,7 +431,15 @@ print("\n### 워크스페이스 구조 (CELL 01 에서 생성됨) ###")
 sh(f"find {BASE} -maxdepth 2 -type d | sort | sed 's|{BASE}|  .|'", check=False)
 print(f"  RF2-PPI 설치 위치: {RF2PPI_DIR}  [{'O' if RF2PPI_DIR.exists() else 'X — CELL 03 필요'}]")
 
-print("\n⚠ 인계문서 경고: `sudo apt-mark hold nvidia-*` 미적용 — 커널 업데이트 시 드라이버 재발 가능")
+print("\n### NVIDIA 드라이버 고정 (apt-mark hold) ###")
+_hold = subprocess.run("apt-mark showhold 2>/dev/null | grep -c '^\\(lib\\)\\?nvidia'",
+                       shell=True, capture_output=True, text=True).stdout.strip()
+_n = int(_hold) if _hold.isdigit() else 0
+if _n:
+    print(f"  [O] nvidia 관련 {_n} 개 패키지가 hold 상태 — 커널 업데이트로 드라이버가 깨지지 않는다")
+else:
+    print("  [X] 미적용 — 커널 업데이트 시 NVML mismatch 재발 가능")
+    print("      sudo apt-mark hold nvidia-* libnvidia-*")
 ```
 
 ---
@@ -1939,7 +1947,7 @@ print(f"""
   [x] Folddisco ATP-binding motif residue 지정 -> A12,A13,A14 (Walker A) 확정
   [x] 3kji.pdb 체인 ID 확정 -> 체인 A, A112/A114 = CYS 확인
   [ ] crosswalk 미매칭분 UniProt idmapping 으로 보완 (CELL 30)
-  [ ] apt-mark hold nvidia-* (드라이버 재발 방지)
+  [x] apt-mark hold nvidia-* -> 적용 완료 (CELL 02 에서 상태 확인)
   [ ] 정량 프로테오믹스 병행 — 서열 동일·발현량만 다를 경우의 보험
 """)
 ```
