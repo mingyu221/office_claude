@@ -44,7 +44,7 @@ PLAN = """
                               ★서열을 안 넣으면 여기서 멈춘다
 
 단계 C. 프로테옴·차등 분류                             (5분 또는 1시간)
-  CELL 08                     프로테옴 로드 (BL21 4088 / Y19 5325)
+  CELL 08                     프로테옴 로드 + 구조 DB 와 ID 계열 대조
   CELL 09                     분류 TSV 가 있으면 여기서 끝
     └ [없음] 이면 → CELL 10 (BG, 30~60분) → DONE_easy_search 대기 → CELL 11
   CELL 12                     Track A / Track B 확정
@@ -187,12 +187,25 @@ RB    = REFDB / "Bacteria"      # 세균 세트. CELL 16/19 가 여기 bactDB �
 (RB / "fasta").mkdir(parents=True, exist_ok=True)
 
 # ---------------- 이미 구축된 자산 (인계문서 §1) ----------------
+# ★ 프로테옴 FASTA 는 구조 DB 와 같은 GenBank 제출 기록에서 뽑은 것을 쓴다.
+#   inhouseDB/ 가 그 목적으로 다시 받은 것(bl21 = QJZ… 계열)이고, protein_list/ 는
+#   그보다 앞서 쓰던 다른 기록(QZI… 계열)이다. 후자로 돌리면 Part 8 에서 구조 DB 와
+#   교집합이 0 이 된다 — CELL 02 의 "ID 공간 대조" 가 이걸 잡는다.
+INHOUSE = TOOLS / "database" / "bacteriaDB" / "inhouseDB"
+PLIST   = TOOLS / "database" / "protein_list"
+
+def _pick(*cands):
+    """앞의 것을 우선하되 없으면 뒤로 넘어간다."""
+    for c in cands:
+        if c.exists(): return c
+    return cands[0]
+
 ASSET = {
-    # 프로테옴 서열 (GenBank ID 기준)
-    "faa_bl21":   Path("/mnt/af2results/mingyu/database/protein_list/bl21_de3_protein.faa"),
-    "faa_y19":    Path("/mnt/af2results/mingyu/database/protein_list/y19_protein.faa"),
-    "faa_mg1655": Path("/mnt/af2results/mingyu/database/protein_list/mg1655_protein.faa"),
-    "tsv_bl21":   Path("/mnt/af2results/mingyu/database/protein_list/bl21_de3_protein_extracted.tsv"),
+    # 프로테옴 서열 (GenBank ID — 구조 DB 와 같은 기록)
+    "faa_bl21":   _pick(INHOUSE/"bl21_db_match_qjz.faa", PLIST/"bl21_de3_protein.faa"),
+    "faa_y19":    _pick(INHOUSE/"y19_db_match.faa",      PLIST/"y19_protein.faa"),
+    "faa_mg1655": PLIST/"mg1655_protein.faa",   # 분류의 비교 대상일 뿐 조인 키가 아니다
+    "tsv_bl21":   PLIST/"bl21_de3_protein_extracted.tsv",   # ⚠ QZI 계열 — ID 로 조인하지 말 것
     # 구조 DB + 인덱스 (협업팀 Cameron Gilchrist 구축)
     "struct_bl21": Path("/mnt/af2results/mingyu/database/bacteriaDB/structures_UP000503272"),
     "struct_y19":  Path("/mnt/af2results/mingyu/database/bacteriaDB/structures_UP000034085"),
@@ -809,6 +822,8 @@ print("저장:", DIR["seq"] / "baits.fasta")
 #     통째로 달라진다 (QZI… vs QJZ…). CELL 02 의 ID 공간 대조로 반드시 확인할 것.
 #   - 기대값: BL21 4,088 / Y19 5,325
 # =============================================================================
+import pandas as pd
+
 def read_fasta(path):
     seqs, name, buf = {}, None, []
     for line in open(path, errors="ignore"):
@@ -835,11 +850,23 @@ hdr2desc = PROTEOMES[PREY_STRAIN]["desc"]
 ex_id = next(iter(hdr2seq))
 print(f"\nprey = {PREY_STRAIN}, {len(hdr2seq)}개, ID 예시: {ex_id}  ({hdr2desc[ex_id][:60]})")
 
-exp = {"BL21DE3": 4088, "Y19": 5325}
-for k, n in exp.items():
-    if "seqs" in PROTEOMES.get(k, {}):
-        got = len(PROTEOMES[k]["seqs"])
-        print(f"  {k}: {got} (기대 {n}) {'OK' if got == n else '⚠ 불일치 — 파일 버전 확인'}")
+# 개수를 고정값과 맞대는 건 의미가 없다 — 어느 제출 기록에서 뽑았느냐에 따라 달라진다.
+# 정말 확인해야 할 것은 "이 faa 의 ID 가 구조 DB 에 있느냐" 다.
+# (옛 파일 기준 개수는 BL21 4,088 / Y19 5,325 였고, 그건 QZI 계열이라 구조 DB 와 안 붙었다.)
+_xw = DIR["table"]/"id_crosswalk_struct_to_genbank.csv"
+print()
+for k, db in [("BL21DE3", "BL21"), ("Y19", "Y19")]:
+    if "seqs" not in PROTEOMES.get(k, {}): continue
+    ids = set(PROTEOMES[k]["seqs"])
+    line = f"  {k:8s} {len(ids):5d}개  {Path(PROTEOMES[k]['faa']).name}"
+    if _xw.exists():
+        st = set(pd.read_csv(_xw).query("db == @db").protein.dropna())
+        ov = len(ids & st)
+        line += f"  | 구조 DB 교집합 {ov}/{len(ids)} ({ov/max(1,len(ids)):.1%})"
+        line += "  OK" if ov/max(1,len(ids)) >= 0.95 else "  ⚠ ID 계열 불일치"
+    else:
+        line += "  | (crosswalk 없음 — CELL 30 뒤 CELL 02 로 확인)"
+    print(line)
 ```
 
 ---
@@ -881,7 +908,10 @@ def load_category_tsv(path):
         if c: out[name] = df[c]
     return out
 
-EXPECT_CAT = {   # 인계문서 §1-2 의 확정값
+# ⚠ 아래 값은 옛 faa(QZI 계열, BL21 4,088개)로 산출된 것이다. 구조 DB 와 같은
+#   기록의 faa 로 바꾸면 단백질 세트가 달라져 숫자도 달라진다. 정확히 맞기를 기대하지
+#   말고, 자릿수와 비율이 비슷한지만 본다 (identical 이 절반쯤, strain-specific 이 수백).
+EXPECT_CAT = {   # 인계문서 §1-2 의 확정값 (옛 ID 공간 기준)
     "BL21DE3": {"identical": 2171, "high-similarity": 1575,
                 "low-similarity": 125, "strain-specific": 217},
     "Y19":     {"identical": 39,   "high-similarity": 1856,
@@ -1010,8 +1040,10 @@ TRACK_B = cls_prey.query("category in ['low-similarity','strain-specific'] and i
 
 pd.Series(TRACK_A).to_csv(DIR["table"]/"track_A_ids.txt", index=False, header=False)
 pd.Series(TRACK_B).to_csv(DIR["table"]/"track_B_ids.txt", index=False, header=False)
-print(f"Track A (RF2-PPI): {len(TRACK_A):5d}   (기대 ~3,746)")
-print(f"Track B (Boltz-2): {len(TRACK_B):5d}   (기대 ~342)")
+# 기대 규모는 옛 ID 공간 기준 Track A ~3,746 / Track B ~342 였다.
+# faa 를 바꿨으면 단백질 세트가 달라져 숫자도 달라진다 — 자릿수만 본다.
+print(f"Track A (RF2-PPI): {len(TRACK_A):5d}")
+print(f"Track B (Boltz-2): {len(TRACK_B):5d}")
 print("저장:", DIR["table"]/"track_A_ids.txt", "/", DIR["table"]/"track_B_ids.txt")
 ```
 
