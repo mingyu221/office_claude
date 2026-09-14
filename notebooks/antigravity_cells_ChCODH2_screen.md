@@ -214,8 +214,12 @@ CATEGORY_TSV = {
 }
 
 # ---------------- 대상 프로테옴 ----------------
-# ★ 원본 노트북의 BL21 = UP000002032 는 우리 구조 DB(UP000503272)와 단백질 세트가 어긋난다.
-#    Part 8 조인 실패를 막기 위해 구조 DB 쪽 ID로 통일한다.
+# ★ 조인 키는 upid 가 아니라 faa 안의 단백질 ID 다. upid 는 표시용 라벨일 뿐이어서,
+#    여기를 구조 DB 의 UP 번호로 맞춰도 faa 가 다른 제출 기록에서 왔으면 소용이 없다.
+#    실측: upid 를 UP000503272 로 적어두고 faa 는 협업팀 파일(QZI…)을 그대로 썼더니
+#    구조 DB(QJZ…)와 교집합이 0 이었고, Part 8 조인이 전멸할 뻔했다.
+#    -> faa 는 반드시 구조 DB 와 같은 기록에서 뽑은 것을 쓰고, CELL 02 의
+#       "ID 공간 대조" 로 교집합을 눈으로 확인할 것.
 PROTEOMES = {
     "BL21DE3": {"upid": "UP000503272", "taxid": 469008,
                 "name": "Escherichia coli BL21(DE3)", "faa": ASSET["faa_bl21"]},
@@ -393,6 +397,33 @@ for k, p in ASSET.items():
     elif ok and p.is_dir():
         size = f"{len(list(p.iterdir()))} files"
     print(f"  [{'O' if ok else 'X'}] {k:14s} {p}  {size}")
+
+# ---- ★ID 공간 대조 (이 검사가 없어서 한 번 크게 당했다) ----
+# 프로테옴 faa 의 단백질 ID 와 구조 DB 파일이 같은 GenBank 제출 기록에서 왔는지 본다.
+# "GenBank 로 통일" 만으로는 부족하다. 같은 균주라도 제출 기록이 다르면 accession
+# 계열이 통째로 달라진다 (실측: 프로테옴 QZI… vs 구조 DB QJZ… -> 교집합 0).
+# PROTEOMES 의 upid 는 라벨일 뿐 faa 를 고르지 않으므로, 실제 ID 를 맞대봐야 한다.
+print("\n### ID 공간 대조 (프로테옴 faa vs 구조 DB) ###")
+_xw = DIR["table"]/"id_crosswalk_struct_to_genbank.csv"
+if not _xw.exists():
+    print(f"  (crosswalk 아직 없음 — CELL 30 뒤에 다시 확인할 것)")
+else:
+    import pandas as pd
+    _x = pd.read_csv(_xw).dropna(subset=["protein"])
+    for _strain, _db in [("BL21DE3", "BL21"), ("Y19", "Y19")]:
+        _f = PROTEOMES.get(_strain, {}).get("faa")
+        if not _f or not Path(_f).exists():
+            print(f"  {_strain:8s} faa 없음"); continue
+        _ids = {l[1:].split()[0] for l in open(_f, errors="ignore") if l.startswith(">")}
+        _st  = set(_x[_x.db == _db].protein)
+        _ov  = len(_ids & _st)
+        _pct = _ov / max(1, len(_ids))
+        _mark = "OK" if _pct >= 0.95 else "⚠ ID 계열 불일치 — Part 8 조인이 전멸한다"
+        print(f"  {_strain:8s} faa {len(_ids):5d} / 구조 {len(_st):5d} / 교집합 {_ov:5d} ({_pct:.1%})  {_mark}")
+        if _pct < 0.95:
+            print(f"    faa 예시   : {sorted(_ids)[:3]}")
+            print(f"    구조 DB 예시: {sorted(_st)[:3]}")
+            print("    -> 구조 DB 쪽 기록으로 faa 를 다시 준비할 것. upid 만 바꾸는 것으로는 해결되지 않는다.")
 
 # folddisco 인덱스는 확장자 없는 본체 + .lookup/.offset/.type 4종 세트
 print("\n### Folddisco 인덱스 세트 ###")
@@ -773,8 +804,9 @@ print("저장:", DIR["seq"] / "baits.fasta")
 ```python
 # =============================================================================
 # CELL 08 | Part 1-2. 프로테옴 서열 로드 — 기존 GenBank FASTA 재사용
-#   - 원본 노트북은 UniProt 에서 새로 받지만, 우리 구조 DB/분류가 GenBank ID 기준이라
-#     여기서 UniProt 을 새로 받으면 Part 8 에서 조인이 깨진다. ID 체계를 GenBank 로 통일.
+#   - 조인 키는 GenBank ID 다. 다만 "GenBank 면 된다" 가 아니라 "구조 DB 와 같은
+#     제출 기록의 GenBank" 여야 한다. 같은 균주라도 기록이 다르면 accession 계열이
+#     통째로 달라진다 (QZI… vs QJZ…). CELL 02 의 ID 공간 대조로 반드시 확인할 것.
 #   - 기대값: BL21 4,088 / Y19 5,325
 # =============================================================================
 def read_fasta(path):
@@ -2115,7 +2147,8 @@ print(f"""
   ※ hypA·hybF, hypC·hybG 이중 KO 로 paralog 보완 배제
 
 ### 남은 TODO (인계문서 §7) ###
-  [ ] BL21 proteome ID: 이 노트북은 UP000503272 로 통일했다. 협업팀 확인 남음
+  [!] BL21 proteome ID: faa(QZI…)와 구조 DB(QJZ…)의 ID 계열이 달랐다 (교집합 0).
+      -> 구조 DB 기록으로 faa 재구축 후 CELL 08~ 재실행 필요
   [x] Folddisco ATP-binding motif residue 지정 -> A12,A13,A14 (Walker A) 확정
   [x] 3kji.pdb 체인 ID 확정 -> 체인 A, A112/A114 = CYS 확인
   [ ] crosswalk 미매칭분 UniProt idmapping 으로 보완 (CELL 30)
