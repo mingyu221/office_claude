@@ -1099,6 +1099,7 @@ echo DONE_gate
 if not already(newer(DIR["search"]/"bait_hits.m8", RB/"bactDB"),
                "bait_hits.m8 (현재 bactDB 기준)", f"rm {DIR['search']}/bait_hits.m8"):
     sh_bg("part3_gate", script, env=CONDA_ENV_RF2)
+    print("\n★ 이 셀은 시작만 한다. 1~2분 뒤 CELL 15 에서 DONE_gate 를 확인하고 CELL 17 로 갈 것.")
 ```
 
 ---
@@ -1112,8 +1113,10 @@ if not already(newer(DIR["search"]/"bait_hits.m8", RB/"bactDB"),
 #   <200  : Track A 포기, Track B(CELL 25~)에 자원 집중
 # =============================================================================
 need(((DIR["search"]/"bait_hits.m8").exists(), "CELL 16 을 먼저 돌릴 것"),
+     (done("part3_gate"),
+      "CELL 16 검색이 아직 돌고 있다 — CELL 15 에서 DONE_gate 를 확인한 뒤 다시 실행할 것 (1~2분)"),
      (newer(DIR["search"]/"bait_hits.m8", RB/"bactDB"),
-      "bait_hits.m8 이 bactDB 보다 오래됐다 — 옛 DB 로 검색한 결과다. CELL 16 재실행 필요"))
+      "bait_hits.m8 이 bactDB 보다 오래됐다 — 옛 DB 로 검색한 결과다. CELL 16 을 다시 돌릴 것"))
 AC = ["query","target","fident","evalue","bits","qstart","qend","qlen",
       "tstart","tend","tlen","qaln","taln"]
 bh = pd.read_csv(DIR["search"]/"bait_hits.m8", sep="\t", names=AC)
