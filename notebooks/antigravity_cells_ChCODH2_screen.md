@@ -1130,11 +1130,15 @@ if not already(done("part2_bactdb", RB/"bactDB.index"),
 # =============================================================================
 # CELL 15 | 백그라운드 작업 상태 확인 — 긴 단계 돌릴 때마다 이 셀로 확인
 # =============================================================================
-for job in ["easy_search", "part2_download", "part2_bactdb",
-            "part3_gate", "part4_prey", "part6_rf2ppi", "part7_boltz"]:
-    if (DIR["log"] / f"{job}.log").exists():
-        bg_tail(job, n=8)
-        print("-" * 70)
+# 이름을 고정 목록으로 들면 나중에 추가한 작업(part7_boltz_focus 등)이 안 보인다.
+# 로그 폴더를 훑되, 파이프라인 순서를 아는 것부터 먼저 보여준다.
+ORDER = ["easy_search", "part2_download", "part2_bactdb", "part3_gate",
+         "part4_prey", "part6_rf2ppi", "part7_boltz"]
+found = sorted(f.stem for f in DIR["log"].glob("*.log"))
+jobs  = [j for j in ORDER if j in found] + [j for j in found if j not in ORDER]
+for job in jobs:
+    bg_tail(job, n=8)
+    print("-" * 70)
 
 print("\n### 디스크 ###"); sh(f"df -h {BASE}", check=False)
 print("### GPU ###");   sh("nvidia-smi --query-gpu=index,utilization.gpu,memory.used,memory.total "
