@@ -1330,6 +1330,11 @@ need((done("part4_prey", DIR["search"]/"prey_hits.m8"), "CELL 19 미완료"),
      ((DIR["search"]/"prey_hits.m8").exists(), "prey_hits.m8 이 없다"))
 from collections import defaultdict
 
+# CELL 16/19 의 --format-output 과 같은 순서여야 한다. CELL 17 에도 같은 정의가
+# 있지만, 17 을 건너뛰고 20 만 돌려도 되도록 여기서도 세운다.
+AC = ["query","target","fident","evalue","bits","qstart","qend","qlen",
+      "tstart","tend","tlen","qaln","taln"]
+
 def to_query_frame(qaln, taln, qstart, qlen):
     row = ["-"] * qlen
     qi = int(qstart) - 1
