@@ -1337,22 +1337,46 @@ def to_query_frame(qaln, taln, qstart, qlen):
         qi += 1
     return "".join(row)
 
-def best_hit_per_taxid(m8_path, chunksize=2_000_000):
-    out = defaultdict(dict)
+def best_hit_per_taxid(m8_path, chunksize=2_000_000, keep_taxids=None):
+    """taxid 별 최고 bits hit 하나만 남기고, 그것만 query 좌표계로 투영한다.
+
+    to_query_frame 은 정렬을 한 글자씩 도는 파이썬 루프라 행당 비용이 크다.
+    prey_hits.m8 은 실측 36GB / 6,262만 행이어서 전부 투영하면 수 시간이 걸린다.
+    그래서 (1) 페어링 불가능한 유전체를 먼저 버리고 (2) bits 비교는 pandas 에서
+    끝낸 뒤 (3) 이긴 행에만 투영을 건다.
+    """
+    best = defaultdict(dict)          # query -> taxid -> (bits, qaln, taln, qstart, qlen)
+    n_read = n_kept = 0
     for chunk in pd.read_csv(m8_path, sep="\t", names=AC, chunksize=chunksize):
-        chunk["taxid"] = chunk.target.str.split("|").str[0]
+        n_read += len(chunk)
+        chunk["taxid"] = chunk.target.str.split("|", n=1).str[0]
+        if keep_taxids is not None:
+            chunk = chunk[chunk.taxid.isin(keep_taxids)]
+        chunk = (chunk.sort_values("bits", ascending=False)
+                      .drop_duplicates(["query", "taxid"]))
+        n_kept += len(chunk)
         for r in chunk.itertuples(index=False):
-            cur = out[r.query].get(r.taxid)
+            cur = best[r.query].get(r.taxid)
             if cur is None or r.bits > cur[0]:
-                out[r.query][r.taxid] = (r.bits,
-                                         to_query_frame(r.qaln, r.taln, r.qstart, r.qlen))
-    return out
+                best[r.query][r.taxid] = (r.bits, r.qaln, r.taln, r.qstart, r.qlen)
+        print(f"  읽음 {n_read:,} / 후보 {n_kept:,}", end="\r", file=sys.stderr)
+    print(f"  읽음 {n_read:,} / 후보 {n_kept:,}", file=sys.stderr)
+    return {q: {t: (b, to_query_frame(qa, ta, qs, ql))
+                for t, (b, qa, ta, qs, ql) in d.items()}
+            for q, d in best.items()}
 
 print("bait hits 정리 중...")
 BAIT_MSA = best_hit_per_taxid(DIR["search"]/"bait_hits.m8")
-print("prey hits 정리 중... (수 분 소요)")
-PREY_MSA = best_hit_per_taxid(DIR["search"]/"prey_hits.m8")
 print("bait depth:", {k: len(v) for k, v in BAIT_MSA.items()})
+
+# paired MSA 는 bait 와 prey 가 같은 유전체에 둘 다 있어야 성립한다. bait 오솔로그가
+# 없는 유전체의 prey hit 은 CELL 21 에서 어차피 버려지므로 여기서 미리 거른다.
+# 실측: bait 는 2,929개 유전체, prey 검색은 17,505개 전체를 훑었다.
+PAIRABLE = set().union(*BAIT_MSA.values()) if BAIT_MSA else None
+print(f"\n페어링 가능한 유전체 {len(PAIRABLE):,}개로 prey hit 을 제한한다")
+
+print("prey hits 정리 중... (36GB / 6,262만 행 — 십수 분)")
+PREY_MSA = best_hit_per_taxid(DIR["search"]/"prey_hits.m8", keep_taxids=PAIRABLE)
 print("prey 개수:", len(PREY_MSA))
 ```
 
