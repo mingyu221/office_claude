@@ -67,6 +67,9 @@ PLAN = """
 단계 F. Track B — Boltz-2                  (레퍼런스 DB 불필요, 병렬 가능)
   CELL 25 → [터미널에서 bash] Boltz-2 설치
   CELL 26 → CELL 27 (BG·GPU, 10~20시간) → DONE_boltz 대기 → CELL 28
+  CELL 28a → 28a-2 → 28a-3   ★랭킹 해석. ipTM 은 짧은 prey 를 부풀리므로
+                              길이 보정 없이 상위권을 믿으면 안 된다
+  CELL 28a-4 (BG·GPU, 30분)   metal 모티프 보유 단백질에 co-folding 증거 추가
   CELL 28b → 28c              (선택) Foldseek-Interface 계면 대조
 
 단계 G. Track C + 통합                                       (수십 분)
@@ -1785,6 +1788,179 @@ else:
     print("누락 없음 — 입력 전량이 예측됐다.")
 
 print(B.head(40).to_string(index=False))
+```
+
+---
+
+## CELL 28a — Part 7d-1. Track B 랭킹의 길이 편향 점검
+
+```python
+# =============================================================================
+# CELL 28a | ipTM 랭킹이 결합을 재는가, 길이를 재는가
+#   ipTM 은 계면 잔기 기준이라 짧은 prey 일수록 부풀려진다. 20잔기 펩타이드가
+#   636잔기 bait 표면에 닿기만 해도 계면 대부분이 "맞은" 것으로 잡히기 때문이다.
+#   실측(BL21 321쌍): ipTM ρ=-0.33 / ligand_iptm ρ=-0.81 / confidence ρ=-0.57
+#   -> ligand_iptm 은 랭킹 축으로 못 쓴다. "Ni 이 계면에 있나"가 아니라
+#      "복합체가 작은가"를 재고 있다.
+# =============================================================================
+need((have("hdr2seq"), "CELL 08 을 먼저 돌릴 것"),
+     ((DIR["table"]/"trackB_boltz2_ranked.csv").exists(), "CELL 28 을 먼저 돌릴 것"))
+B = pd.read_csv(DIR["table"]/"trackB_boltz2_ranked.csv")
+B["prey_len"] = B.prey.map(lambda p: len(hdr2seq.get(p, "")))
+
+print("prey 길이:", B.prey_len.describe()[["min","25%","50%","75%","max"]].astype(int).to_dict())
+for c in ["iptm", "ligand_iptm", "confidence_score"]:
+    if c in B.columns:
+        r = B[[c, "prey_len"]].corr(method="spearman").iloc[0, 1]
+        print(f"  {c:18s} vs 길이  Spearman rho = {r:+.3f}")
+
+B["len_bin"] = pd.cut(B.prey_len, [0, 50, 100, 200, 400, 10**5])
+print("\n길이 구간별:")
+print(B.groupby("len_bin", observed=True)
+       .agg(n=("iptm","size"), iptm_평균=("iptm","mean"), iptm_최대=("iptm","max"),
+            ligand_평균=("ligand_iptm","mean")).round(3).to_string())
+
+print("\n=== 100잔기 이상만 추린 상위 20 ===")
+cols = ["prey","prey_len","iptm","ligand_iptm","complex_plddt","category","desc"]
+print(B[B.prey_len >= 100].nlargest(20, "iptm")[cols].to_string(index=False))
+
+B.to_csv(DIR["table"]/"trackB_boltz2_ranked.csv", index=False)
+print("\n길이 컬럼을 추가해 다시 저장했다.")
+```
+
+---
+
+## CELL 28a-2 — Part 7d-2. 길이 보정 재랭킹 + Track C 교차
+
+```python
+# =============================================================================
+# CELL 28a-2 | 구간 내 z-점수로 재랭킹하고 구조 모티프와 교차한다
+#   ipTM 을 길이 구간 안에서 표준화하면 구간 간 비교가 된다.
+#   metal/ATP 모티프(Track C)는 구조 기하 기반이라 길이 편향이 없는 독립 축이다.
+#   ⚠ 짧고 pLDDT 낮은 단백질은 두 축을 동시에 속인다. 겹쳤다고 곧바로 후보로
+#     올리지 말고 CELL 28a-3 에서 nres/plddt 를 확인할 것.
+# =============================================================================
+need((have("B"), "CELL 28a 를 먼저 돌릴 것"))
+fd_metal = pd.read_csv(DIR["table"]/"folddisco_metal_motif.csv")
+fd_atp   = pd.read_csv(DIR["table"]/"folddisco_atp_motif.csv")
+Mset, Aset = set(fd_metal.protein), set(fd_atp.protein)
+
+B["iptm_z"]      = B.groupby("len_bin", observed=True).iptm.transform(
+                       lambda x: (x - x.mean()) / (x.std(ddof=0) or 1))
+B["metal_motif"] = B.prey.isin(Mset)
+B["atp_motif"]   = B.prey.isin(Aset)
+
+print(f"Track B {len(B)}개 중")
+print(f"  metal 모티프 보유 : {int(B.metal_motif.sum())}")
+print(f"  ATP  모티프 보유 : {int(B.atp_motif.sum())}")
+print(f"  둘 다            : {int((B.metal_motif & B.atp_motif).sum())}")
+print("  ※ ATP 보유율이 프로테옴 전체 비율(약 23%)과 비슷하면 농축이 없는 것이다 —")
+print("     Walker A 는 P-loop NTPase 전체가 공유해 단독 필터로는 무력하다.")
+
+cols = ["prey","prey_len","iptm","iptm_z","metal_motif","atp_motif","category","desc"]
+print("\n=== 길이 보정 상위 20 (구간 내 z-점수) ===")
+print(B.nlargest(20, "iptm_z")[cols].to_string(index=False))
+
+print("\n=== metal 모티프를 가진 Track B 후보 ===")
+sub = B[B.metal_motif].sort_values("iptm", ascending=False)
+print(sub[cols].to_string(index=False) if len(sub) else "  없음")
+
+B.to_csv(DIR["table"]/"trackB_boltz2_ranked.csv", index=False)
+```
+
+---
+
+## CELL 28a-3 — Part 7d-3. metal 모티프 보유 단백질이 어느 Track 에 있는가
+
+```python
+# =============================================================================
+# CELL 28a-3 | 금속 배위 기하를 가진 단백질의 소속 확인
+#   Track B(균주 특이)에 거의 없고 Track A(보존)에 몰려 있다면, 균주 차이는
+#   유전자 유무가 아니라 발현량/조절 문제로 넘어간다.
+#   실측(BL21 29개): A 27 / B 2 — 설계문서의 "Track B 가 주력" 예측과 어긋난다.
+#   pLDDT 순으로 정렬한다. 70 미만은 AlphaFold 가 접힘을 확신하지 못한 영역이라
+#   그 좌표 위에서 잰 모티프 기하를 근거로 쓰기 어렵다.
+# =============================================================================
+need((have("TRACK_A", "TRACK_B", "hdr2desc"), "CELL 08 과 CELL 12 를 먼저 돌릴 것"))
+fdd = pd.read_csv(DIR["table"]/"folddisco_metal_motif_detail.csv")
+bl  = fdd[fdd.strain == "BL21"].dropna(subset=["protein"])
+A, Bs = set(TRACK_A), set(TRACK_B)
+
+bl = bl.assign(track=bl.protein.map(lambda x: "A(보존)" if x in A else
+                                              "B(균주특이)" if x in Bs else "어느 쪽도 아님"))
+print(bl.track.value_counts().to_string())
+
+cols = ["protein","track","idf","min_rmsd","nres","plddt","matching_residues"]
+out = bl.sort_values("plddt", ascending=False)[cols].copy()
+out["desc"] = out.protein.map(lambda x: hdr2desc.get(x, "")[:55])
+print()
+print(out.to_string(index=False))
+
+print("\n※ pLDDT 70 미만은 근거로 쓰지 말 것. 짧고 못 접힌 단백질은 folddisco idf 와")
+print("   ipTM 을 동시에 부풀리므로, 독립적인 두 증거처럼 보여도 같은 아티팩트다.")
+out.to_csv(DIR["table"]/"metal_motif_by_track.csv", index=False)
+print("저장:", DIR["table"]/"metal_motif_by_track.csv")
+```
+
+---
+
+## CELL 28a-4 — Part 7d-4. metal 모티프 보유 단백질을 Boltz 로 직접 검증
+
+```python
+# =============================================================================
+# CELL 28a-4 | 금속 배위 기하를 가진 단백질에 co-folding 증거를 붙인다
+#   Boltz 는 Track B 에만 돌렸던 탓에, 정작 metal 모티프를 가진 쪽(대부분 Track A)이
+#   빠졌다. 수십 개뿐이라 GPU 30분이면 끝난다 — RF2-PPI 를 기다릴 필요가 없다.
+#   pLDDT 70 미만은 좌표를 못 믿으니 제외한다.
+#   판정 기준: 같은 길이 구간의 Track B 분포(CELL 28a 표)보다 뚜렷이 위인가.
+# =============================================================================
+need((have("BAIT_KEY", "BAIT_ALL", "hdr2seq"), "CELL 07 과 CELL 08 을 먼저 돌릴 것"))
+import yaml as _y
+BOLTZ_MAXMSA = globals().get("BOLTZ_MAXMSA", 2048)   # CELL 27 을 안 거쳤을 때 대비
+FOCUS_PLDDT  = 70
+
+fdd = pd.read_csv(DIR["table"]/"folddisco_metal_motif_detail.csv")
+focus = (fdd[(fdd.strain == "BL21") & (fdd.plddt >= FOCUS_PLDDT)]
+           .dropna(subset=["protein"]).protein.unique().tolist())
+print(f"대상 {len(focus)}개 (pLDDT >= {FOCUS_PLDDT})")
+
+fin = DIR["boltz"]/"inputs_focus"; fin.mkdir(parents=True, exist_ok=True)
+for f in fin.glob("*.yaml"): f.unlink()
+n = 0
+for pid in focus:
+    sq = hdr2seq.get(pid)
+    if not sq:
+        print(f"  [서열 없음] {pid}"); continue
+    (fin/f"{BAIT_KEY}__{pid}.yaml").write_text(_y.safe_dump({
+        "version": 1,
+        "sequences": [
+            {"protein": {"id": "A", "sequence": BAIT_ALL[BAIT_KEY]}},
+            {"protein": {"id": "B", "sequence": sq}},
+            {"ligand":  {"id": "C", "ccd": "NI"}},
+        ]}, sort_keys=False))
+    n += 1
+print(f"입력 {n}개 -> {fin}")
+
+script = f"""
+cd "{DIR['boltz']}"
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+CUDA_VISIBLE_DEVICES={GPU_ID} boltz predict inputs_focus \\
+  --out_dir out_focus \\
+  --use_msa_server \\
+  --max_msa_seqs {BOLTZ_MAXMSA} \\
+  --recycling_steps 3 \\
+  --diffusion_samples 1 \\
+  --output_format mmcif \\
+  --num_workers 2
+echo DONE_boltz_focus
+"""
+_busy = subprocess.run("pgrep -f '[b]oltz predict'", shell=True,
+                       capture_output=True, text=True).stdout.split()
+if _busy:
+    print(f"⚠ boltz 가 이미 돌고 있다 (pid {' '.join(_busy)}). 새로 띄우지 않았다.")
+elif not already(done("part7_boltz_focus", DIR["boltz"]/"out_focus"),
+                 "focus 예측 결과", f"rm -rf {DIR['boltz']}/out_focus"):
+    sh_bg("part7_boltz_focus", script, env=CONDA_ENV_BOLTZ)
 ```
 
 ---
