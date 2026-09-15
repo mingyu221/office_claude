@@ -70,6 +70,7 @@ PLAN = """
   CELL 28a → 28a-2 → 28a-3   ★랭킹 해석. ipTM 은 짧은 prey 를 부풀리므로
                               길이 보정 없이 상위권을 믿으면 안 된다
   CELL 28a-4 (BG·GPU, 30분)   metal 모티프 보유 단백질에 co-folding 증거 추가
+  CELL 28a-5                  그 결과를 Track B 분포 대비 백분위로 판정
   CELL 28b → 28c              (선택) Foldseek-Interface 계면 대조
 
 단계 G. Track C + 통합                                       (수십 분)
@@ -1961,6 +1962,73 @@ if _busy:
 elif not already(done("part7_boltz_focus", DIR["boltz"]/"out_focus"),
                  "focus 예측 결과", f"rm -rf {DIR['boltz']}/out_focus"):
     sh_bg("part7_boltz_focus", script, env=CONDA_ENV_BOLTZ)
+```
+
+---
+
+## CELL 28a-5 — Part 7d-5. focus 예측 판정 (Track B 분포 대비)
+
+```python
+# =============================================================================
+# CELL 28a-5 | metal 모티프 단백질의 ipTM 이 정말 높은가
+#   ipTM 절대값은 길이에 따라 기준선이 달라서 그대로 비교하면 안 된다.
+#   Track B 321쌍을 배경 분포로 삼아, 같은 길이 구간 안에서 몇 번째인지를 본다.
+#   백분위 90 이상이면 "같은 길이의 무작위 균주특이 단백질보다 뚜렷이 위"다.
+# =============================================================================
+need((have("hdr2seq"), "CELL 08 을 먼저 돌릴 것"),
+     ((DIR["boltz"]/"out_focus").exists(), "CELL 28a-4 를 먼저 돌릴 것"),
+     ((DIR["table"]/"trackB_boltz2_ranked.csv").exists(), "CELL 28 을 먼저 돌릴 것"))
+
+BINS = [0, 50, 100, 200, 400, 10**5]
+rows = []
+for f in glob.glob(str(DIR["boltz"]/"out_focus"/"**"/"confidence_*.json"), recursive=True):
+    c = json.load(open(f))
+    name = re.sub(r"^confidence_|_model_\d+$", "", Path(f).stem)
+    rows.append({"pair": name, "prey": name.split("__")[-1],
+                 "iptm": c.get("iptm"), "ptm": c.get("ptm"),
+                 "complex_plddt": c.get("complex_plddt"),
+                 "ligand_iptm": c.get("ligand_iptm")})
+F = pd.DataFrame(rows)
+want = len(list((DIR["boltz"]/"inputs_focus").glob("*.yaml")))
+print(f"입력 {want} / 파싱 {len(F)}")
+if len(F) < want:
+    print(f"  ⚠ {want - len(F)}건 누락 — CELL 15 로 part7_boltz_focus 가 끝났는지 확인할 것")
+if not len(F):
+    raise SystemExit
+
+# 배경 분포: Track B. CSV 를 거치면 len_bin 이 문자열이 되므로 길이에서 다시 만든다.
+Bg = pd.read_csv(DIR["table"]/"trackB_boltz2_ranked.csv")
+if "prey_len" not in Bg.columns:
+    Bg["prey_len"] = Bg.prey.map(lambda x: len(hdr2seq.get(x, "")))
+Bg["len_bin"] = pd.cut(Bg.prey_len, BINS)
+
+F["prey_len"] = F.prey.map(lambda x: len(hdr2seq.get(x, "")))
+F["len_bin"]  = pd.cut(F.prey_len, BINS)
+
+def percentile_in_bin(r):
+    ref = Bg.loc[Bg.len_bin == r.len_bin, "iptm"].dropna()
+    return round(100.0 * (ref < r.iptm).mean(), 1) if len(ref) else float("nan")
+F["pct_vs_trackB"] = F.apply(percentile_in_bin, axis=1)
+
+# 구조 모티프 쪽 근거를 붙인다
+fdd = pd.read_csv(DIR["table"]/"folddisco_metal_motif_detail.csv")
+fdd = (fdd[fdd.strain == "BL21"].dropna(subset=["protein"])
+         .sort_values("idf", ascending=False).drop_duplicates("protein"))
+F = F.merge(fdd[["protein","idf","min_rmsd","nres","plddt"]],
+            left_on="prey", right_on="protein", how="left").drop(columns=["protein"])
+F["desc"] = F.prey.map(lambda x: hdr2desc.get(x, "")[:50])
+
+cols = ["prey","prey_len","iptm","pct_vs_trackB","ligand_iptm","complex_plddt",
+        "idf","min_rmsd","plddt","desc"]
+F = F.sort_values("pct_vs_trackB", ascending=False)
+print()
+print(F[cols].to_string(index=False))
+
+F.to_csv(DIR["table"]/"trackB_focus_metal_motif.csv", index=False)
+print("\n저장:", DIR["table"]/"trackB_focus_metal_motif.csv")
+print("\n※ pct_vs_trackB 는 같은 길이 구간의 Track B 단백질 중 몇 %보다 높은지다.")
+print("   90 이상 = 구조 기하(모티프)와 co-folding(ipTM) 두 축이 함께 가리키는 것.")
+print("   ipTM 절대값만 보고 순위를 매기면 길이에 속는다 (CELL 28a 참조).")
 ```
 
 ---
