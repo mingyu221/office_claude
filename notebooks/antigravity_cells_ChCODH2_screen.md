@@ -1422,8 +1422,24 @@ def make_pair(bkey, bseq, brows, pname, pseq, prows):
     raw.unlink()
     return flt, depth
 
-BAITS_TO_RUN = [b for b in ([BAIT_KEY] + (list(SEGMENTS) if USE_SEGMENT_BAIT else []))
-                if b in BAIT_MSA]
+# ---- 규모 먼저 확인한다 --------------------------------------------------
+# segment bait 를 다 쓰면 bait 7개 x prey 3,730개 = 26,110쌍이 되고, RF2-PPI 는
+# 쌍당 약 4초(3090 실측) x 3 replicate 라 나흘이 걸린다. paired MSA 도 130GB 다.
+# 게이트 결과가 줄일 근거를 준다: C-말단 두 조각(seg401-600 2,927 / seg440-636 2,920)은
+# full-length(2,929)와 거의 같은 유전체 집합이라 정보가 겹치고, N-말단 네 조각은
+# 깊이 660 수준으로 얕다. 그래서 1차는 full-length 만 돌리고, 결과를 본 뒤
+# 필요하면 SEGMENT_BAITS 에 깊은 조각만 추가한다.
+SEGMENT_BAITS = []                  # 예: ["ChCODH2_WT_seg440-636"]
+BAITS_TO_RUN = [b for b in ([BAIT_KEY] + SEGMENT_BAITS) if b in BAIT_MSA]
+
+_n_pairs = len(BAITS_TO_RUN) * len(PREY_MSA)
+print(f"예상 규모: bait {len(BAITS_TO_RUN)} x prey {len(PREY_MSA)} = {_n_pairs:,}쌍")
+print(f"  paired MSA 디스크 약 {_n_pairs * 5 / 1024:.0f} GB")
+print(f"  RF2-PPI 추론 약 {_n_pairs * 3 * 4 / 3600:.0f} 시간 (3 replicate, 쌍당 4초 기준)")
+need((_n_pairs <= 8000,
+      f"{_n_pairs:,}쌍은 너무 많다 — SEGMENT_BAITS 를 줄이고 다시 실행할 것"))
+# --------------------------------------------------------------------------
+
 CTRL_BAITS = [k for k in BAIT_SEQ
               if k != BAIT_KEY and k.upper().startswith(("COOC", "COOT", "COOJ", "COOF"))
               and k in BAIT_MSA]
