@@ -1406,7 +1406,15 @@ MIN_PAIRED = 50
 paired_dir = DIR["paired"]; paired_dir.mkdir(exist_ok=True)
 
 def make_pair(bkey, bseq, brows, pname, pseq, prows):
-    """같은 organism(taxid) 끼리 이어 붙여 a3m 생성. 깊이 부족하면 (None, 공유수)."""
+    """같은 organism(taxid) 끼리 이어 붙여 a3m 생성. 깊이 부족하면 (None, 공유수).
+
+    수천 번 도는 루프라 중간에 한 번 실패하면 전부 날아간다. 그래서
+    (1) 이미 만들어둔 a3m 은 건너뛰고 (2) hhfilter 실패는 그 쌍만 버린다.
+    """
+    flt = paired_dir / f"{bkey}__{pname.replace('|','_')}.a3m"
+    if flt.exists():                       # 재실행 시 이어서 하기
+        return str(flt), sum(1 for l in open(flt) if l.startswith(">"))
+
     shared = set(brows) & set(prows)
     if len(shared) < MIN_PAIRED:
         return None, len(shared)
@@ -1415,12 +1423,16 @@ def make_pair(bkey, bseq, brows, pname, pseq, prows):
         fh.write(f">query\n{bseq}{pseq}\n")
         for tx in sorted(shared):
             fh.write(f">{tx}\n{brows[tx][1]}{prows[tx][1]}\n")
-    flt = str(raw).replace(".raw.a3m", ".a3m")
-    subprocess.run(["hhfilter", "-i", str(raw), "-o", flt, "-id", "90", "-M", "first"],
-                   check=True, capture_output=True)
+    try:
+        subprocess.run(["hhfilter", "-i", str(raw), "-o", str(flt),
+                        "-id", "90", "-M", "first"], check=True, capture_output=True)
+    except subprocess.CalledProcessError as e:
+        print(f"  [hhfilter 실패] {bkey}__{pname}: {e.stderr.decode(errors='ignore')[:120]}")
+        raw.unlink(missing_ok=True)
+        return None, len(shared)
     depth = sum(1 for l in open(flt) if l.startswith(">"))
     raw.unlink()
-    return flt, depth
+    return str(flt), depth
 
 # ---- 규모 먼저 확인한다 --------------------------------------------------
 # segment bait 를 다 쓰면 bait 7개 x prey 3,730개 = 26,110쌍이 되고, RF2-PPI 는
@@ -1448,11 +1460,14 @@ print(f"bait {len(BAITS_TO_RUN)}개 x prey {len(PREY_MSA)}개, 양성대조군 {
 input_lines, stats = [], []
 for bkey in BAITS_TO_RUN:
     bseq, brows = BAIT_ALL[bkey], BAIT_MSA[bkey]
-    for pid, prows in PREY_MSA.items():
+    for i, (pid, prows) in enumerate(PREY_MSA.items(), 1):
         flt, depth = make_pair(bkey, bseq, brows, pid, sel[pid], prows)
         stats.append((bkey, pid, depth, "skip" if flt is None else "ok"))
         if flt:
             input_lines.append(f"{flt} {len(bseq)}")
+        if i % 200 == 0:
+            print(f"  {bkey}: {i}/{len(PREY_MSA)}", end="\r", file=sys.stderr)
+    print(f"  {bkey}: {len(PREY_MSA)}/{len(PREY_MSA)} 완료", file=sys.stderr)
 
 # ★양성대조군: CooC/CooT/CooJ 를 bait, ChCODH2 를 prey 로 두고 같은 절차로 만든다.
 #   CooC-CooS 는 알려진 상호작용이다. 여기서 높은 점수가 안 나오면
