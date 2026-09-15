@@ -71,6 +71,7 @@ PLAN = """
                               길이 보정 없이 상위권을 믿으면 안 된다
   CELL 28a-4 (BG·GPU, 30분)   metal 모티프 보유 단백질에 co-folding 증거 추가
   CELL 28a-5                  그 결과를 Track B 분포 대비 백분위로 판정
+  CELL 28a-6                  막단백질 교란 점검 (상위권이 수송체로 채워졌는가)
   CELL 28b → 28c              (선택) Foldseek-Interface 계면 대조
 
 단계 G. Track C + 통합                                       (수십 분)
@@ -2034,6 +2035,47 @@ print("\n저장:", DIR["table"]/"trackB_focus_metal_motif.csv")
 print("\n※ pct_vs_trackB 는 같은 길이 구간의 Track B 단백질 중 몇 %보다 높은지다.")
 print("   90 이상 = 구조 기하(모티프)와 co-folding(ipTM) 두 축이 함께 가리키는 것.")
 print("   ipTM 절대값만 보고 순위를 매기면 길이에 속는다 (CELL 28a 참조).")
+```
+
+---
+
+## CELL 28a-6 — Part 7d-6. 막단백질 교란 점검
+
+```python
+# =============================================================================
+# CELL 28a-6 | 상위권이 막단백질로 채워졌는가
+#   구조 예측기는 막단백질의 소수성 표면에 다른 사슬을 잘 붙인다. 실제로는 지질이
+#   놓일 자리인데 파트너가 대신 들어가는 것이다. ChCODH2 는 세포질 효소라
+#   막횡단 나선 표면에 도킹하는 결과는 생물학적으로 성립하지 않는다.
+#   실측(27개): 상위 7개 중 넷이 수송체·막결합 효소였다.
+#   ※ 주석 키워드로 거르는 것은 어림짐작이다. 최종 후보는 TMHMM/DeepTMHMM 같은
+#     막횡단 예측으로 확인할 것. 여기서는 편향의 존재 여부만 본다.
+# =============================================================================
+need(((DIR["table"]/"trackB_focus_metal_motif.csv").exists(),
+      "CELL 28a-5 를 먼저 돌릴 것"))
+F = pd.read_csv(DIR["table"]/"trackB_focus_metal_motif.csv")
+
+MEMBRANE_KW = ("transport|export|import|permease|channel|efflux|porin|"
+               "synthase|phosphatase|membrane|secretion|pilin|flagell")
+F["막추정"] = F.desc.fillna("").str.contains(MEMBRANE_KW, case=False, regex=True)
+
+print("=== 막추정 여부별 백분위 ===")
+print(F.groupby("막추정").pct_vs_trackB
+       .agg(n="count", 평균="mean", 중앙값="median", 최대="max").round(1).to_string())
+gap = (F[F.막추정].pct_vs_trackB.mean() - F[~F.막추정].pct_vs_trackB.mean()) if F.막추정.any() else 0
+print(f"\n평균 차이: {gap:+.1f}%p", "-> 막 편향이 있다" if gap > 15 else "-> 뚜렷한 편향은 없다")
+
+cols = ["prey","prey_len","iptm","pct_vs_trackB","idf","min_rmsd","plddt","desc"]
+print("\n=== 막추정 제외 상위 10 ===")
+print(F[~F.막추정].nlargest(10, "pct_vs_trackB")[cols].to_string(index=False))
+
+F.to_csv(DIR["table"]/"trackB_focus_metal_motif.csv", index=False)
+print("\n막추정 컬럼을 추가해 다시 저장했다.")
+print("\n※ 해석 시 유의: 지금까지 확인된 교란 세 가지")
+print("   1) 길이   — 짧은 prey 일수록 ipTM 이 부풀려진다 (CELL 28a)")
+print("   2) 구조품질 — pLDDT 낮은 단편은 folddisco idf 와 ipTM 을 동시에 부풀린다 (CELL 28a-3)")
+print("   3) 막소수성 — 지질이 놓일 자리에 파트너가 대신 들어간다 (이 셀)")
+print("   RF2-PPI(공진화)는 셋 모두와 무관한 축이므로 Track A 결과가 판정의 중심이다.")
 ```
 
 ---
