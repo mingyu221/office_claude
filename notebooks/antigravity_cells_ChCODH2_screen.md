@@ -1392,103 +1392,178 @@ print("prey 개수:", len(PREY_MSA))
 
 ---
 
-## CELL 21 — Part 5b. paired MSA 생성 + hhfilter
+## CELL 21 — Part 5b. paired MSA 생성 (백그라운드)
 
 ```python
 # =============================================================================
-# CELL 21 | Part 5-2. paired MSA 생성 (같은 organism 끼리 이어 붙이고 hhfilter 90%)
-#   - MIN_PAIRED 미만이면 예측 자체를 스킵한다 (얕은 MSA 의 점수는 신뢰 불가)
-#   - USE_SEGMENT_BAIT 이면 full-length + segment bait 를 모두 돌린다 (설계문서 대응 b/c)
+# CELL 21 | Part 5-2. paired MSA 생성 — 같은 organism 끼리 이어 붙이고 hhfilter 90%
+#   3,730쌍에 hhfilter 를 한 번씩 부르는 1~2시간짜리라 백그라운드로 뺀다.
+#   BAIT_MSA/PREY_MSA 는 메모리에만 있어 별도 프로세스가 못 쓰므로, 스크립트가
+#   m8 를 다시 읽는다 (15분 추가). 대신 커널이 풀려 다른 셀을 돌릴 수 있다.
+#   이미 만들어둔 a3m 은 건너뛰므로 중단 후 재실행해도 이어서 한다.
 # =============================================================================
-need((have("BAIT_MSA", "PREY_MSA"), "CELL 20 을 먼저 돌릴 것"),
-     (have("sel"), "CELL 18 을 먼저 돌릴 것"))
-MIN_PAIRED = 50
-paired_dir = DIR["paired"]; paired_dir.mkdir(exist_ok=True)
+need(((DIR["seq"]/"prey_trackA.fasta").exists(), "CELL 18 을 먼저 돌릴 것"),
+     ((DIR["search"]/"prey_hits.m8").exists(), "CELL 19 미완료"),
+     (have("BAIT_KEY", "SEGMENTS"), "CELL 07 을 먼저 돌릴 것"))
+
+MIN_PAIRED    = 50
+SEGMENT_BAITS = []      # 예: ["ChCODH2_WT_seg440-636"]. 하나 늘 때마다 3,730쌍이 는다.
+BAITS_TO_RUN  = [BAIT_KEY] + [b for b in SEGMENT_BAITS if b in SEGMENTS]
+
+_n = len(BAITS_TO_RUN) * 3730
+print(f"bait {len(BAITS_TO_RUN)}개 -> 약 {_n:,}쌍")
+print(f"  디스크 약 {_n*5/1024:.0f} GB / RF2-PPI 추론 약 {_n*3*4/3600:.0f} 시간(3 replicate)")
+need((_n <= 8000, f"{_n:,}쌍은 너무 많다 — SEGMENT_BAITS 를 줄일 것"))
+
+SRC = r"""
+import sys, re, subprocess
+from pathlib import Path
+from collections import defaultdict
+import pandas as pd
+
+BASE   = Path("__BASE__")
+SEARCH = BASE/"result"/"search"
+PAIRED = BASE/"result"/"paired"; PAIRED.mkdir(parents=True, exist_ok=True)
+TABLE  = BASE/"result"/"table"
+RF2    = BASE/"result"/"rf2ppi";  RF2.mkdir(parents=True, exist_ok=True)
+SEQ    = BASE/"input"/"seq"
+MIN_PAIRED   = __MINP__
+BAIT_KEY     = "__BAITKEY__"
+BAITS_TO_RUN = __BAITS__
+
+AC = ["query","target","fident","evalue","bits","qstart","qend","qlen",
+      "tstart","tend","tlen","qaln","taln"]
+
+def read_fasta(path):
+    out, name, buf = {}, None, []
+    for line in open(path, errors="ignore"):
+        if line.startswith(">"):
+            if name: out[name] = "".join(buf)
+            name, buf = line[1:].split()[0], []
+        else:
+            buf.append(line.strip())
+    if name: out[name] = "".join(buf)
+    return out
+
+def to_query_frame(qaln, taln, qstart, qlen):
+    row = ["-"] * qlen
+    qi = int(qstart) - 1
+    for qc, tc in zip(qaln, taln):
+        if qc == "-":
+            continue
+        if qi < qlen:
+            row[qi] = tc if tc != "-" else "-"
+        qi += 1
+    return "".join(row)
+
+def best_hit_per_taxid(m8, keep=None, chunksize=2_000_000):
+    best, n_read, n_kept = defaultdict(dict), 0, 0
+    for ch in pd.read_csv(m8, sep="\t", names=AC, chunksize=chunksize):
+        n_read += len(ch)
+        ch["taxid"] = ch.target.str.split("|", n=1).str[0]
+        if keep is not None:
+            ch = ch[ch.taxid.isin(keep)]
+        ch = ch.sort_values("bits", ascending=False).drop_duplicates(["query","taxid"])
+        n_kept += len(ch)
+        for r in ch.itertuples(index=False):
+            cur = best[r.query].get(r.taxid)
+            if cur is None or r.bits > cur[0]:
+                best[r.query][r.taxid] = (r.bits, r.qaln, r.taln, r.qstart, r.qlen)
+        print(f"  read {n_read:,} / keep {n_kept:,}", flush=True)
+    return {q: {t: (b, to_query_frame(qa, ta, qs, ql))
+                for t, (b, qa, ta, qs, ql) in d.items()}
+            for q, d in best.items()}
+
+baits = read_fasta(SEQ/"baits.fasta")
+preys = read_fasta(SEQ/"prey_trackA.fasta")
+print(f"bait {len(baits)} / prey {len(preys)}", flush=True)
+
+print("bait hits...", flush=True)
+BAIT_MSA = best_hit_per_taxid(SEARCH/"bait_hits.m8")
+print("bait depth:", {k: len(v) for k, v in BAIT_MSA.items()}, flush=True)
+
+PAIRABLE = set().union(*BAIT_MSA.values())
+print(f"pairable genomes {len(PAIRABLE):,}", flush=True)
+
+print("prey hits...", flush=True)
+PREY_MSA = best_hit_per_taxid(SEARCH/"prey_hits.m8", keep=PAIRABLE)
+print(f"prey {len(PREY_MSA)}", flush=True)
 
 def make_pair(bkey, bseq, brows, pname, pseq, prows):
-    """같은 organism(taxid) 끼리 이어 붙여 a3m 생성. 깊이 부족하면 (None, 공유수).
-
-    수천 번 도는 루프라 중간에 한 번 실패하면 전부 날아간다. 그래서
-    (1) 이미 만들어둔 a3m 은 건너뛰고 (2) hhfilter 실패는 그 쌍만 버린다.
-    """
-    flt = paired_dir / f"{bkey}__{pname.replace('|','_')}.a3m"
-    if flt.exists():                       # 재실행 시 이어서 하기
+    # 이미 만들어둔 것은 건너뛴다 (중단 후 이어서 하기)
+    flt = PAIRED / (bkey + "__" + pname.replace("|", "_") + ".a3m")
+    if flt.exists():
         return str(flt), sum(1 for l in open(flt) if l.startswith(">"))
-
     shared = set(brows) & set(prows)
     if len(shared) < MIN_PAIRED:
         return None, len(shared)
-    raw = paired_dir / f"{bkey}__{pname.replace('|','_')}.raw.a3m"
+    raw = Path(str(flt).replace(".a3m", ".raw.a3m"))
     with open(raw, "w") as fh:
-        fh.write(f">query\n{bseq}{pseq}\n")
+        fh.write(">query\n" + bseq + pseq + "\n")
         for tx in sorted(shared):
-            fh.write(f">{tx}\n{brows[tx][1]}{prows[tx][1]}\n")
+            fh.write(">" + str(tx) + "\n" + brows[tx][1] + prows[tx][1] + "\n")
     try:
-        subprocess.run(["hhfilter", "-i", str(raw), "-o", str(flt),
-                        "-id", "90", "-M", "first"], check=True, capture_output=True)
+        subprocess.run(["hhfilter","-i",str(raw),"-o",str(flt),"-id","90","-M","first"],
+                       check=True, capture_output=True)
     except subprocess.CalledProcessError as e:
-        print(f"  [hhfilter 실패] {bkey}__{pname}: {e.stderr.decode(errors='ignore')[:120]}")
+        print("  [hhfilter fail]", bkey, pname, e.stderr.decode(errors="ignore")[:100], flush=True)
         raw.unlink(missing_ok=True)
         return None, len(shared)
     depth = sum(1 for l in open(flt) if l.startswith(">"))
     raw.unlink()
     return str(flt), depth
 
-# ---- 규모 먼저 확인한다 --------------------------------------------------
-# segment bait 를 다 쓰면 bait 7개 x prey 3,730개 = 26,110쌍이 되고, RF2-PPI 는
-# 쌍당 약 4초(3090 실측) x 3 replicate 라 나흘이 걸린다. paired MSA 도 130GB 다.
-# 게이트 결과가 줄일 근거를 준다: C-말단 두 조각(seg401-600 2,927 / seg440-636 2,920)은
-# full-length(2,929)와 거의 같은 유전체 집합이라 정보가 겹치고, N-말단 네 조각은
-# 깊이 660 수준으로 얕다. 그래서 1차는 full-length 만 돌리고, 결과를 본 뒤
-# 필요하면 SEGMENT_BAITS 에 깊은 조각만 추가한다.
-SEGMENT_BAITS = []                  # 예: ["ChCODH2_WT_seg440-636"]
-BAITS_TO_RUN = [b for b in ([BAIT_KEY] + SEGMENT_BAITS) if b in BAIT_MSA]
+CTRL = [k for k in baits
+        if k != BAIT_KEY and k.upper().startswith(("COOC","COOT","COOJ","COOF"))
+        and k in BAIT_MSA]
+print(f"baits_to_run {BAITS_TO_RUN} / controls {CTRL}", flush=True)
 
-_n_pairs = len(BAITS_TO_RUN) * len(PREY_MSA)
-print(f"예상 규모: bait {len(BAITS_TO_RUN)} x prey {len(PREY_MSA)} = {_n_pairs:,}쌍")
-print(f"  paired MSA 디스크 약 {_n_pairs * 5 / 1024:.0f} GB")
-print(f"  RF2-PPI 추론 약 {_n_pairs * 3 * 4 / 3600:.0f} 시간 (3 replicate, 쌍당 4초 기준)")
-need((_n_pairs <= 8000,
-      f"{_n_pairs:,}쌍은 너무 많다 — SEGMENT_BAITS 를 줄이고 다시 실행할 것"))
-# --------------------------------------------------------------------------
-
-CTRL_BAITS = [k for k in BAIT_SEQ
-              if k != BAIT_KEY and k.upper().startswith(("COOC", "COOT", "COOJ", "COOF"))
-              and k in BAIT_MSA]
-print(f"bait {len(BAITS_TO_RUN)}개 x prey {len(PREY_MSA)}개, 양성대조군 {len(CTRL_BAITS)}개")
-
-input_lines, stats = [], []
+lines, stats = [], []
 for bkey in BAITS_TO_RUN:
-    bseq, brows = BAIT_ALL[bkey], BAIT_MSA[bkey]
+    if bkey not in BAIT_MSA:
+        print("  [no bait MSA]", bkey, flush=True); continue
+    bseq, brows = baits[bkey], BAIT_MSA[bkey]
     for i, (pid, prows) in enumerate(PREY_MSA.items(), 1):
-        flt, depth = make_pair(bkey, bseq, brows, pid, sel[pid], prows)
+        if pid not in preys:
+            continue
+        flt, depth = make_pair(bkey, bseq, brows, pid, preys[pid], prows)
         stats.append((bkey, pid, depth, "skip" if flt is None else "ok"))
         if flt:
-            input_lines.append(f"{flt} {len(bseq)}")
+            lines.append(flt + " " + str(len(bseq)))
         if i % 200 == 0:
-            print(f"  {bkey}: {i}/{len(PREY_MSA)}", end="\r", file=sys.stderr)
-    print(f"  {bkey}: {len(PREY_MSA)}/{len(PREY_MSA)} 완료", file=sys.stderr)
+            print(f"  {bkey} {i}/{len(PREY_MSA)}", flush=True)
+    print(f"  {bkey} done", flush=True)
 
-# ★양성대조군: CooC/CooT/CooJ 를 bait, ChCODH2 를 prey 로 두고 같은 절차로 만든다.
-#   CooC-CooS 는 알려진 상호작용이다. 여기서 높은 점수가 안 나오면
-#   E. coli 스크리닝 결과 전체를 신뢰할 수 없다. CELL 24 에서 판정한다.
-for ck in CTRL_BAITS:
-    flt, depth = make_pair(ck, BAIT_SEQ[ck], BAIT_MSA[ck],
-                           BAIT_KEY, BAIT_SEQ[BAIT_KEY], BAIT_MSA[BAIT_KEY])
+# 양성대조군: CooC 를 bait, ChCODH2 를 prey 로. 알려진 상호작용이라 여기서
+# 점수가 안 나오면 스크리닝 전체를 신뢰할 수 없다 (CELL 24 가 판정).
+for ck in CTRL:
+    flt, depth = make_pair(ck, baits[ck], BAIT_MSA[ck],
+                           BAIT_KEY, baits[BAIT_KEY], BAIT_MSA[BAIT_KEY])
     stats.append((ck, BAIT_KEY, depth, "skip" if flt is None else "ok"))
     if flt:
-        input_lines.append(f"{flt} {len(BAIT_SEQ[ck])}")
-    print(f"  대조군 {ck} - {BAIT_KEY}: paired depth={depth} "
-          f"({'생성' if flt else 'MIN_PAIRED 미만 — 스킵'})")
-if not CTRL_BAITS:
-    print("  ⚠ 양성대조군 bait 가 없다. CELL 05 에 CooC/CooT/CooJ 서열을 넣지 않으면\n"
-          "     이 스크리닝은 검증 없이 돌아간다.")
+        lines.append(flt + " " + str(len(baits[ck])))
+    print(f"  control {ck}-{BAIT_KEY}: depth={depth} {'ok' if flt else 'SKIPPED'}", flush=True)
+if not CTRL:
+    print("  [WARN] no positive control bait", flush=True)
 
-(DIR["rf2ppi"]/"input_file").write_text("\n".join(input_lines) + "\n")
+(RF2/"input_file").write_text("\n".join(lines) + "\n")
 sdf = pd.DataFrame(stats, columns=["bait","prey","paired_depth","status"])
-sdf.to_csv(DIR["table"]/"paired_msa_stats.csv", index=False)
-print(f"\n생성 {len(input_lines)}개 / 스킵 {(sdf.status=='skip').sum()}개")
-print(sdf.query("status=='ok'").paired_depth.describe().to_string())
+sdf.to_csv(TABLE/"paired_msa_stats.csv", index=False)
+print(f"made {len(lines)} / skipped {(sdf.status=='skip').sum()}", flush=True)
+print(sdf.query("status=='ok'").paired_depth.describe().to_string(), flush=True)
+"""
+
+SRC = (SRC.replace("__BASE__", str(BASE))
+          .replace("__MINP__", str(MIN_PAIRED))
+          .replace("__BAITKEY__", BAIT_KEY)
+          .replace("__BAITS__", repr(BAITS_TO_RUN)))
+sp = DIR["script"]/"part5_paired.py"
+sp.write_text(SRC)
+print("스크립트:", sp)
+
+if not already(done("part5_paired", DIR["rf2ppi"]/"input_file"),
+               "paired MSA", f"rm {DIR['rf2ppi']}/input_file"):
+    sh_bg("part5_paired", f'python "{sp}"\necho DONE_paired', env=CONDA_ENV_RF2)
 ```
 
 ---
