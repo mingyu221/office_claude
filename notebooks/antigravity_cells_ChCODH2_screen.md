@@ -1156,6 +1156,87 @@ print("### GPU ###");   sh("nvidia-smi --query-gpu=index,utilization.gpu,memory.
 
 ---
 
+## CELL 15b — 장기 작업 진행률 (숫자로 확인)
+
+```python
+# =============================================================================
+# CELL 15b | boltz / RF2-PPI 진행률을 숫자로 본다
+#   CELL 15 는 로그 꼬리만 보여준다. tqdm 은 \r 로 같은 줄을 덮어쓰므로 tail 에는
+#   진행률이 안 잡힌다. 여기서는 \r 을 줄바꿈으로 바꾼 뒤 마지막 상태를 파싱한다.
+#   GPU 0 은 디스플레이가 물려 있어 RF2-PPI 에서 13배 느렸다. Boltz 도 같은 함정에
+#   빠질 수 있으니 s/pair 를 반드시 확인하고, 예상의 3배를 넘으면 죽이고 GPU 1 로
+#   옮기는 편이 낫다.
+# =============================================================================
+def _tqdm_state(log):
+    """tqdm 마지막 상태 -> (done, total, sec_per_item, 경과, 남은)"""
+    txt = log.read_text(errors="ignore").replace("\r", "\n")
+    hits = re.findall(r"(\d+)/(\d+)\s*\[([\d:]+)<([\d:?]+),\s*([\d.]+)(s/it|it/s)", txt)
+    if not hits:
+        return None
+    d, t, el, eta, rate, unit = hits[-1]
+    sec = float(rate) if unit == "s/it" else 1.0 / max(float(rate), 1e-9)
+    return int(d), int(t), sec, el, eta
+
+_alive = subprocess.run(["pgrep", "-af", "[b]oltz predict"],
+                        capture_output=True, text=True).stdout.strip().splitlines()
+print("=" * 74)
+print(f"살아있는 boltz 프로세스: {len(_alive)}개")
+for _l in _alive:
+    print("   ", _l[:110])
+print("-" * 74)
+
+EXPECT_SEC = 60          # GPU 1 · max_msa_seqs 2048 · 1000aa 기준 실측치
+for _job in ["part7_boltz", "part7_boltz_focus", "part7_boltz_cmp"]:
+    _log = DIR["log"] / f"{_job}.log"
+    if not _log.exists():
+        continue
+    _txt = _log.read_text(errors="ignore")
+    _st, _oom = _tqdm_state(_log), _txt.count("ran out of memory")
+    if _st is None:
+        print(f"[{_job}] tqdm 줄 없음 — 전처리 중이거나 이미 끝남")
+    else:
+        _d, _t, _sec, _el, _eta = _st
+        _flag = ("" if _sec <= EXPECT_SEC * 3 else
+                 f"   ⚠ {EXPECT_SEC}초 예상인데 {_sec:.0f}초 — GPU 배치를 의심할 것")
+        print(f"[{_job}] {_d}/{_t}  {_sec:.1f}s/pair  경과 {_el}  남은 {_eta}{_flag}")
+    if _oom:
+        print(f"   ⚠ OOM skip {_oom}건 — 그만큼 결과가 조용히 비어 있다 (CELL 28 로 확인)")
+    if _txt.strip() and _txt.strip().splitlines()[-1].startswith("DONE_"):
+        print("   완료 마커 확인 — 다음 셀로 넘어가도 된다")
+print("-" * 74)
+
+# --- RF2-PPI: replicate 별 완료 줄 수 + 실측 속도로 ETA ---
+_NREP = globals().get("N_REPLICATE", 3)
+_inp  = DIR["rf2ppi"] / "input_file"
+_tot  = sum(1 for _ in open(_inp)) if _inp.exists() else 0
+_sum, _secs = 0, []
+for _rep in range(1, _NREP + 1):
+    _rl = DIR["rf2ppi"] / f"input_rep{_rep}.log"
+    if not _rl.exists():
+        print(f"[part6_rf2ppi] rep{_rep}: 대기")
+        continue
+    _n = 0
+    for _line in open(_rl, errors="ignore"):
+        _f = _line.split()
+        if len(_f) >= 3:
+            _n += 1
+            try:    _secs.append(float(_f[2]))
+            except ValueError: pass
+    _sum += _n
+    print(f"[part6_rf2ppi] rep{_rep}: {_n}/{_tot}")
+if _tot and _secs:
+    _left = _tot * _NREP - _sum
+    _rate = sum(_secs[-200:]) / len(_secs[-200:])
+    print(f"  전체 {_sum}/{_tot*_NREP} ({100*_sum/(_tot*_NREP):.1f}%)  "
+          f"{_rate:.2f}s/pair  남은 시간 약 {_left*_rate/3600:.1f}시간")
+print("-" * 74)
+sh("nvidia-smi --query-gpu=index,utilization.gpu,memory.used,memory.total "
+   "--format=csv,noheader", check=False)
+sh("nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader", check=False)
+```
+
+---
+
 ## CELL 16 — Part 3. Feasibility gate 검색
 
 ```python
