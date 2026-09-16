@@ -73,6 +73,8 @@ PLAN = """
   CELL 28a-5                  그 결과를 Track B 분포 대비 백분위로 판정
   CELL 28a-6                  막단백질 교란 점검 (상위권이 수송체로 채워졌는가)
   CELL 28a-7 → 28a-8          Ni 이 실제로 어디 놓였는지 좌표로 확인
+  CELL 28a-9 (BG·GPU, 1시간)   MG1655·Y19 금속 모티프 단백질 co-folding
+  CELL 28a-10                 세 균주 비교 판정 (대조군이 있어야 해석된다)
                               (계면 0/348 — ligand_iptm 폐기 근거)
   CELL 28b → 28c              (선택) Foldseek-Interface 계면 대조
 
@@ -2362,6 +2364,179 @@ print("  로컬에서:  scp -r unsit@100.81.7.34:" + str(NIV) + " ~/Desktop/")
 print("             cd ~/Desktop/ni_view && pymol view.pml")
 print("  ※ 배위 잔기가 Cys 여러 개면 진짜 금속 자리, Asp/Glu 산소 한둘에 3.5A 언저리면")
 print("     모델이 표면에 얹어놓은 것이다. coordination.txt 로 뷰어 없이 판단 가능하다.")
+```
+
+---
+
+## CELL 28a-9 — Part 7d-9. MG1655 · Y19 metal 모티프 단백질 co-folding (대조군)
+
+```python
+# =============================================================================
+# CELL 28a-9 | 다른 두 균주의 금속 모티프 단백질도 같은 방식으로 co-folding 한다
+#   지금까지 계산은 BL21 만 했다. 그런데 실험의 전제가 "BL21 은 되고 MG1655 는
+#   안 된다" 이므로, 대조군 없이 BL21 후보만 보는 것은 비교가 성립하지 않는다.
+#     BL21   : folddisco 29 / Boltz 321+27 / RF2-PPI 진행 중
+#     Y19    : folddisco 30 / Boltz 없음
+#     MG1655 : folddisco 21 / Boltz 없음
+#   -> 여기서 Y19 30 + MG1655 21 = 51쌍을 채워 세 균주를 같은 축에 올린다.
+#
+#   서열 출처가 균주마다 다르다:
+#     Y19    crosswalk 로 GenBank ID 가 붙어 있으므로 y19_db_match.faa 에서 가져온다
+#     MG1655 공식 배포 인덱스라 crosswalk 이 없다. tid 의 UniProt accession 으로
+#            UniProt REST 에서 직접 받는다 (실측: 21건 모두 조회됨)
+#   ※ AlphaFold 버전 차이(BL21 v6 / MG1655 v4)는 folddisco 선택 단계에만 영향을
+#     준다. Boltz 는 구조가 아니라 서열에서 접으므로 이 비교 자체는 공정하다.
+# =============================================================================
+need((have("BAIT_KEY", "BAIT_ALL"), "CELL 07 을 먼저 돌릴 것"))
+import yaml as _y, urllib.request
+
+CMP_GPU      = 0          # RF2-PPI 가 GPU 1 을 쓰는 동안 여기는 0
+BOLTZ_MAXMSA = globals().get("BOLTZ_MAXMSA", 2048)
+MAX_TOTAL    = 1830       # bait+prey 토큰 상한 (24GB 에서 안전한 선)
+
+def _read_fasta(path):
+    out, nm, buf = {}, None, []
+    for l in open(path, errors="ignore"):
+        if l.startswith(">"):
+            if nm: out[nm] = "".join(buf)
+            nm, buf = l[1:].split()[0], []
+        else: buf.append(l.strip())
+    if nm: out[nm] = "".join(buf)
+    return out
+
+fdd = pd.read_csv(DIR["table"]/"folddisco_metal_motif_detail.csv")
+targets = {}      # (strain, id) -> seq
+
+# ---- Y19: crosswalk 으로 GenBank ID 가 붙어 있다 ----
+y19_seq = _read_fasta(ASSET["faa_y19"])
+for pid in fdd[fdd.strain == "Y19"].protein.dropna().unique():
+    if pid in y19_seq:
+        targets[("Y19", pid)] = y19_seq[pid]
+print(f"Y19  {len([k for k in targets if k[0]=='Y19'])}개")
+
+# ---- MG1655: tid 의 UniProt accession 으로 REST 조회 ----
+mg_acc = sorted({m.group(1) for t in fdd[fdd.strain == "MG1655"].tid_stem.dropna()
+                 for m in [re.search(r"AF-([A-Z0-9]+)-F", str(t))] if m})
+print(f"MG1655 accession {len(mg_acc)}개 조회 중...")
+try:
+    url = ("https://rest.uniprot.org/uniprotkb/stream?query="
+           + "%20OR%20".join(f"accession:{a}" for a in mg_acc) + "&format=fasta")
+    with urllib.request.urlopen(url, timeout=120) as r:
+        fa = r.read().decode()
+    nm, buf = None, []
+    for l in fa.splitlines():
+        if l.startswith(">"):
+            if nm: targets[("MG1655", nm)] = "".join(buf)
+            nm, buf = l.split("|")[1], []
+        else: buf.append(l.strip())
+    if nm: targets[("MG1655", nm)] = "".join(buf)
+except Exception as e:
+    print(f"  ⚠ UniProt 조회 실패: {e}")
+print(f"MG1655 {len([k for k in targets if k[0]=='MG1655'])}개")
+
+# ---- 입력 YAML ----
+bseq = BAIT_ALL[BAIT_KEY]
+cin = DIR["boltz"]/"inputs_cmp"; cin.mkdir(parents=True, exist_ok=True)
+for f in cin.glob("*.yaml"): f.unlink()
+n, skip = 0, []
+for (strain, pid), sq in sorted(targets.items()):
+    if len(bseq) + len(sq) > MAX_TOTAL:
+        skip.append((strain, pid, len(sq))); continue
+    (cin/f"{BAIT_KEY}__{strain}-{pid}.yaml").write_text(_y.safe_dump({
+        "version": 1,
+        "sequences": [
+            {"protein": {"id": "A", "sequence": bseq}},
+            {"protein": {"id": "B", "sequence": sq}},
+            {"ligand":  {"id": "C", "ccd": "NI"}},
+        ]}, sort_keys=False))
+    n += 1
+print(f"\n입력 {n}개 -> {cin}")
+if skip: print(f"길이 초과 제외 {len(skip)}개: {skip}")
+print(f"예상 소요: {n} x 약 60초 = 약 {n/60:.1f}시간 (GPU {CMP_GPU})")
+
+script = f"""
+cd "{DIR['boltz']}"
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+CUDA_VISIBLE_DEVICES={CMP_GPU} boltz predict inputs_cmp \\
+  --out_dir out_cmp \\
+  --use_msa_server \\
+  --max_msa_seqs {BOLTZ_MAXMSA} \\
+  --recycling_steps 3 \\
+  --diffusion_samples 1 \\
+  --output_format mmcif \\
+  --num_workers 2
+echo DONE_boltz_cmp
+"""
+_busy = subprocess.run("pgrep -f '[b]oltz predict'", shell=True,
+                       capture_output=True, text=True).stdout.split()
+if _busy:
+    print(f"⚠ boltz 가 이미 돌고 있다 (pid {' '.join(_busy)}). 새로 띄우지 않았다.")
+elif not already(done("part7_boltz_cmp", DIR["boltz"]/"out_cmp"),
+                 "MG1655·Y19 비교 예측", f"rm -rf {DIR['boltz']}/out_cmp"):
+    sh_bg("part7_boltz_cmp", script, env=CONDA_ENV_BOLTZ)
+```
+
+---
+
+## CELL 28a-10 — Part 7d-10. 세 균주 비교 판정
+
+```python
+# =============================================================================
+# CELL 28a-10 | BL21 · Y19 · MG1655 의 금속 모티프 단백질을 같은 축에서 비교
+#   묻는 것: 금속 자리를 가진 단백질 중 BL21 것이 ChCODH2 와 더 잘 붙는가.
+#   실험 관찰("BL21 lysate 만 활성을 회복시킨다")을 계산으로 옮긴 형태다.
+#   길이 구간별로 나눠 본다 — ipTM 은 짧은 prey 를 부풀리므로 (CELL 28a) 전체를
+#   한 줄로 세우면 길이 분포 차이가 균주 차이로 오독된다.
+# =============================================================================
+need(((DIR["boltz"]/"out_cmp").exists(), "CELL 28a-9 를 먼저 돌릴 것"))
+BINS = [0, 50, 100, 200, 400, 10**5]
+
+def collect(dirname, strain_from):
+    rows = []
+    for f in glob.glob(str(DIR["boltz"]/dirname/"**"/"confidence_*.json"), recursive=True):
+        c = json.load(open(f))
+        nm = re.sub(r"^confidence_|_model_\d+$", "", Path(f).stem).split("__")[-1]
+        st, pid = strain_from(nm)
+        rows.append({"strain": st, "protein": pid, "iptm": c.get("iptm"),
+                     "ligand_iptm": c.get("ligand_iptm"),
+                     "complex_plddt": c.get("complex_plddt")})
+    return pd.DataFrame(rows)
+
+C = collect("out_cmp", lambda n: tuple(n.split("-", 1)) if "-" in n else ("?", n))
+F = collect("out_focus", lambda n: ("BL21", n))
+ALL = pd.concat([F, C], ignore_index=True).drop_duplicates(["strain","protein"])
+print("예측 건수:"); print(ALL.strain.value_counts().to_string())
+
+# 길이: BL21/Y19 는 faa, MG1655 는 folddisco 의 nres 로 대신한다
+fdd = pd.read_csv(DIR["table"]/"folddisco_metal_motif_detail.csv")
+nres = {}
+for r in fdd.itertuples(index=False):
+    m = re.search(r"AF-([A-Z0-9]+)-F", str(r.tid_stem))
+    if pd.notna(r.protein): nres[str(r.protein)] = r.nres
+    if m: nres[m.group(1)] = r.nres
+ALL["prey_len"] = ALL.protein.map(nres)
+ALL["len_bin"]  = pd.cut(ALL.prey_len, BINS)
+
+print("\n=== 균주별 ipTM ===")
+print(ALL.groupby("strain").iptm.agg(n="count", mean="mean", median="median",
+                                     max="max").round(3).to_string())
+print("\n=== 길이 구간 x 균주 (평균 ipTM) ===")
+print(ALL.pivot_table(index="len_bin", columns="strain", values="iptm",
+                      aggfunc="mean", observed=True).round(3).to_string())
+print("\n=== 균주별 상위 8 ===")
+for st in ["BL21", "Y19", "MG1655"]:
+    sub = ALL[ALL.strain == st].nlargest(8, "iptm")
+    if len(sub):
+        print(f"\n[{st}]")
+        print(sub[["protein","prey_len","iptm","ligand_iptm","complex_plddt"]].to_string(index=False))
+
+ALL.to_csv(DIR["table"]/"metal_motif_3strain_boltz.csv", index=False, encoding="utf-8-sig")
+print("\n저장:", DIR["table"]/"metal_motif_3strain_boltz.csv")
+print("\n※ 해석 주의")
+print("   - 균주별 ipTM 평균이 비슷하면 '금속 자리 보유'만으로는 균주를 못 가른다는 뜻이다.")
+print("   - BL21 이 뚜렷이 높아야 실험 관찰과 방향이 맞는다.")
+print("   - 표본이 작다 (BL21 27 / Y19 30 / MG1655 21). 차이를 단정하지 말 것.")
+print("   - diffusion_samples=1 이라 각 값은 단일 표본이다. 재현성 정보가 없다.")
 ```
 
 ---
