@@ -3,7 +3,8 @@
 **제목** Engineering CO dehydrogenases with enhanced electron mediator affinity
 through docking-distilled protein language models
 
-**일자** 2026-09-16 · **형식** 내부 진척 보고 (본 16장 + 백업 6장)
+**일자** 2026-09-16 · **형식** 내부 진척 보고 (본 17장 + 백업 7장 = 총 24장)
+**산출물** `20260916_progress_ko.pptx` · 생성 스크립트 `build_ko.js` (`npm i pptxgenjs && node build_ko.js`)
 **작성 원칙** 슬라이드 제목이 곧 결론(두괄식). 본문은 근거 3줄 이내. 수치는 표·그림으로.
 **서술 수위** 내부 발표 — "EV 결합부위 도킹으로 결합친화도 예측" 직접 표현 사용 (B6 참조)
 
@@ -17,8 +18,8 @@ through docking-distilled protein language models
 | 2 | 도킹 프로토콜 확정 | 5–9 | 이량체 · 41번 CA · 반변 15 Å |
 | 3 | 학습·평가셋 확정 | 10–13 | 212 대표, 157/55, 라벨 생성 전 고정 |
 | 4 | 구조 확보와 조립 | 14–15 | 321개 조립 완료, 조립 편향 < 측정 잡음 |
-| 5 | 진행·계획 | 16 | 도킹 321개 실행 + 노이즈 바닥 측정 |
-| B | 백업 | B1–B6 | 질의 대응 · 외부 전환용 |
+| 5 | 진행·계획 | 17 | 도킹 321개 실행 + 노이즈 바닥 측정 |
+| B | 백업 | 18–24 | 백업 표지 + B1–B6 질의 대응 · 외부 전환용 |
 
 ---
 
