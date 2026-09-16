@@ -72,6 +72,8 @@ PLAN = """
   CELL 28a-4 (BG·GPU, 30분)   metal 모티프 보유 단백질에 co-folding 증거 추가
   CELL 28a-5                  그 결과를 Track B 분포 대비 백분위로 판정
   CELL 28a-6                  막단백질 교란 점검 (상위권이 수송체로 채워졌는가)
+  CELL 28a-7 → 28a-8          Ni 이 실제로 어디 놓였는지 좌표로 확인
+                              (계면 0/348 — ligand_iptm 폐기 근거)
   CELL 28b → 28c              (선택) Foldseek-Interface 계면 대조
 
 단계 G. Track C + 통합                                       (수십 분)
@@ -2182,6 +2184,169 @@ print("   1) 길이   — 짧은 prey 일수록 ipTM 이 부풀려진다 (CELL 2
 print("   2) 구조품질 — pLDDT 낮은 단편은 folddisco idf 와 ipTM 을 동시에 부풀린다 (CELL 28a-3)")
 print("   3) 막소수성 — 지질이 놓일 자리에 파트너가 대신 들어간다 (이 셀)")
 print("   RF2-PPI(공진화)는 셋 모두와 무관한 축이므로 Track A 결과가 판정의 중심이다.")
+```
+
+---
+
+## CELL 28a-7 — Part 7d-7. Boltz 가 Ni 을 실제로 어디에 놓았나
+
+```python
+# =============================================================================
+# CELL 28a-7 | ligand_iptm 이 무엇을 재고 있었는지 좌표로 확인한다
+#   Ni 을 리간드로 넣은 이유는 "Ni 이 두 사슬 경계면에 놓이는가"를 묻기 위해서였다.
+#   그게 실제로 일어났는지는 점수가 아니라 좌표를 봐야 안다.
+#   실측(348 구조): 계면 0 / ChCODH2 쪽 335 / 후보 쪽 13.
+#   -> 전달 복합체는 한 번도 모델링되지 않았다. ligand_iptm 은 "Ni 이 계면에 있나"가
+#      아니라 "ChCODH2 안 어디에 박혔나"를 재고 있었고, 그래서 길이와 rho=-0.81 로
+#      묶였다 (CELL 28a). 이 지표는 랭킹 축에서 제외한다.
+#   배위 거리는 타당했다: A측 평균 2.24A, B측 1.90~2.29A (Ni-S 2.2 / Ni-O 2.0 근처).
+#   모델이 아무 데나 얹은 게 아니라 진짜 금속 자리를 고른 것이다.
+# =============================================================================
+import math
+from collections import Counter
+CUT_NI = 3.5          # 배위 거리 상한 (A)
+
+def cif_atoms(cif):
+    # _atom_site 루프를 헤더 순서대로 읽는다 (컬럼 순서가 파일마다 다를 수 있다)
+    cols, rows, inloop = [], [], False
+    for ln in open(cif, errors="ignore"):
+        if ln.startswith("_atom_site."):
+            cols.append(ln.strip().split(".")[1]); inloop = True; continue
+        if inloop:
+            if ln.startswith(("#", "loop_", "_")) or not ln.strip():
+                if cols and rows: break
+                continue
+            f = ln.split()
+            if len(f) == len(cols): rows.append(f)
+    i = {c: k for k, c in enumerate(cols)}
+    out = []
+    for f in rows:
+        try:
+            out.append((f[i["label_comp_id"]], f[i["label_asym_id"]], f[i["label_seq_id"]],
+                        f[i["label_atom_id"]],
+                        float(f[i["Cartn_x"]]), float(f[i["Cartn_y"]]), float(f[i["Cartn_z"]])))
+        except (KeyError, ValueError):
+            pass
+    return out
+
+rows = []
+for d in ["out", "out_focus"]:
+    for cif in glob.glob(str(DIR["boltz"]/d/"**"/"*_model_0.cif"), recursive=True):
+        name = Path(cif).stem.replace("_model_0", "")
+        A = cif_atoms(cif)
+        ni = [a for a in A if a[0] == "NI"]
+        if not ni:
+            rows.append({"set": d, "pair": name, "Ni": "없음"}); continue
+        _, _, _, _, x, y, z = ni[0]
+        near, mind = Counter(), {}
+        for comp, ch, seq, at, ax, ay, az in A:
+            if comp == "NI": continue
+            dist = math.dist((x, y, z), (ax, ay, az))
+            mind[ch] = min(mind.get(ch, 9e9), dist)
+            if dist <= CUT_NI: near[(ch, seq)] = 1
+        chains = Counter(ch for ch, _ in near)
+        rows.append({"set": d, "pair": name, "Ni": "있음",
+                     "A_배위": chains.get("A", 0), "B_배위": chains.get("B", 0),
+                     "A_최단": round(mind.get("A", float("nan")), 2),
+                     "B_최단": round(mind.get("B", float("nan")), 2),
+                     "계면": chains.get("A", 0) > 0 and chains.get("B", 0) > 0})
+
+NIP = pd.DataFrame(rows)
+def _where(r):
+    if r.get("Ni") == "없음": return "Ni 없음"
+    if r.get("계면"):          return "계면 (양쪽 사슬에 배위)"
+    if r.get("A_배위", 0) > 0: return "ChCODH2 쪽만"
+    if r.get("B_배위", 0) > 0: return "후보 쪽만"
+    return f"어디에도 안 붙음 (>{CUT_NI}A)"
+NIP["위치"] = NIP.apply(_where, axis=1)
+
+print(f"구조 {len(NIP)}개\n")
+print(NIP.위치.value_counts().to_string())
+print("\n=== ChCODH2 쪽 Ni 최단거리 분포 ===")
+print(NIP[NIP.A_배위 > 0].A_최단.describe().round(2).to_string())
+NIP.to_csv(DIR["table"]/"boltz_ni_placement.csv", index=False)
+print("\n저장:", DIR["table"]/"boltz_ni_placement.csv")
+```
+
+---
+
+## CELL 28a-8 — Part 7d-8. Ni 을 후보 쪽에 뺏어온 단백질 + 구조 묶기
+
+```python
+# =============================================================================
+# CELL 28a-8 | 636잔기 CODH 의 C-cluster 자리를 제치고 Ni 을 가져간 단백질들
+#   insertase 라면 금속을 든 쪽이 공여자이므로, 이 구도가 의도했던 "전달"에 가깝다.
+#   실측: Track B 321개 중 7개(2.2%) vs metal 모티프 27개 중 6개(22.2%) — 10배.
+#   -> Folddisco 가 CooC1 의 Cys 쌍 기하로 고른 것들이 독립 모델(Boltz)에서도
+#      강한 금속 자리로 확인됐다. 모티프 검색의 "정밀도"는 신뢰할 만하다
+#      (MinD 를 놓친 데서 보듯 민감도는 별개 문제다 — CELL 28a-6 참조).
+#
+#   ⚠ 다만 이것이 Ni insertase 를 가리키지는 않는다. 실측된 6개는 전부 아연
+#     단백질이었다 (HslO, Tgt, PhnP, HisB, YeiR, GmhB). Ni(2+)와 Zn(2+)는 배위
+#     선호가 비슷하고, 구조 예측 모델은 전자 구조를 계산하지 않아 둘을 구분하지
+#     못한다. 즉 이 분석은 "2가 금속 자리 탐지기"다.
+#     Ni/Zn 선택성은 계산으로 못 가른다 — 정제 단백질의 금속 재구성·ICP-MS 가 답한다.
+# =============================================================================
+need((have("NIP"), "CELL 28a-7 을 먼저 돌릴 것"))
+NIP["prey"] = NIP.pair.str.split("__").str[-1]
+_B = pd.read_csv(DIR["table"]/"trackB_boltz2_ranked.csv").set_index("prey")
+_M = set(pd.read_csv(DIR["table"]/"folddisco_metal_motif.csv").protein)
+
+sub = NIP[NIP.B_배위 > 0].copy()
+sub["iptm"]  = sub.prey.map(lambda x: _B.loc[x, "iptm"] if x in _B.index else float("nan"))
+sub["metal"] = sub.prey.isin(_M)
+sub["desc"]  = sub.prey.map(lambda x: hdr2desc.get(x, "")[:55])
+print("=== Ni 이 후보 단백질 쪽에 놓인 쌍 ===")
+print(sub.sort_values("B_배위", ascending=False)
+         [["set","prey","B_배위","B_최단","iptm","metal","desc"]].to_string(index=False))
+
+for tag, n in [("Track B", (NIP.set == "out").sum()), ("focus", (NIP.set == "out_focus").sum())]:
+    k = ((NIP.B_배위 > 0) & (NIP.set == ("out" if tag == "Track B" else "out_focus"))).sum()
+    print(f"\n{tag}: {k}/{n} = {100*k/max(n,1):.1f}% 가 Ni 을 후보 쪽에 가져감")
+
+# ---- 구조 파일 묶기 + 배위 잔기 목록 + PyMOL 스크립트 ----
+NIV = DIR["boltz"].parent/"ni_view"; NIV.mkdir(exist_ok=True)
+for f in NIV.iterdir(): f.unlink()
+cifs = {Path(c).stem.replace("_model_0",""): c
+        for d in ["out","out_focus"]
+        for c in glob.glob(str(DIR["boltz"]/d/"**"/"*_model_0.cif"), recursive=True)}
+
+pml, report = ["bg_color white", "set cartoon_transparency, 0.4", ""], []
+for name in sub.pair:
+    cif = cifs.get(name)
+    if not cif: continue
+    prey = name.split("__")[-1]
+    tag  = f"{prey}_B측"
+    dst  = NIV/f"{tag}.cif"
+    shutil.copy(cif, dst)
+    A  = cif_atoms(cif)
+    _, _, _, _, x, y, z = [a for a in A if a[0] == "NI"][0]
+    near = {}
+    for comp, ch, seq, at, ax, ay, az in A:
+        if comp == "NI": continue
+        dist = math.dist((x, y, z), (ax, ay, az))
+        k = (ch, seq, comp)
+        if dist <= 4.0 and (k not in near or dist < near[k][0]):
+            near[k] = (dist, at)
+    report.append(f"\n### {tag}\n    {hdr2desc.get(prey,'')[:70]}")
+    for dist, ch, seq, comp, at in sorted((d_, c_, s_, m_, a_)
+                                          for (c_, s_, m_), (d_, a_) in near.items()):
+        report.append(f"    {dist:4.2f} A  chain{ch}({'ChCODH2' if ch=='A' else '후보'})  {comp}{seq}  {at}")
+    pml += [f"load {dst.name}, {tag}", f"hide everything, {tag}", f"show cartoon, {tag}",
+            f"color grey70, {tag} and chain A", f"color skyblue, {tag} and chain B",
+            f"show spheres, {tag} and resn NI", f"color green, {tag} and resn NI",
+            f"set sphere_scale, 0.5, {tag} and resn NI",
+            f"show sticks, byres ({tag} and polymer within 4 of ({tag} and resn NI))",
+            f"color orange, byres ({tag} and polymer within 4 of ({tag} and resn NI))", ""]
+
+(NIV/"view.pml").write_text("\n".join(pml + ["disable all", "orient"]))
+(NIV/"coordination.txt").write_text("\n".join(report))
+print("\n".join(report))
+print(f"\n저장: {NIV}")
+print("  로컬에서:  scp -r unsit@100.81.7.34:" + str(NIV) + " ~/Desktop/")
+print("             cd ~/Desktop/ni_view && pymol view.pml")
+print("  ※ 배위 잔기가 Cys 여러 개면 진짜 금속 자리, Asp/Glu 산소 한둘에 3.5A 언저리면")
+print("     모델이 표면에 얹어놓은 것이다. coordination.txt 로 뷰어 없이 판단 가능하다.")
 ```
 
 ---
