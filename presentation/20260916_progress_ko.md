@@ -4,7 +4,12 @@
 through docking-distilled protein language models
 
 **일자** 2026-09-16 · **형식** 내부 진척 보고 (본 17장 + 백업 7장 = 총 24장)
-**산출물** `20260916_progress_ko.pptx` · 생성 스크립트 `build_ko.js` (`npm i pptxgenjs && node build_ko.js`)
+**산출물** 한글 `20260916_progress_ko.pptx` (24장) · 영문 `20260916_progress_en.pptx` (25장)
+**생성 스크립트** `build_ko.js` / `build_en.js` — `npm i pptxgenjs && node build_ko.js`
+
+> **영문판은 한글판 + Objective & scope 슬라이드 1장**(3번)이다. 그 슬라이드는 목표·접근·성공 기준을
+> 한 줄씩 제시하고, 변이체(local·dense)와 상동체(global·sparse) 두 레짐의 역할 분담과 scope 밖 항목을
+> 명시한다. 한글판에는 아직 반영하지 않았다.
 **작성 원칙** 슬라이드 제목이 곧 결론(두괄식). 본문은 근거 3줄 이내. 수치는 표·그림으로.
 **서술 수위** 내부 발표 — "EV 결합부위 도킹으로 결합친화도 예측" 직접 표현 사용 (B6 참조)
 
