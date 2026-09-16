@@ -1639,7 +1639,12 @@ R_best = R_scr.sort_values("mean", ascending=False).groupby("prey").agg(
 
 meta = cls_prey.set_index("protein")
 R_best = R_best.join(meta[["category","pident"]], how="left")
-R_best = R_best.join(sdf.query("status=='ok'").groupby("prey").paired_depth.max(), how="left")
+# paired_depth 를 함께 둔다. hhfilter 는 90% 동일성으로 중복을 걷어내므로 필터 후
+# 깊이가 크게 떨어질 수 있다 (실측: 공유 유전체는 50개 넘었는데 필터 후 4줄인 쌍이
+# 있었다). 얕은 MSA 의 공진화 점수는 못 믿으니 해석 단계에서 이 값을 함께 본다.
+# CELL 21 이 백그라운드로 도므로 변수가 아니라 파일에서 읽는다.
+_sdf = pd.read_csv(DIR["table"]/"paired_msa_stats.csv")
+R_best = R_best.join(_sdf.query("status=='ok'").groupby("prey").paired_depth.max(), how="left")
 R_best["desc"] = [hdr2desc.get(i, "")[:70] for i in R_best.index]
 
 R.to_csv(DIR["table"]/"trackA_RF2PPI_all_pairs.csv")
@@ -1649,6 +1654,8 @@ print(R_best.head(40).to_string())
 print("\nmean>=0.74 (strict):", int((R_best["mean"] >= 0.74).sum()))
 print("mean>=0.05 (loose) :", int((R_best["mean"] >= 0.05).sum()))
 print("sd>0.1 (재현성 낮음, 재실행 권장):", int((R_best["sd"] > 0.1).sum()))
+print("\n※ paired_depth 가 100 미만인 후보는 점수를 그대로 믿지 말 것.")
+print(f"   깊이 100 미만 후보: {int((R_best.paired_depth < 100).sum())}개")
 ```
 
 ---
