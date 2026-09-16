@@ -136,6 +136,45 @@ function note(s, x, y, w, txt, col){
   foot(s);
 }
 
+/* ───────────────────────── S3 Objective & scope ───────────────────────── */
+{
+  const s = newSlide();
+  head(s, "OBJECTIVE  &  SCOPE", "서열만으로 CODH 족의 매개체 결합친화도 순위를 매긴다");
+  card(s, M, 1.82, CW, 0.88, TINT, LINE);
+  plain(s, "도킹 점수로 증류한 단백질 언어모델로 후보 서열의 순위를 매겨, 전자매개체(EV) 결합친화도가 향상된 CO 탈수소효소 서열을 찾아낸다.",
+    { x:M+0.32, y:2.02, w:CW-0.64, size:14, bold:true, color:DEEP, ls:1.18 });
+
+  const OC = [
+    ["무엇이 어려운가", ACCENT, "실측 Km이 21건뿐이라 서열 모델을 직접 지도할 수 없다. 이 족에는 90%를 넘는 근연 상동체도 거의 없다."],
+    ["접근", DEEP, "도킹으로 라벨을 대량 생성한다 — 변이체 288개와 상동체 321개. 회귀 헤드가 이를 ESM 임베딩으로 증류하므로 추론에는 구조가 필요 없고 족 전체 1,827개로 확장된다."],
+    ["성공 기준", DEEP, "고정된 55개 평가셋의 Spearman ρ. 109개 클러스터 내 쌍에서 측정한 도킹 노이즈 바닥을 넘어야 한다."]
+  ];
+  OC.forEach((c,i) => {
+    const x = M + i*4.12;
+    card(s, x, 2.88, 3.85, 1.62, i===0?"FBEEE2":TINT2, i===0?"E8C9A8":LINE);
+    plain(s, c[0], { x:x+0.26, y:3.06, w:3.33, size:12.5, bold:true, color:c[1] });
+    plain(s, c[2], { x:x+0.26, y:3.40, w:3.33, size:10.5, color:TEXT, ls:1.2 });
+  });
+
+  plain(s, "Scope strategy — 두 레짐이 서로 답하지 못하는 것을 답한다",
+    { x:M, y:4.70, w:CW, size:13.5, bold:true, color:TEXT });
+  const RG = [
+    ["변이체 레짐", "local  ·  dense", "1SU6 골격 하나 위의 변이체 288개, 15위치 × 19치환. 곁사슬만 바뀌고 골격 이완이 없다. 이 레짐이 도킹 점수를 실측 Km에 고정시킨다 (ρ = 0.90)."],
+    ["상동체 레짐", "global  ·  sparse", "identity 28.5–74.8%에 걸친 클러스터 대표 212개, 구조마다 별개로 예측하고 조립했다. 이 레짐이 골격이 바뀌어도 점수가 살아남는지를 검정한다."]
+  ];
+  RG.forEach((r,i) => {
+    const x = M + i*6.15;
+    card(s, x, 5.04, 5.85, 1.30, TINT2, LINE);
+    plain(s, r[0], { x:x+0.28, y:5.20, w:3.2, size:13, bold:true, color:DEEP });
+    plain(s, r[1], { x:x+3.40, y:5.24, w:2.2, size:10.5, bold:true, color:ACCENT, align:"right" });
+    plain(s, r[2], { x:x+0.28, y:5.56, w:5.3, size:10.5, color:TEXT, ls:1.2 });
+  });
+  plain(s, "SCOPE 밖   절대 결합친화도  ·  Fe-S 보조인자 정전기 환경  ·  기존 21건을 넘는 실험 검증",
+    { x:M, y:6.48, w:CW, size:10.5, bold:true, color:GRAY });
+  s.addNotes("두 레짐은 상호 보완이다. 변이체는 점수를 실험에 묶고, 상동체는 일반화를 검정한다. 어느 한쪽만으로는 주장이 성립하지 않는다.");
+  foot(s);
+}
+
 /* ───────────────────────── S3 문제 정의 ───────────────────────── */
 {
   const s = newSlide();
