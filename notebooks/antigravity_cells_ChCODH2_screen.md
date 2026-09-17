@@ -3722,6 +3722,215 @@ else:
 
 ---
 
+## CELL 29e — Cys4 히트의 균주 특이성 (분류표 없이 mmseqs 로 직접)
+
+```python
+# =============================================================================
+# CELL 29e | Cys4 자리를 가진 BL21 단백질 중 MG1655 에 없는 것을 찾는다
+#   CELL 29d 의 분류표 교차는 ID 계열이 안 맞아 판정 불가였다. 분류표를 기다리지
+#   않고 mmseqs 로 직접 묻는다 — "이 단백질이 MG1655 프로테옴에 있는가".
+#   판정 기준은 기존 분류와 같은 뜻으로 맞춘다.
+#     히트 없음            -> strain-specific   (MG1655 에 상동체 없음)
+#     fident < 0.90        -> low-similarity    (있지만 멀다)
+#     0.90 <= fident < 1.0 -> high-similarity
+#     fident = 1.000       -> identical
+#   앞의 둘이 '균주 특이' 축이다. 여섯 축 중 유일하게 아직 안 본 축이다.
+# =============================================================================
+need(((DIR["folddisco"]/"cys4").exists(), "CELL 29c 를 먼저 돌릴 것"))
+FAA = {"BL21": ASSET["faa_bl21"], "Y19": ASSET["faa_y19"], "MG1655": ASSET["faa_mg1655"]}
+SEQ, HDR = {}, {}
+for st, fa in FAA.items():
+    s_, h_, nm, buf = {}, {}, None, []
+    for l in open(fa, errors="ignore"):
+        if l.startswith(">"):
+            if nm: s_[nm] = "".join(buf)
+            t = l[1:].rstrip(); nm = t.split()[0]; buf = []
+            h_[nm] = t[len(nm):].strip()
+        else: buf.append(l.strip())
+    if nm: s_[nm] = "".join(buf)
+    SEQ[st], HDR[st] = s_, h_
+
+xw = pd.read_csv(DIR["table"]/"id_crosswalk_struct_to_genbank.csv") \
+     if (DIR["table"]/"id_crosswalk_struct_to_genbank.csv").exists() else pd.DataFrame()
+xwm = xw.dropna(subset=["protein"]).set_index("tid")["protein"].to_dict() if len(xw) else {}
+
+# BL21 Cys4 히트 합집합
+CY4, PERQ = set(), {}
+for f in sorted((DIR["folddisco"]/"cys4").glob("cys4_*_BL21.tsv")):
+    if not f.stat().st_size: continue
+    q = re.match(r"cys4_(.+)_BL21\.tsv", f.name).group(1)
+    d = pd.read_csv(f, sep="\t"); d.columns = [c.strip().lstrip("#") for c in d.columns]
+    d["stem"] = d.tid.apply(lambda x: Path(str(x)).stem)
+    d["key"]  = d.stem.map(xwm).astype(str).str.split(",").str[0]
+    ks = {k for k in d.key if k in SEQ["BL21"]}
+    PERQ[q] = ks; CY4 |= ks
+    print(f"  {q}: {len(ks)}개")
+print(f"\nBL21 Cys4 합집합 {len(CY4)}개")
+need((len(CY4) > 0, "Cys4 히트가 비었다 — CELL 29c 출력을 확인할 것"))
+
+QF = DIR["seq"]/"bl21_cys4.faa"
+QF.write_text("".join(f">{k}\n{SEQ['BL21'][k]}\n" for k in sorted(CY4)))
+_tmp = DIR["tmp"]/"cys4map"; _tmp.mkdir(parents=True, exist_ok=True)
+FMT = "query,target,fident,alnlen,qcov,tcov,evalue,bits"
+BEST = {}
+for st in ["MG1655", "Y19"]:
+    out = DIR["search"]/f"cys4_bl21_vs_{st}.m8"
+    if not (out.exists() and out.stat().st_size):
+        sh(f'mmseqs easy-search "{QF}" "{FAA[st]}" "{out}" "{_tmp}" '
+           f'--format-output "{FMT}" -e 1e-3 --threads {min(THREADS,16)} -v 1', check=False)
+    if out.exists() and out.stat().st_size:
+        d = pd.read_csv(out, sep="\t", names=FMT.split(","))
+        d = d[d.qcov >= 0.70].sort_values("bits", ascending=False).drop_duplicates("query")
+        BEST[st] = d.set_index("query")
+
+def verdict(k, st):
+    d = BEST.get(st)
+    if d is None or k not in d.index: return "strain-specific", None
+    f = float(d.loc[k, "fident"])
+    return ("identical" if f >= 0.999 else
+            "high-similarity" if f >= 0.90 else "low-similarity"), round(f, 3)
+
+rows = []
+for k in sorted(CY4):
+    c_mg, f_mg = verdict(k, "MG1655")
+    c_y, f_y   = verdict(k, "Y19")
+    rows.append({"protein": k, "len": len(SEQ["BL21"][k]),
+                 "vs_MG1655": c_mg, "fident_MG1655": f_mg,
+                 "vs_Y19": c_y, "fident_Y19": f_y,
+                 "queries": "+".join(q for q, s in PERQ.items() if k in s),
+                 "desc": HDR["BL21"].get(k, "")[:75]})
+V = pd.DataFrame(rows)
+V["bl21_specific"] = V.vs_MG1655.isin(["strain-specific", "low-similarity"]).astype(int)
+V = V.sort_values(["bl21_specific", "vs_MG1655", "protein"], ascending=[False, True, True])
+V.to_csv(DIR["table"]/"cys4_bl21_strain_specificity.csv", index=False, encoding="utf-8-sig")
+
+print("\n=== MG1655 대비 판정 ===")
+print(V.vs_MG1655.value_counts().to_string())
+_hot = V[V.bl21_specific == 1]
+print(f"\n=== ★ Cys4 자리 + MG1655 에 없거나 먼 것: {len(_hot)}개 ===")
+pd.set_option("display.max_rows", None); pd.set_option("display.width", 230)
+if len(_hot):
+    print(_hot[["protein", "len", "vs_MG1655", "fident_MG1655", "vs_Y19",
+                "queries", "desc"]].to_string(index=False))
+    print("\n두 축(금속 자리 + 균주 특이)을 모두 만족하는 후보다. 여섯 축 중")
+    print("유일하게 균주를 가르는 축이 될 수 있다. 다만 이 목록 자체가")
+    print("'Cys4 기하'라는 넓은 그물에서 나온 것이므로 개별 검증이 필요하다.")
+else:
+    print("없다. Cys4 자리를 가진 BL21 단백질 전부가 MG1655 에 가까운 상동체를 갖는다.")
+    print("→ 금속 자리 보유로는 균주를 가를 수 없다는 결론이 여섯 번째로 확인된 것이다.")
+print(f"\n저장: {DIR['table']/'cys4_bl21_strain_specificity.csv'}")
+```
+
+---
+
+## CELL 29f — CooC1 이량체 계면 질의 (A112,A114 + B112,B114)
+
+```python
+# =============================================================================
+# CELL 29f | CooC1 은 호모다이머다. Ni 자리를 계면으로 놓고 다시 묻는다
+#   CooC1 의 CXC(112/114)가 이량체 계면에서 반대편 CXC 와 만나 Cys4 를 이룬다면,
+#   진짜 질의는 A112,A114 가 아니라 A112,A114,B112,B114 다. 그러면 HslO·GspE 의
+#   Cys4 기하를 빌려 쓸 필요 없이 CooC1 자신의 기하로 4잔기 질의가 된다.
+#
+#   그리고 원래 의도대로 된다 — 2잔기로 넓게 뽑고 4잔기로 좁히는 것. 4잔기 질의가
+#   2잔기의 부분집합이므로(잔기를 포함하므로) 순서가 성립한다. HslO 템플릿은
+#   잔기가 아예 달라서 부분집합이 아니었고, 그래서 오히려 히트가 늘었다.
+#
+#   전제: PDB 파일에 chain B 가 있어야 한다. 비대칭 단위가 단량체면 생물학적
+#   조립체(.pdb1)를 받아야 한다. 아래에서 확인하고 없으면 받는다.
+# =============================================================================
+need((have("ASSET", "sh"), "CELL 01 을 먼저 돌릴 것"))
+import urllib.request, gzip
+PDB = Path(ASSET["cooc1_pdb"])
+print("현재 질의 구조:", PDB)
+
+def chains_of(p):
+    ch = {}
+    op = gzip.open if str(p).endswith(".gz") else open
+    for l in op(p, "rt", errors="ignore"):
+        if l.startswith(("ATOM", "HETATM")) and len(l) > 26:
+            c, comp, seq = l[21], l[17:20].strip(), l[22:26].strip()
+            ch.setdefault(c, {})[seq] = comp
+    return ch
+
+ch = chains_of(PDB)
+print("체인:", {c: len(v) for c, v in ch.items()})
+for c, v in ch.items():
+    print(f"  chain {c}: 112={v.get('112','없음')}  114={v.get('114','없음')}")
+
+TARGET = PDB
+if len(ch) < 2:
+    print("\n단량체다. RCSB 에서 생물학적 조립체(.pdb1)를 받는다.")
+    _id = re.search(r"([0-9][a-zA-Z0-9]{3})", PDB.name)
+    if not _id:
+        print("  ⚠ 파일명에서 PDB ID 를 못 읽었다. 직접 지정할 것.")
+    else:
+        pid = _id.group(1).lower()
+        dst = DIR["external"]/f"{pid}_bioassembly.pdb"
+        if not dst.exists():
+            try:
+                with urllib.request.urlopen(
+                        f"https://files.rcsb.org/download/{pid.upper()}.pdb1.gz",
+                        timeout=120) as r:
+                    dst.write_bytes(gzip.decompress(r.read()))
+                print(f"  받음 -> {dst}")
+            except Exception as e:
+                print(f"  ⚠ 내려받기 실패: {e}")
+        if dst.exists():
+            ch2 = chains_of(dst)
+            print("  조립체 체인:", {c: len(v) for c, v in ch2.items()})
+            for c, v in ch2.items():
+                print(f"    chain {c}: 112={v.get('112','없음')}  114={v.get('114','없음')}")
+            if len(ch2) >= 2: TARGET, ch = dst, ch2
+
+# ---- 질의 실행 ----
+IDX = {"BL21": ASSET["fd_idx_bl21"], "Y19": ASSET["fd_idx_y19"], "MG1655": ASSET["fd_idx_mg"]}
+FD  = ASSET["folddisco"]
+outd = DIR["folddisco"]/"dimer"; outd.mkdir(exist_ok=True)
+
+cs = [c for c in sorted(ch) if ch[c].get("112") == "CYS" and ch[c].get("114") == "CYS"]
+print(f"\n112/114 가 CYS 인 체인: {cs}")
+QSET = {}
+if len(cs) >= 2:
+    a, b = cs[0], cs[1]
+    QSET["dimer4"] = f"{a}112,{a}114,{b}112,{b}114"
+    QSET["dimer3"] = f"{a}112,{a}114,{b}112"      # 4잔기가 너무 빡빡할 때의 중간 단계
+QSET["mono2"] = f"{cs[0]}112,{cs[0]}114" if cs else "A112,A114"
+print("질의:", QSET)
+
+res = {}
+for tag, q in QSET.items():
+    for strain, idx in IDX.items():
+        out = outd/f"{tag}_{strain}.tsv"
+        if not (out.exists() and out.stat().st_size):
+            sh(f'"{FD}" query -p "{TARGET}" -q {q} -i "{idx}" -t {min(THREADS,8)} '
+               f'--per-structure --header --sort-by idf --rmsd 1.0 --top 20000 -o "{out}"',
+               check=False)
+        n = 0
+        if out.exists() and out.stat().st_size:
+            d = pd.read_csv(out, sep="\t"); n = len(d)
+        res[(tag, strain)] = n
+if res:
+    D = (pd.Series(res).rename("hits").rename_axis(["query", "strain"]).reset_index()
+           .pivot(index="query", columns="strain", values="hits"))
+    print("\n=== 질의별 히트 수 ===")
+    print(D.to_string())
+    D.to_csv(DIR["table"]/"folddisco_dimer_query.csv", encoding="utf-8-sig")
+    print("\n읽는 법")
+    print("  dimer4 < dimer3 < mono2 이면 의도대로 좁혀진 것이다.")
+    print("  dimer4 가 0 이면 4잔기 제약이 너무 빡빡하다 — dimer3 를 쓴다.")
+    print("  mono2 가 여전히 29개면, 문제는 잔기 수가 아니라 인덱스 검색 단계다.")
+
+# ---- 2잔기 질의가 왜 29개뿐인지: 검색 단계 옵션 확인 ----
+print("\n" + "=" * 80)
+print("=== folddisco query 옵션 (검색 단계 조절 인자를 찾는다) ===")
+print("--rmsd 는 후처리 필터라 풀어도 안 늘었다 (CELL 29b). 늘리려면 후보를")
+print("가져오는 단계의 인자를 건드려야 한다. 아래에서 그런 옵션을 찾을 것:")
+sh(f'"{FD}" query --help', check=False)
+```
+
+---
+
 ## CELL 30 — Part 8b. ID crosswalk (구조 tid → GenBank protein ID)
 
 ```python
