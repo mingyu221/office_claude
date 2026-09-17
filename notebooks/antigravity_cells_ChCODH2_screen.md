@@ -3678,14 +3678,24 @@ print("\n  원래 질의에서는 HypA·HypB·Nik 이 전부 '.' 이었다. Cys4
 print("  바뀌면 넓힌 질의의 민감도가 실제로 올라간 것이다.")
 
 # ---------- (3) Cys4 x BL21 균주 특이 ----------
-_cp = sorted(DIR["table"].glob("classify_*.csv"))
+# ★ 분류표는 방향이 두 가지로 저장돼 있다. classify_MG1655_vs_BL21DE3.csv 는
+#   MG1655 단백질로 키가 잡혀 있어(4,300행) BL21 의 QJZ* 와 대조하면 교집합이
+#   0 이 된다 — 실제로 그렇게 나왔었다. 파일 이름이 아니라 내용으로 고른다.
 print("\n" + "=" * 90)
 print("=== (3) Cys4 자리 + BL21 균주 특이 (두 축 동시) ===")
-if not _cp:
-    print("분류표(classify_*.csv)가 없다. CELL 09~12 를 돌려야 이 교차가 된다.")
+cls, chosen = None, None
+for _f in sorted(DIR["table"].glob("classify_*.csv")):
+    _d = pd.read_csv(_f)
+    if "protein" not in _d.columns: continue
+    _ov = sum(1 for k in _d.protein.astype(str) if k in HDR["BL21"])
+    print(f"  {_f.name}: {len(_d)}행, BL21 ID 와 일치 {_ov}")
+    if _ov > 0.5 * len(_d): cls, chosen = _d, _f
+if cls is None:
+    print("\n⚠ BL21 단백질로 키가 잡힌 분류표가 없다. 이 교차는 판정 불가.")
+    print("   CELL 09~12 를 BL21 을 prey 로 두고 다시 돌려야 한다.")
+    print("   (지금 있는 표는 MG1655 기준이라 BL21 의 균주 특이 여부를 말해주지 않는다)")
 else:
-    cls = pd.read_csv(_cp[-1])
-    print(f"분류표: {_cp[-1].name}  ({len(cls)}행)  카테고리 {cls.category.value_counts().to_dict()}")
+    print(f"\n사용: {chosen.name}  ({len(cls)}행)  카테고리 {cls.category.value_counts().to_dict()}")
     SPEC = {"strain-specific", "low-similarity"}
     tgt = cls[cls.category.isin(SPEC)].set_index("protein")
     hit = sorted(UNION["BL21"] & set(tgt.index))
