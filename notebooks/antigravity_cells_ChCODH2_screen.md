@@ -3597,6 +3597,121 @@ else:
 
 ---
 
+## CELL 29d — Cys4 재질의 결과 판정 + 균주 특이성과 교차
+
+```python
+# =============================================================================
+# CELL 29d | 넓힌 질의가 무엇을 얻었고 무엇을 못 얻었는지 정리한다
+#   CELL 29c 결과: Cys4 질의가 균주당 47~128개를 잡는다 (원래 질의는 29/21/30).
+#   질의를 넓힌 것 자체는 성공이다. 문제는 넓힌 뒤에도 균주를 가르느냐다.
+#   여기서 세 가지를 본다.
+#     (1) 프로테옴 크기로 정규화한 비율 — 균주마다 다른가
+#     (2) 벤치마크 양성 — HypA·HypB·Nik·IscA 처럼 알려진 Ni/금속 단백질이
+#         넓힌 질의에서는 잡히는가. 원래 질의는 10개 중 0개였다
+#     (3) ★ Cys4 x BL21 균주 특이 교차 — 두 축을 모두 만족하는 후보
+#         'Cys4 자리를 가졌고 + MG1655 에 상동체가 없거나 멀다'
+#         QJZ12568.1 이 그 예다. 다른 것이 몇 개나 더 있는지 본다
+# =============================================================================
+need(((DIR["folddisco"]/"cys4").exists(), "CELL 29c 를 먼저 돌릴 것"))
+FAA = {"BL21": ASSET["faa_bl21"], "Y19": ASSET["faa_y19"], "MG1655": ASSET["faa_mg1655"]}
+NPROT = {}
+HDR = {}
+for st, fa in FAA.items():
+    h = {}
+    for l in open(fa, errors="ignore"):
+        if l.startswith(">"):
+            t = l[1:].rstrip(); h[t.split()[0]] = t[len(t.split()[0]):].strip()
+    HDR[st] = h; NPROT[st] = len(h)
+
+xw = pd.read_csv(DIR["table"]/"id_crosswalk_struct_to_genbank.csv") \
+     if (DIR["table"]/"id_crosswalk_struct_to_genbank.csv").exists() else pd.DataFrame()
+xwm = xw.dropna(subset=["protein"]).set_index("tid")["protein"].to_dict() if len(xw) else {}
+
+CY = {}      # (query, strain) -> set(key)
+for f in sorted((DIR["folddisco"]/"cys4").glob("cys4_*.tsv")):
+    if not f.stat().st_size: continue
+    q, st = re.match(r"cys4_(.+)_(BL21|Y19|MG1655)\.tsv", f.name).groups()
+    d = pd.read_csv(f, sep="\t"); d.columns = [c.strip().lstrip("#") for c in d.columns]
+    d["stem"] = d.tid.apply(lambda x: Path(str(x)).stem)
+    d["prot"] = d.stem.map(xwm)
+    d["uni"]  = d.stem.astype(str).str.extract(r"AF-([A-Z0-9]+)-F", expand=False)
+    d["key"]  = d.prot.where(d.prot.notna(), d.uni).astype(str).str.split(",").str[0]
+    d = d[[k in HDR[st] for k in d.key]] if st != "MG1655" else d
+    CY[(q, st)] = set(d.key)
+
+# ---------- (1) 정규화 ----------
+print("=== (1) Cys4 질의 히트 — 프로테옴 대비 ===")
+rows = []
+for (q, st), ks in CY.items():
+    rows.append({"query": q, "strain": st, "hits": len(ks),
+                 "proteome": NPROT[st], "pct": round(100*len(ks)/NPROT[st], 2)})
+R = pd.DataFrame(rows)
+print(R.pivot(index="query", columns="strain", values="hits").to_string())
+print("\n비율(%)")
+print(R.pivot(index="query", columns="strain", values="pct").to_string())
+print("\n원래 질의(A112/A114): BL21 29 (0.71%) / MG1655 21 (0.49%) / Y19 30 (0.56%)")
+_sp = R.groupby("query").pct.agg(lambda x: x.max() - x.min())
+print(f"\n질의별 균주 간 비율 차이(최대-최소): " +
+      ", ".join(f"{k} {v:.2f}%p" for k, v in _sp.items()))
+print("  ← 0 에 가까우면 Cys4 모티프 보유율은 세 균주가 같다는 뜻이다.")
+print("    질의를 넓혀도 균주를 가르지 못한다.")
+
+# ---------- (2) 벤치마크 양성 ----------
+UNION = {st: set().union(*[v for (q, s), v in CY.items() if s == st]) for st in FAA}
+BENCH = {
+  "HypA/HypB (Ni 메탈로샤페론)": r"nickel metallochaperone|nickel incorporation|\bHypA\b|\bHypB\b",
+  "Nik 수송체":                  r"\bNik[ABCDE]\b|nickel ABC|nickel import",
+  "Fe-S 운반":                   r"iron-sulfur cluster (insertion|assembly|carrier)|\bIscA\b|\bIscU\b|\bNfuA\b|\bApbC\b",
+}
+print("\n" + "=" * 90)
+print("=== (2) 벤치마크: 알려진 금속 단백질이 넓힌 질의에서는 잡히는가 (BL21) ===")
+_m3 = pd.read_csv(DIR["table"]/"motif_metal_3strain.csv") if (DIR["table"]/"motif_metal_3strain.csv").exists() else pd.DataFrame()
+OLD = set(_m3[_m3.strain == "BL21"].key.astype(str)) if len(_m3) else set()
+for label, pat in BENCH.items():
+    hits = [k for k, v in HDR["BL21"].items() if re.search(pat, v, re.I)]
+    print(f"\n[{label}] 프로테옴 {len(hits)}개")
+    for k in hits:
+        o = "O" if k in OLD else "."
+        n = "O" if k in UNION["BL21"] else "."
+        print(f"   원래 {o} / Cys4 {n}   {k}  {HDR['BL21'][k][:66]}")
+print("\n  원래 질의에서는 HypA·HypB·Nik 이 전부 '.' 이었다. Cys4 쪽에서 'O' 로")
+print("  바뀌면 넓힌 질의의 민감도가 실제로 올라간 것이다.")
+
+# ---------- (3) Cys4 x BL21 균주 특이 ----------
+_cp = sorted(DIR["table"].glob("classify_*.csv"))
+print("\n" + "=" * 90)
+print("=== (3) Cys4 자리 + BL21 균주 특이 (두 축 동시) ===")
+if not _cp:
+    print("분류표(classify_*.csv)가 없다. CELL 09~12 를 돌려야 이 교차가 된다.")
+else:
+    cls = pd.read_csv(_cp[-1])
+    print(f"분류표: {_cp[-1].name}  ({len(cls)}행)  카테고리 {cls.category.value_counts().to_dict()}")
+    SPEC = {"strain-specific", "low-similarity"}
+    tgt = cls[cls.category.isin(SPEC)].set_index("protein")
+    hit = sorted(UNION["BL21"] & set(tgt.index))
+    print(f"\nBL21 Cys4 히트 {len(UNION['BL21'])}개 중 균주 특이·저유사도: **{len(hit)}개**")
+    if hit:
+        T = pd.DataFrame({"protein": hit,
+                          "category": [tgt.loc[k, "category"] for k in hit],
+                          "pident": [tgt.loc[k].get("pident") for k in hit],
+                          "in_old_motif": [k in OLD for k in hit],
+                          "queries": ["+".join(sorted(q for (q, s), v in CY.items()
+                                                      if s == "BL21" and k in v)) for k in hit],
+                          "desc": [HDR["BL21"].get(k, "")[:70] for k in hit]})
+        T = T.sort_values(["category", "protein"])
+        T.to_csv(DIR["table"]/"cys4_bl21_strain_specific.csv", index=False, encoding="utf-8-sig")
+        pd.set_option("display.max_rows", None); pd.set_option("display.width", 220)
+        print(T.to_string(index=False))
+        print(f"\n저장: {DIR['table']/'cys4_bl21_strain_specific.csv'}")
+        print("\n※ 이 목록이 '금속 자리 + BL21 특이' 두 축을 모두 만족하는 후보다.")
+        print("  QJZ12568.1 이 여기 있어야 한다 (없으면 분류표 ID 계열을 확인할 것).")
+    else:
+        print("없다. Cys4 자리를 가진 BL21 단백질은 전부 MG1655 에도 상동체가 있다.")
+        print("→ 금속 자리 보유로는 균주를 가를 수 없다는 결론이 한 번 더 확인된 것이다.")
+```
+
+---
+
 ## CELL 30 — Part 8b. ID crosswalk (구조 tid → GenBank protein ID)
 
 ```python
