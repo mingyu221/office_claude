@@ -3931,6 +3931,118 @@ sh(f'"{FD}" query --help', check=False)
 
 ---
 
+## CELL 29g — 게놈으로 확인 (어노테이션 누락 · pseudogene 구분)
+
+```python
+# =============================================================================
+# CELL 29g | "MG1655 에 없다"를 게놈에서 다시 묻는다
+#   CELL 29e 는 MG1655 의 '어노테이션된 프로테옴'을 봤다. 그런데 유전자가 게놈에
+#   있어도 (a) 어노테이션이 놓쳤거나 (b) pseudogene 으로 분류돼 단백질 FASTA 에서
+#   빠졌으면 똑같이 '없음'으로 나온다. 세 경우가 뭉쳐 있다.
+#
+#     단백질 없음 + 게놈 없음        -> 진짜 균주 특이           [강한 후보]
+#     단백질 없음 + 게놈 있음(온전)  -> 어노테이션 누락          [후보 아님]
+#     단백질 없음 + 게놈 있음(깨짐)  -> pseudogene               [★ 가장 흥미롭다]
+#
+#   세 번째는 "조상은 둘 다 가졌는데 K-12 에서 망가졌다"는 뜻이고, 그게 사실이면
+#   BL21 lysate 만 rescue 하는 표현형을 그대로 설명한다. K-12 는 B 계열 대비
+#   IS 삽입·프레임시프트로 깨진 유전자가 적지 않다.
+#
+#   tblastn 대신 mmseqs --search-type 2 (번역 검색) 를 쓴다. 새 도구가 필요 없다.
+# =============================================================================
+need(((DIR["table"]/"cys4_bl21_strain_specificity.csv").exists(),
+      "CELL 29e 를 먼저 돌릴 것"))
+import urllib.request
+
+# ---- 게놈 확보 ----
+GENOME = {"MG1655": ("U00096.3", DIR["external"]/"MG1655_U00096.3.fna")}
+for name, (acc, dst) in GENOME.items():
+    if dst.exists() and dst.stat().st_size > 1_000_000:
+        print(f"{name}: 있음 {dst.name} ({dst.stat().st_size/1e6:.1f} MB)"); continue
+    url = ("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
+           f"?db=nuccore&id={acc}&rettype=fasta&retmode=text")
+    try:
+        with urllib.request.urlopen(url, timeout=300) as r:
+            dst.write_bytes(r.read())
+        print(f"{name}: 받음 {acc} -> {dst} ({dst.stat().st_size/1e6:.1f} MB)")
+    except Exception as e:
+        print(f"{name}: ⚠ 내려받기 실패 {e}")
+        print(f"   수동: curl -o '{dst}' '{url}'")
+
+V = pd.read_csv(DIR["table"]/"cys4_bl21_strain_specificity.csv")
+TGT = V[V.vs_MG1655 == "strain-specific"].protein.astype(str).tolist()
+print(f"\n프로테옴에서 'MG1655 에 없음' 으로 나온 것: {len(TGT)}개")
+if not TGT:
+    print("없다. 게놈 확인이 필요한 대상이 없다 — 29e 결론을 그대로 쓴다.")
+else:
+    print(TGT)
+
+_g = GENOME["MG1655"][1]
+if TGT and _g.exists():
+    SEQB = {}
+    nm, buf = None, []
+    for l in open(ASSET["faa_bl21"], errors="ignore"):
+        if l.startswith(">"):
+            if nm: SEQB[nm] = "".join(buf)
+            nm, buf = l[1:].split()[0], []
+        else: buf.append(l.strip())
+    if nm: SEQB[nm] = "".join(buf)
+
+    q = DIR["seq"]/"cys4_specific_for_genome.faa"
+    q.write_text("".join(f">{k}\n{SEQB[k]}\n" for k in TGT if k in SEQB))
+    out = DIR["search"]/"cys4_specific_vs_MG1655genome.m8"
+    _tmp = DIR["tmp"]/"gsearch"; _tmp.mkdir(parents=True, exist_ok=True)
+    FMT = "query,target,fident,alnlen,qlen,qstart,qend,tstart,tend,evalue,bits"
+    if not (out.exists() and out.stat().st_size):
+        # --search-type 2 : 단백질 질의 vs 핵산 대상 (tblastn 계열)
+        sh(f'mmseqs easy-search "{q}" "{_g}" "{out}" "{_tmp}" --search-type 2 '
+           f'--format-output "{FMT}" -e 1e-3 -s 7.5 --threads {min(THREADS,16)} -v 1',
+           check=False)
+
+    print("\n" + "=" * 100)
+    print("=== 게놈 대조 결과 ===")
+    if not (out.exists() and out.stat().st_size):
+        print("히트 없음 — 질의 전부가 MG1655 게놈에 없다.")
+        print("→ 진짜 균주 특이. 프로테옴 판정이 그대로 유지된다.")
+    else:
+        d = pd.read_csv(out, sep="\t", names=FMT.split(","))
+        d["qcov"] = (d.qend - d.qstart + 1) / d.qlen
+        best = d.sort_values("bits", ascending=False).drop_duplicates("query")
+        rows = []
+        for k in TGT:
+            if k not in set(best["query"]):
+                rows.append({"protein": k, "genome": "없음",
+                             "verdict": "진짜 균주 특이 [강한 후보]",
+                             "fident": None, "qcov": None, "n_frag": 0}); continue
+            r = best[best["query"] == k].iloc[0]
+            nfrag = int((d["query"] == k).sum())
+            if r.qcov >= 0.80 and r.fident >= 0.90:
+                v = "어노테이션 누락 — 게놈에 온전히 있다 [후보 아님]"
+            elif nfrag >= 2 or r.qcov < 0.60:
+                v = "★ pseudogene 의심 — 게놈에 있으나 조각나 있다"
+            else:
+                v = "부분 일치 — 수동 확인 필요"
+            rows.append({"protein": k, "genome": "있음", "verdict": v,
+                         "fident": round(float(r.fident), 3),
+                         "qcov": round(float(r.qcov), 3), "n_frag": nfrag})
+        G = pd.DataFrame(rows)
+        G["desc"] = G.protein.map(V.set_index("protein").desc)
+        pd.set_option("display.max_rows", None); pd.set_option("display.width", 230)
+        print(G.to_string(index=False))
+        G.to_csv(DIR["table"]/"cys4_genome_check.csv", index=False, encoding="utf-8-sig")
+        print("\n=== 판정별 ===")
+        print(G.verdict.value_counts().to_string())
+        print("\n※ n_frag 는 게놈에서 몇 조각으로 나뉘어 맞았는지다. 2 이상이거나")
+        print("  qcov 가 낮으면 프레임시프트·IS 삽입으로 깨진 것일 수 있다.")
+        print("  그 경우 해당 좌표를 뽑아 직접 확인할 것 — 이게 사실이면 '조상은 둘 다")
+        print("  가졌는데 K-12 에서 깨졌다' 가 되어 표현형을 그대로 설명한다.")
+        print(f"\n저장: {DIR['table']/'cys4_genome_check.csv'}")
+elif TGT:
+    print("\n게놈 파일이 없어 확인을 못 했다. 위 curl 명령으로 받은 뒤 다시 돌릴 것.")
+```
+
+---
+
 ## CELL 30 — Part 8b. ID crosswalk (구조 tid → GenBank protein ID)
 
 ```python
