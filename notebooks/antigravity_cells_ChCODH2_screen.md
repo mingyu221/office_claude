@@ -1857,6 +1857,143 @@ else:
 
 ---
 
+## CELL 24c — Part 6e. Track A 구제 가능성 검사 (대조군 한 쌍)
+
+```python
+# =============================================================================
+# CELL 24c | 버리기 전에 '설정 탓'인지 한 번만 확인한다
+#   CELL 24b 결론: RF2-PPI 가 알려진 참(CooC1-ChCODH2, 깊이 1451)을 531등 아래에
+#   둔다. 깊이 탓이 아니다. 그런데 모델 탓이라고 단정하기 전에, 우리가 준 입력
+#   형태 탓일 가능성 두 가지가 남아 있다.
+#     (1) 방향  스크리닝은 ChCODH2 가 chain A 인데 대조군은 CooC1 이 chain A 였다.
+#               같은 쌍이라도 순서가 바뀌면 점수가 달라질 수 있다.
+#     (2) 절편  full-length 630잔기 중 CooC 가 닿는 곳은 일부다. 나머지 500잔기의
+#               공진화는 잡음으로 들어간다. C-cluster 주변만 남기면 신호 대 잡음이
+#               올라간다. (CELL 17 gate 에서도 C-말단 절편이 깊이를 다 갖고 있었다)
+#   둘 다 이미 만들어둔 a3m 을 자르고 붙이는 것으로 끝난다. 새 검색이 필요 없고
+#   GPU 도 몇 분이면 된다.
+#   판정: 하나라도 0.7 을 넘으면 그 설정으로 스크리닝을 다시 돌릴 가치가 있다
+#         (약 12시간). 전부 낮으면 설정 문제가 아니라 모델이 이 계를 못 푸는 것이다.
+# =============================================================================
+need((have("BAIT_KEY", "BAIT_ALL", "SEGMENTS", "VARIANT_POS"), "CELL 07 을 먼저 돌릴 것"),
+     ((DIR["paired"]).exists(), "CELL 21 을 먼저 돌릴 것"))
+
+CTRL_KEY   = next((k for k in BAIT_ALL if k.upper().startswith("COOC")), None)
+need((CTRL_KEY is not None, "BAIT_ALL 에 CooC 서열이 없다"))
+src = DIR["paired"]/f"{CTRL_KEY}__{BAIT_KEY}.a3m"
+need((src.exists(), f"{src} 가 없다 — CELL 21 의 control 생성 로그를 확인할 것"))
+
+cs, bs = BAIT_ALL[CTRL_KEY], BAIT_ALL[BAIT_KEY]
+LC, LB = len(cs), len(bs)
+print(f"대조군 a3m: {src.name}   {CTRL_KEY} {LC}aa + {BAIT_KEY} {LB}aa = {LC+LB}")
+
+# ---- a3m 읽기 (query 가 첫 줄) ----
+names, seqs, nm, buf = [], [], None, []
+for l in open(src, errors="ignore"):
+    if l.startswith(">"):
+        if nm is not None: names.append(nm); seqs.append("".join(buf))
+        nm, buf = l[1:].strip(), []
+    else: buf.append(l.strip())
+if nm is not None: names.append(nm); seqs.append("".join(buf))
+_bad = [len(s) for s in seqs if len(s) != LC + LB]
+need((not _bad, f"a3m 줄 길이가 {LC+LB} 가 아니다 (예: {_bad[:3]}). 소문자 삽입열이 "
+                f"있으면 고정 위치로 못 자른다 — hhfilter -M first 설정을 확인할 것"))
+print(f"행 {len(seqs)}개 — 길이 일치 확인")
+
+vdir = DIR["paired"]/"ctrlvar"; vdir.mkdir(exist_ok=True)
+for f in vdir.glob("*.a3m"): f.unlink()
+
+def _write(tag, rows, first_len):
+    """all-gap 이 된 행을 버리고 hhfilter 로 90% 중복 제거한 뒤 저장한다."""
+    raw = vdir/f"{tag}.raw.a3m"
+    keep = [(n, s) for n, s in rows
+            if n == names[0] or s.count("-") < 0.7 * len(s)]
+    raw.write_text("".join(f">{n}\n{s}\n" for n, s in keep))
+    out = vdir/f"{tag}.a3m"
+    try:
+        subprocess.run(["hhfilter", "-i", str(raw), "-o", str(out),
+                        "-id", "90", "-M", "first"], check=True, capture_output=True)
+    except Exception as e:
+        shutil.copy(raw, out); print(f"  [hhfilter 실패 -> 원본 사용] {tag}: {e}")
+    raw.unlink(missing_ok=True)
+    d = sum(1 for l in open(out) if l.startswith(">"))
+    return str(out), first_len, d
+
+# ---- 변형 만들기 ----
+# 절편은 변이 위치(C-cluster)를 포함하는 것만 쓴다. 이름에서 좌표를 읽는다.
+segs = {}
+for sname in SEGMENTS:
+    m = re.search(r"_seg(\d+)-(\d+)$", sname)
+    if not m: continue
+    lo, hi = int(m.group(1)) - 1, int(m.group(2))
+    if lo < VARIANT_POS <= hi:
+        segs[sname] = (lo, hi)
+print(f"C-cluster({VARIANT_POS}) 를 포함하는 절편 {len(segs)}개: {list(segs)}")
+
+jobs = []
+jobs.append(_write("v0_base", [(n, s) for n, s in zip(names, seqs)], LC))
+jobs.append(_write("v1_swap", [(n, s[LC:] + s[:LC]) for n, s in zip(names, seqs)], LB))
+for sname, (lo, hi) in segs.items():
+    tag = re.sub(r"[^A-Za-z0-9]+", "_", sname.replace(BAIT_KEY, ""))
+    jobs.append(_write(f"v2_seg{tag}",
+                       [(n, s[:LC] + s[LC+lo:LC+hi]) for n, s in zip(names, seqs)], LC))
+    jobs.append(_write(f"v3_swapseg{tag}",
+                       [(n, s[LC+lo:LC+hi] + s[:LC]) for n, s in zip(names, seqs)], hi-lo))
+
+print("\n만든 변형:")
+for p, fl, d in jobs:
+    print(f"  {Path(p).stem:28s} chainA={fl:4d}  깊이 {d}")
+
+lst = vdir/"input_ctrlvar"
+lst.write_text("\n".join(f"{p} {fl}" for p, fl, _ in jobs) + "\n")
+
+# ---- 실행: 변형 수가 적어 전경에서 돌린다 (replicate 3회, 수 분) ----
+CV_GPU = globals().get("GPU_ID", 1)
+sh(f'''cd "{vdir}"
+for rep in 1 2 3; do
+  cp input_ctrlvar in_rep${{rep}}
+  CUDA_VISIBLE_DEVICES={CV_GPU} python "{RF2PPI_DIR}/src/predict_list_PPI.py" \\
+      -list_fn in_rep${{rep}} -model_file "{RF2PPI_DIR}/src/models/RF2-PPI.pt"
+done''', check=False)
+
+# ---- 집계 ----
+_r = []
+for rep in (1, 2, 3):
+    lg = vdir/f"in_rep{rep}.log"
+    if not lg.exists(): continue
+    for line in open(lg, errors="ignore"):
+        f = line.split()
+        if len(f) >= 2:
+            try: _r.append({"variant": Path(f[0]).stem, "rep": rep, "prob": float(f[1])})
+            except ValueError: pass
+if _r:
+    V = (pd.DataFrame(_r).groupby("variant").prob
+           .agg(n="count", mean="mean", sd="std", max="max")
+           .sort_values("mean", ascending=False).round(3))
+    V["depth"] = [dict((Path(p).stem, d) for p, _, d in jobs).get(i) for i in V.index]
+    print("\n=== 변형별 대조군 점수 ===")
+    print(V.to_string())
+    V.to_csv(DIR["table"]/"trackA_control_variants.csv", encoding="utf-8-sig")
+    _best = float(V["mean"].max())
+    print("\n=== 판정 ===")
+    if _best >= 0.7:
+        print(f"{V['mean'].idxmax()} 가 {_best:.3f} — 설정 문제였다.")
+        print("→ 이 설정으로 스크리닝을 다시 돌릴 가치가 있다 (CELL 21 의 SEGMENT_BAITS")
+        print("   또는 체인 순서를 맞춰 CELL 21 -> 22 재실행, 약 12시간).")
+    elif _best >= 0.45:
+        _b0 = float(V.loc["v0_base", "mean"]) if "v0_base" in V.index else float("nan")
+        print(f"최고 {_best:.3f} — 기준 0.7 에는 못 미치지만 base({_b0:.3f}) 보다 올랐다.")
+        print("방향은 맞다. 절편을 더 좁혀 한 번 더 시도할 만하다.")
+    else:
+        print(f"최고 {_best:.3f} — 어떤 설정에서도 알려진 참을 못 올린다.")
+        print("→ Track A 는 설정 문제가 아니다. 이 계에 RF2-PPI 를 쓰지 않는다.")
+        print("  지금까지의 Track A 계산은 '음성 결과'로 기록하고 Track B/C 로 간다.")
+else:
+    print("\n로그를 못 읽었다. vdir 의 in_rep*.log 를 직접 확인할 것:", vdir)
+```
+
+---
+
 ## CELL 25 — Part 7. Boltz-2 설치
 
 ```python
