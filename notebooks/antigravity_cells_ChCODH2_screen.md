@@ -6778,10 +6778,57 @@ if bl:
     G["mg1655_fident"] = G.member.map(best)
     G["bl21_only"] = ((G.strain == "BL21") & G.mg1655_fident.isna()).astype(int)
 
+# ---------- (5) tm>=0.5 는 '과' 가 아니다. 등급을 붙인다 ----------
+# 0.5~0.7 구간에는 CheY·EF-Tu·response regulator 처럼 P-loop/CheY 위상만
+# 공유하는 것들이 통째로 들어온다. 버리지는 않되 무게를 달리 준다.
+G["self_hit"] = (G.member == G.via_seed).astype(int)     # seed 자기 자신
+G["tier"] = pd.cut(G.tm, bins=[0, 0.70, 0.90, 9],
+                   labels=["폴드만", "주변", "핵심"])
+print("\n--- 등급 분포 ---")
+print(pd.crosstab(G.tier, G.strain).to_string())
+print("  핵심(tm>=0.90) 만 G3E/SIMIBI 과로 읽는다. 폴드만(0.5~0.7) 은 P-loop 위상")
+print("  공유일 뿐이라 이 과의 기능을 뜻하지 않는다 — 등급으로 남기되 후보는 아니다.")
+
+# ---------- (6) BL21 전용 판정은 게놈까지 확인한다 ----------
+# 프로테옴에 없다는 것은 (a) 진짜 없음 (b) 어노테이션 누락 (c) pseudogene 을
+# 뭉친 말이다. ErpA·PgaC·YeeO 가 fident 1.000 인데 '전용' 으로 잡힌 전례가 있다.
+if "bl21_only" in G:
+    _cand = G[G.bl21_only == 1].member.astype(str).tolist()
+    _g = DIR["external"]/"MG1655_U00096.3.fna"
+    if _cand and _g.exists():
+        q = DIR["seq"]/"g3e_only_for_genome.faa"
+        q.write_text("".join(f">{k}\n{SEQ[k]}\n" for k in _cand if k in SEQ))
+        out = DIR["search"]/"g3e_only_vs_MG1655genome.m8"
+        GFMT = "query,target,fident,alnlen,qlen,qstart,qend,tstart,tend,evalue,bits"
+        if not (out.exists() and out.stat().st_size):
+            # --search-type 2 : 단백질 질의 vs 핵산 대상 (tblastn 계열)
+            sh(f'mmseqs easy-search "{q}" "{_g}" "{out}" "{_tmp}" --search-type 2 '
+               f'--format-output "{GFMT}" -e 1e-3 -s 7.5 --threads {min(THREADS,16)} -v 1',
+               check=False)
+        verdict = {}
+        if out.exists() and out.stat().st_size:
+            d = pd.read_csv(out, sep="\t", names=GFMT.split(","))
+            for k, g in d.groupby("query"):
+                g = g.sort_values("bits", ascending=False)
+                top = g.iloc[0]
+                cov = float(top.alnlen) / float(top.qlen)
+                if float(top.fident) >= 0.80 and cov >= 0.70:
+                    verdict[k] = f"게놈에 온전 (fid {top.fident:.2f} cov {cov:.2f}) — 어노테이션 누락"
+                elif float(top.fident) >= 0.80:
+                    verdict[k] = f"게놈에 조각 (fid {top.fident:.2f} cov {cov:.2f}) — pseudogene 가능"
+                else:
+                    verdict[k] = f"먼 유사체만 (fid {top.fident:.2f}) — 사실상 없음"
+        G["genome_MG1655"] = G.member.map(
+            lambda k: verdict.get(str(k), "게놈에도 없음" if str(k) in _cand else ""))
+    elif _cand:
+        print(f"\n⚠ MG1655 게놈 파일이 없다 ({_g}). CELL 29g 를 먼저 돌리면 받아진다.")
+        print("  게놈 확인 없이는 'BL21 전용' 을 확정할 수 없다.")
+
 G.to_csv(DIR["table"]/"g3e_family_sweep.csv", index=False, encoding="utf-8-sig")
 pd.set_option("display.max_rows", None); pd.set_option("display.width", 230)
-COLS = [c for c in ["member", "strain", "via_seed", "tm", "fident", "ni_grade",
-                    "metal_rmsd", "plddt", "mg1655_fident", "bl21_only", "desc"]
+COLS = [c for c in ["member", "strain", "via_seed", "tm", "tier", "self_hit", "fident",
+                    "ni_grade", "metal_rmsd", "plddt", "mg1655_fident", "bl21_only",
+                    "genome_MG1655", "desc"]
         if c in G.columns]
 print("\n" + "=" * 110)
 print("=== G3E/SIMIBI 과 구성원 ===")
@@ -6790,10 +6837,17 @@ print(G[COLS].to_string(index=False))
 if "bl21_only" in G:
     hot = G[G.bl21_only == 1]
     print(f"\n{'='*110}")
-    print(f"=== ★ BL21 에만 있는 과 구성원: {len(hot)}개 ===")
+    print(f"=== ★ BL21 프로테옴에만 있는 과 구성원: {len(hot)}개 ===")
     print(hot[COLS].to_string(index=False) if len(hot) else "  없음")
     print("\n  이 과의 공통 업무가 '금속을 다른 단백질에 넣는 것' 이다.")
-    print("  BL21 에만 있는 구성원이 있다면 그것이 가장 직접적인 후보다.")
+    print("  다만 아래 둘을 먼저 통과해야 후보다.")
+    print("   1) tier 가 '핵심' 인가 — 0.5~0.7 은 P-loop 위상 공유일 뿐이다")
+    print("   2) genome_MG1655 가 '게놈에도 없음' 인가 — 프로테옴 부재는")
+    print("      어노테이션 누락·pseudogene 과 구분되지 않는다")
+    if "genome_MG1655" in hot:
+        real = hot[(hot.tier == "핵심") & (hot.genome_MG1655 == "게놈에도 없음")]
+        print(f"\n  둘 다 통과: {len(real)}개")
+        if len(real): print(real[COLS].to_string(index=False))
 print(f"\n저장: {DIR['table']/'g3e_family_sweep.csv'}")
 ```
 
