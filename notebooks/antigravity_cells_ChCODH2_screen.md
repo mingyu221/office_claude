@@ -3899,6 +3899,106 @@ print("  motif_pattern  = folddisco 가 잡은 균주 / gene_pattern = 유전자
 
 ---
 
+## CELL 36b — 월요일 후보표 (발현 + in vitro Ni incorporation 대상)
+
+```python
+# =============================================================================
+# CELL 36b | 실험에 넘길 후보표를 만든다
+#   선정 기준을 '균주 특이성'이 아니라 '금속을 다룰 개연성'으로 둔다. 이유 둘:
+#     1. CELL 34 결과 — BL21 금속 모티프 29개 중 27개가 MG1655 에도 유전자가 있다.
+#        유전자 유무는 표현형(BL21 lysate 만 rescue)을 설명하지 못한다.
+#     2. in vitro 재구성 실험은 "MG1655 에도 이 유전자가 있나"를 묻지 않는다.
+#        "이 단백질이 Ni 를 넣는가"만 묻는다. 균주 특이성은 이 assay 의 변수가 아니다.
+#   그래도 균주 판정은 열로 남긴다 — 나중에 발현량 가설로 돌아올 때 필요하다.
+#
+#   여기서 두 가지를 더 드러낸다.
+#     (a) ATP 모티프의 부분 매치. residues 에 '_' 가 있으면 질의 3잔기 중 일부만
+#         맞은 것이다. Tier 1 이 실제보다 강해 보이게 만드는 원인이라 따로 센다.
+#     (b) Boltz 가 Ni 를 후보 쪽 사슬로 가져갔는지 (CELL 28a-7 결과)
+#         ※ 27개 전부가 folddisco 히트에서 나왔으므로 집합 밖으로 일반화하지 말 것.
+#           집합 안에서 6/27 만 그랬다는 점에서는 변별력이 있다.
+# =============================================================================
+need(((DIR["table"]/"FOLDDISCO_candidates.csv").exists(), "CELL 36 을 먼저 돌릴 것"))
+C = pd.read_csv(DIR["table"]/"FOLDDISCO_candidates.csv")
+
+# (a) ATP 부분 매치 표시
+def atp_frac(s):
+    if not isinstance(s, str) or not s.strip(): return ""
+    parts = [p for p in s.split(",")]
+    return f"{sum(1 for p in parts if p.strip() != '_')}/{len(parts)}"
+C["atp_match"] = C.get("atp_residues", pd.Series([""]*len(C))).apply(atp_frac)
+C["atp_full"]  = (C.atp_match == "3/3").astype(int)
+
+# (b) Boltz Ni 포획
+_nip = DIR["table"]/"boltz_ni_placement.csv"
+if _nip.exists():
+    _n = pd.read_csv(_nip)
+    _n["prot"] = _n.pair.astype(str).str.split("__").str[-1].str.split("-").str[-1]
+    _cap = set(_n[_n["위치"].astype(str).str.startswith("후보 쪽")].prot)
+    C["ni_captured"] = C.protein_id.isin(_cap).astype(int)
+    print(f"Boltz Ni 포획 (후보 쪽 사슬): {len(_cap)}개")
+else:
+    C["ni_captured"] = 0
+    print("boltz_ni_placement.csv 없음 — CELL 28a-7 을 돌리면 이 열이 채워진다")
+
+B = C[C.strain == "BL21"].copy()
+print(f"\nBL21 금속 모티프 {len(B)}개")
+print("Tier 1 중 ATP 3/3 완전 매치:", int(((B.tier == 1) & (B.atp_full == 1)).sum()),
+      f"/ {int((B.tier == 1).sum())}")
+print("  나머지는 질의 3잔기 중 2개만 맞은 부분 매치다. Tier 1 을 그만큼 할인해서 볼 것.")
+
+# ---------- 추천 목록 ----------
+# 각 줄의 근거는 계산이 아니라 생화학이다. 계산은 '금속 기하가 있다'까지만 말한다.
+PICK = {
+ "QJZ12719.1": "COG0523 금속 샤페론 GTPase (UreG·HypB·CobW 와 같은 과). "
+               "금속+뉴클레오타이드 두 모티프 = CooC1 과 같은 구성",
+ "QJZ10977.1": "Fe-S 클러스터 삽입 단백질. C-cluster 가 [NiFe4S4] 라는 점에서 직접 관련. "
+               "Hyp KO 음성은 hydrogenase 전용 경로를 배제한 것이지 Fe-S 운반 경로는 아니다",
+ "QJZ13803.1": "Hsp33 — Cys4 아연 중심을 산화환원에 따라 잡았다 놓는 것이 메커니즘 자체",
+ "QJZ11021.1": "HAD 포스파타제의 2가 금속 자리. 금속+뉴클레오타이드 두 모티프",
+ "QJZ11953.1": "SEC-C/zinc-ribbon 계열, 기능 미상. 강한 금속 기하 + 기능 정보 없음",
+}
+ALT = {
+ "QJZ12547.1": "UPF0149 계열, 기능 불명확. metal_rmsd 최저 — YchJ 와 성격이 같아 택일 가능",
+ "QJZ11161.1": "Tgt. 기능이 확립된 효소라 사전확률은 낮지만 Ni 포획 6개에 포함",
+ "QJZ14223.1": "BL21 특이 2개 중 구조 품질이 좋은 쪽. 다만 전사조절자라 lysate rescue 와 "
+               "기전이 안 맞고 ATP 매치도 2/3 부분 매치다",
+}
+B["role"] = ["primary" if p in PICK else ("alternate" if p in ALT else "")
+             for p in B.protein_id]
+B["rationale"] = [PICK.get(p, ALT.get(p, "")) for p in B.protein_id]
+B["pick_order"] = [list(PICK).index(p) if p in PICK else
+                   (100 + list(ALT).index(p) if p in ALT else 999) for p in B.protein_id]
+
+SHOW = ["pick_order", "role", "protein_id", "description", "length", "tier",
+        "metal_rmsd", "metal_residues", "atp_match", "ni_captured",
+        "struct_plddt", "strain_verdict", "rationale"]
+SHOW = [c for c in SHOW if c in B.columns]
+S = B[B.role != ""].sort_values("pick_order")[SHOW]
+S.to_csv(DIR["table"]/"MONDAY_shortlist.csv", index=False, encoding="utf-8-sig")
+
+pd.set_option("display.max_colwidth", 60)
+print("\n=== 추천 (primary 5 + alternate 3) ===")
+for _, r in S.iterrows():
+    print(f"\n[{r.role:9s}] {r.protein_id}  rmsd {r.metal_rmsd:.3f}  Tier {r.tier}"
+          f"  ATP {r.atp_match or '-':4s}  Ni포획 {'O' if r.ni_captured else '-'}"
+          f"  pLDDT {r.struct_plddt:.0f}")
+    print(f"    {r.description}")
+    print(f"    근거: {r.rationale}")
+
+print("\n\n=== BL21 전체 29개 (참고) ===")
+print(B.sort_values(["tier", "metal_rmsd"])[
+        ["protein_id", "tier", "metal_rmsd", "atp_match", "ni_captured",
+         "strain_verdict", "description"]].to_string(index=False))
+print(f"\n추천표 저장: {DIR['table']/'MONDAY_shortlist.csv'}")
+print("전체표    : " + str(DIR["table"]/"FOLDDISCO_candidates.csv"))
+print("\n※ 이 순위에는 PPI 점수가 들어가지 않는다. RF2-PPI 는 양성대조군 실패,")
+print("  Boltz ipTM 은 눈금 미검증이다. 계산이 말하는 것은 '금속 결합 기하가 있다'")
+print("  까지이고, 다섯 개를 고른 근거는 그 위에 얹은 생화학적 판단이다.")
+```
+
+---
+
 ## CELL 37 — 최종 리포트 + 남은 TODO
 
 ```python
