@@ -4396,6 +4396,150 @@ else:
 
 ---
 
+## CELL 29k — Foldseek: 구조 전체로 대조군 확인 + 후보 정체 규명
+
+```python
+# =============================================================================
+# CELL 29k | Folddisco 가 모티프를 본다면 Foldseek 은 구조 전체를 본다
+#   두 질문에 답한다.
+#
+#   (A) Track C 대조군, 다른 방법으로
+#       CooC1 구조로 세 균주를 훑어 CooC 상동체가 나오는가.
+#       Foldseek 은 찾는데 Folddisco 는 못 찾는다 -> 문제는 생물학이 아니라
+#       '두 잔기 기하' 라는 질의 설계다. 그게 지금 가장 알고 싶은 것이다.
+#
+#   (B) ★ QJZ12568.1 은 대체 무엇인가
+#       어노테이션이 'hypothetical protein' 이라 정체가 없다. 133잔기에 Cys4
+#       자리를 갖고 MG1655 프로테옴·게놈 어디에도 없는 단백질인데, 구조가
+#       무엇을 닮았는지 알면 기능 가설이 선다. 미팅에서 "이게 뭐냐"에 답이 된다.
+#       PDB 전체를 대상으로 하면 알려진 금속 단백질과 비교된다.
+# =============================================================================
+need((have("ASSET", "sh"), "CELL 01 을 먼저 돌릴 것"))
+FS = shutil.which("foldseek") or globals().get("FOLDSEEK_BIN", "foldseek")
+print("foldseek:", FS)
+sh(f'"{FS}" version', check=False)
+
+# 구조 디렉터리 찾기 (AlphaFold 예측 묶음)
+ROOTS = sorted({Path(p).parent for r in [TOOLS/"database"/"bacteriaDB", TOOLS/"database"]
+                if Path(r).exists()
+                for p in glob.glob(str(Path(r)/"**"/"AF-*-F1-model_v*.cif"), recursive=True)[:1]})
+STRUCT = {}
+for r in [TOOLS/"database"/"bacteriaDB", TOOLS/"database"]:
+    if not Path(r).exists(): continue
+    for d in sorted(Path(r).glob("structures_*")):
+        if d.is_dir(): STRUCT[d.name] = d
+print("\n구조 디렉터리:")
+for k, v in STRUCT.items():
+    print(f"  {k}: {len(list(v.glob('AF-*'))[:1]) and sum(1 for _ in v.iterdir())}개  {v}")
+need((bool(STRUCT), "구조 디렉터리를 못 찾았다 — 경로를 직접 지정할 것"))
+
+fsd = DIR["folddisco"].parent/"foldseek"; fsd.mkdir(exist_ok=True)
+_tmp = DIR["tmp"]/"fs"; _tmp.mkdir(parents=True, exist_ok=True)
+FMT = "query,target,fident,alnlen,qcov,tcov,evalue,bits,prob,alntmscore,lddt"
+
+def fs_search(qpath, tgt, name, extra=""):
+    out = fsd/f"{name}.m8"
+    if out.exists() and out.stat().st_size:
+        print(f"  [재사용] {out.name}")
+    else:
+        sh(f'"{FS}" easy-search "{qpath}" "{tgt}" "{out}" "{_tmp}" '
+           f'--format-output "{FMT}" -e 10 --max-seqs 2000 {extra} '
+           f'--threads {min(THREADS,16)}', check=False)
+    if not (out.exists() and out.stat().st_size): return pd.DataFrame()
+    d = pd.read_csv(out, sep="\t", names=FMT.split(","))
+    d["stem"] = d.target.apply(lambda x: Path(str(x)).stem.replace(".cif", "").replace(".pdb", ""))
+    return d
+
+xw = pd.read_csv(DIR["table"]/"id_crosswalk_struct_to_genbank.csv") \
+     if (DIR["table"]/"id_crosswalk_struct_to_genbank.csv").exists() else pd.DataFrame()
+xwm = xw.dropna(subset=["protein"]).set_index("tid")["protein"].to_dict() if len(xw) else {}
+def name_of(stem):
+    for k, v in xwm.items():
+        if Path(str(k)).stem == stem: return str(v).split(",")[0]
+    return None
+HDRB = {}
+for st, fa in [("BL21", ASSET["faa_bl21"]), ("Y19", ASSET["faa_y19"]),
+               ("MG1655", ASSET["faa_mg1655"])]:
+    for l in open(fa, errors="ignore"):
+        if l.startswith(">"):
+            t = l[1:].rstrip(); HDRB[t.split()[0]] = (st, t[len(t.split()[0]):].strip())
+
+# ---------- (A) CooC1 -> 세 균주 ----------
+print("\n" + "=" * 100)
+print("=== (A) CooC1 구조로 세 균주 훑기 — Track C 대조군 ===")
+MSET = {}
+_p = DIR["table"]/"motif_metal_3strain.csv"
+if _p.exists():
+    m3 = pd.read_csv(_p)
+    for st in ["BL21", "Y19", "MG1655"]: MSET[st] = set(m3[m3.strain == st].key.astype(str))
+
+for sname, sdir in STRUCT.items():
+    d = fs_search(ASSET["cooc1_pdb"], str(sdir), f"cooc1_vs_{sname}")
+    if not len(d):
+        print(f"\n[{sname}] 히트 없음"); continue
+    d["protein"] = d.stem.map(name_of)
+    d["desc"] = d.protein.map(lambda k: HDRB.get(str(k), ("", ""))[1][:58] if k else "")
+    d = d.sort_values("bits", ascending=False).head(12)
+    print(f"\n[{sname}] 상위 12")
+    for r in d.itertuples(index=False):
+        st = HDRB.get(str(r.protein), ("?",))[0]
+        inm = "O" if (r.protein and r.protein in MSET.get(st, set())) else "."
+        print(f"  모티프{inm}  {str(r.protein):14s} tm {r.alntmscore:.3f} "
+              f"fident {r.fident:.3f} e {r.evalue:.1e}  {r.desc}")
+print("\n모티프 열이 'O' 면 folddisco 도 잡은 것이다. 구조적으로 CooC 를 닮은 것이")
+print("나오는데 전부 '.' 이면, 문제는 생물학이 아니라 '두 잔기 기하' 라는 질의 설계다.")
+
+# ---------- (B) 후보의 정체 ----------
+print("\n" + "=" * 100)
+print("=== (B) 후보 단백질이 무엇을 닮았는가 ===")
+TARGETS = ["QJZ12568.1", "QJZ11471.1", "QJZ13396.1"]
+def find_struct(pid):
+    for k, v in xwm.items():
+        if str(v).split(",")[0] == pid:
+            stem = Path(str(k)).stem
+            for sdir in STRUCT.values():
+                for ext in ("cif", "pdb", "cif.gz", "pdb.gz"):
+                    f = next(iter(glob.glob(str(sdir/f"{stem}*.{ext}"))), None)
+                    if f: return f
+    return None
+
+# PDB 데이터베이스 (알려진 구조와 비교). 몇 GB 라 기본은 끔.
+USE_PDB = False          # True 로 바꾸면 foldseek 이 PDB DB 를 내려받는다 (~2GB)
+PDBDB = fsd/"pdb"
+if USE_PDB and not Path(str(PDBDB) + ".dbtype").exists():
+    print("PDB DB 내려받는 중 (수 분 ~ 수십 분)...")
+    sh(f'"{FS}" databases PDB "{PDBDB}" "{_tmp}" --threads {min(THREADS,16)}', check=False)
+
+for pid in TARGETS:
+    sp = find_struct(pid)
+    print(f"\n--- {pid}  {HDRB.get(pid,('','?'))[1][:60]}")
+    if not sp:
+        print("    구조 파일을 못 찾았다"); continue
+    print(f"    구조 {sp}")
+    for sname, sdir in STRUCT.items():
+        d = fs_search(sp, str(sdir), f"{pid}_vs_{sname}")
+        if not len(d): continue
+        d["protein"] = d.stem.map(name_of)
+        d = d[d.protein.astype(str) != pid].sort_values("bits", ascending=False).head(5)
+        if not len(d): continue
+        print(f"    [{sname}]")
+        for r in d.itertuples(index=False):
+            print(f"      {str(r.protein):14s} tm {r.alntmscore:.3f} fident {r.fident:.3f}"
+                  f"  {HDRB.get(str(r.protein), ('',''))[1][:52]}")
+    if USE_PDB and Path(str(PDBDB) + ".dbtype").exists():
+        d = fs_search(sp, str(PDBDB), f"{pid}_vs_PDB")
+        if len(d):
+            print("    [PDB]")
+            for r in d.sort_values("bits", ascending=False).head(8).itertuples(index=False):
+                print(f"      {r.target:20s} tm {r.alntmscore:.3f} prob {r.prob:.3f} "
+                      f"e {r.evalue:.1e}")
+print("\n※ alntmscore 0.5 이상이면 같은 폴드로 본다. QJZ12568.1 이 알려진 금속")
+print("  샤페론·아연 손가락 계열과 닮으면 'hypothetical' 이라는 이름이 걷힌다.")
+print("  PDB 비교를 하려면 위 USE_PDB 를 True 로 두고 다시 돌릴 것 (~2GB 다운로드).")
+```
+
+---
+
 ## CELL 30 — Part 8b. ID crosswalk (구조 tid → GenBank protein ID)
 
 ```python
