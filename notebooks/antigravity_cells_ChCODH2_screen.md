@@ -7004,53 +7004,213 @@ print("  (B) 에서 t_bait 이 이겼으면 CELL 54 로 스크리닝 전체를 �
 
 ---
 
-## CELL 54 — Track A 이량체 재실행 (ChCODH2 ×2 × prey)
+## CELL 54 — Track A 이량체 재실행 (위상 교정 + 디코이 보정 후 전체 스크린)
 
 ```python
 # =============================================================================
-# CELL 54 | 대조군이 0.251 -> 0.425 로 올라간 설정으로 스크리닝을 다시 돌린다
-#   CELL 53 (B) 결과:
-#     ChCODH2 만 2배   0.425 (sd 0.010)   <- 최고, 재현성도 최고
-#     양쪽 2배         0.390 (sd 0.017)   CooC1 복제가 오히려 희석시킨다
-#     CooC1 만 2배     0.261              잡음 범위
-#   -> chain1 = ChCODH2 x2 (1272), chain2 = prey. prey 는 건드리지 않는다.
+# CELL 54 | 이량체 입력으로 Track A 를 다시 돌린다. 두 가지를 먼저 바로잡는다.
 #
-#   기존 a3m 을 그대로 쓴다. 각 행이 [ChCODH2 636 | prey] 이므로 앞 636열을
-#   복제해 [ChCODH2 636 | ChCODH2 636 | prey] 로 만들고 chain1 길이를 1272 로 준다.
-#   새 검색도, hhfilter 재실행도 필요 없다 — 열을 복제해도 서열 동일성 관계는
-#   그대로라 필터 결과가 바뀌지 않는다.
+#   [1] 사슬 순서가 대조군과 스크린에서 서로 반대였다
+#       대조군 a3m 은 [CooC1 | ChCODH2] 로 chain1 = CooC1 이고,
+#       스크린 input_file 은 [ChCODH2 | prey] 로 chain1 = ChCODH2 다.
+#       RF2-PPI 는 두 사슬을 대칭으로 다루지 않는다. 0.425 를 그대로
+#       스크린의 기준선으로 쓰면 다른 프레임의 숫자를 갖다 붙이는 것이다.
+#       -> 대조군을 스크린 프레임([ChCODH2x2 | CooC1])으로 다시 만든다.
 #
-#   RF2-PPI 는 비결정적이다. 단량체 스크린과 같은 3 replicate 로 돌린다 —
-#   1회만 돌리면 sd 를 모르는 순위가 나오고, 그 순위로 후보를 고르면
-#   그 다음 판단이 전부 잡음 위에 선다.
-#     3,626 x 18.3s x 3회 = 약 55 시간
-#   디스크: a3m 이 약 1.4배로 는다. 기존 paired 가 약 3 GB 면 +4 GB 남짓.
+#   [2] "ChCODH2 만 2배(0.425) > 양쪽 2배(0.390)" 를 신호로 읽을 수 없다
+#       CooC1 의 Ni 자리는 Cys112/Cys114 가 두 단량체에서 하나씩 나와
+#       이량체 계면에 만들어진다. 단량체 CooC1 에는 그 자리가 아예 없다.
+#       생물학적으로 옳은 입력은 양쪽 2배다. 그런데 점수는 그쪽이 낮다.
+#       둘 중 하나다.
+#         (a) prey 복제가 공진화 신호를 희석시킨다  -> 0.425 가 맞다
+#         (b) 위상마다 고유한 오프셋이 있다         -> 0.425 는 부풀려진 값이다
+#       한 점(대조군 하나)으로는 가를 수 없다. 디코이를 같이 재서 가른다.
+#       상호작용하지 않는 단백질에서도 위상만 바꿔 점수가 같이 오르면 (b) 다.
+#       스크리닝에서 중요한 건 절대점수가 아니라 대조군과 배경의 간격이므로,
+#       간격(z)이 큰 위상을 쓰는 것이 어느 쪽이든 옳다.
+#
+#   STEP 0  디코이 보정 (전경, 약 20분) -> 위상 결정
+#   STEP 1  전체 스크린 (백그라운드, 3 replicate)
 # =============================================================================
 need((have("BAIT_KEY", "BAIT_ALL"), "CELL 07 을 먼저 돌릴 것"),
      ((DIR["rf2ppi"]/"input_file").exists(), "CELL 21 의 input_file 이 필요하다"))
-LB = len(BAIT_ALL[BAIT_KEY])
-N_REP_DIMER = 3          # 단량체 스크린과 동일. mean±sd 로 순위를 매긴다
-print(f"{BAIT_KEY} {LB}aa -> chain1 = {2*LB}")
+import statistics as _st
 
-src_list = (DIR["rf2ppi"]/"input_file").read_text().split("\n")
-src_list = [l for l in src_list if l.strip()]
-print(f"기존 input_file: {len(src_list)}쌍")
-print(f"예상 시간: {len(src_list)} x 18.3s x {N_REP_DIMER}회 = 약 "
-      f"{len(src_list)*18.3*N_REP_DIMER/3600:.1f} 시간")
+DIMER_MODE  = "auto"   # "auto" = 디코이 보정으로 결정 / "both" / "bait" 로 고정 가능
+N_REP_DIMER = 3        # 단량체 스크린과 동일. mean±sd 로 순위를 매긴다
+N_DECOY     = 8        # 보정에 쓸 음성 대조. 늘리면 sd 추정이 좋아지고 시간이 는다
+_GID   = globals().get("GPU_ID", 1)
+CTRLK  = next((k for k in BAIT_ALL if k.upper().startswith("COOC")), None)
+LB, LC = len(BAIT_ALL[BAIT_KEY]), len(BAIT_ALL[CTRLK])
+CD = DIR["paired"]/"calib"; CD.mkdir(exist_ok=True)
 
+# ---------- a3m 을 질의 좌표계로 ----------
+def load_a3m(p):
+    nm, buf, rows = None, [], []
+    for l in open(p, errors="ignore"):
+        if l.startswith(">"):
+            if nm is not None: rows.append((nm, "".join(buf)))
+            nm, buf = l[1:].rstrip(), []
+        elif l.strip():
+            buf.append(l.strip())
+    if nm is not None: rows.append((nm, "".join(buf)))
+    return rows
+
+def query_frame(rows):
+    """a3m 의 소문자(삽입 열)를 떼어 모든 행 길이를 질의와 맞춘다.
+    열을 복제하려면 행마다 열 번호가 같아야 한다 — 삽입이 섞인 채로 잘라
+    이어붙이면 복제본의 프레임이 어긋난다."""
+    if not rows: return [], 0
+    L = len(re.sub(r"[a-z.]", "", rows[0][1]))
+    out, drop = [], 0
+    for n_, s in rows:
+        t = re.sub(r"[a-z.]", "", s)
+        if len(t) != L: drop += 1; continue
+        out.append((n_, t))
+    return out, drop
+
+def dup(rows, n1, mode):
+    """chain1 을 2배로. mode=='both' 면 chain2 도 2배."""
+    f = (lambda s: s[:n1] + s[:n1] + s[n1:] + s[n1:]) if mode == "both" else \
+        (lambda s: s[:n1] + s[:n1] + s[n1:])
+    return [(n_, f(s)) for n_, s in rows]
+
+def write_a3m(p, rows):
+    p.write_text("".join(f">{n_}\n{s}\n" for n_, s in rows))
+
+def run_rf2(list_file, tag, reps):
+    sh(f'''cd "{list_file.parent}"
+for rep in {' '.join(str(i) for i in range(1, reps+1))}; do
+  cp "{list_file.name}" {tag}${{rep}}
+  CUDA_VISIBLE_DEVICES={_GID} python "{RF2PPI_DIR}/src/predict_list_PPI.py" \\
+      -list_fn {tag}${{rep}} -model_file "{RF2PPI_DIR}/src/models/RF2-PPI.pt"
+done''', check=False)
+
+def read_scores(d, pattern):
+    got = {}
+    for f in sorted(d.glob(pattern)):
+        for line in open(f, errors="ignore"):
+            p = line.split()
+            if len(p) < 2: continue
+            try: v = float(p[1])
+            except ValueError: continue      # 헤더 줄
+            got.setdefault(Path(p[0]).stem, []).append(v)
+    return {k: v for k, v in got.items() if v}
+
+# =============================== STEP 0 ===============================
+print("=" * 100); print("### STEP 0 | 디코이 보정 — 위상 오프셋인가 신호인가"); print("=" * 100)
+_busy = subprocess.run("pgrep -af '[b]oltz predict|[p]redict_list_PPI'", shell=True,
+                       capture_output=True, text=True).stdout.strip()
+if _busy:
+    print(f"⚠ GPU 작업이 이미 돈다:\n  {_busy}\n  끝난 뒤 이 셀을 다시 돌릴 것.")
+    raise SystemExit
+
+# 스크린 a3m 목록: stem 이 "ChCODH2__<prey>" 이므로 prey 로 색인한다
+SRCL = [l.rsplit(" ", 1) for l in
+        (DIR["rf2ppi"]/"input_file").read_text().split("\n") if l.strip()]
+BY_PREY = {Path(p).stem.split("__")[-1]: p for p, _ in SRCL}
+print(f"스크린 입력 {len(SRCL)}쌍, prey 색인 {len(BY_PREY)}개")
+
+# 디코이: 단량체 스크린 하위권 + 깊이가 충분한 것 (깊이 탓으로 낮은 건 제외)
+_rk = DIR["table"]/"trackA_RF2PPI_ranked.csv"
+DEC = []
+if _rk.exists():
+    R = pd.read_csv(_rk, index_col=0).dropna(subset=["mean"])
+    _med = R["paired_depth"].median() if "paired_depth" in R else 0
+    cand = R[(R.get("paired_depth", _med) >= _med)].sort_values("mean")
+    DEC = [i for i in cand.index if i in BY_PREY][:N_DECOY]
+print(f"디코이 {len(DEC)}개 (단량체 점수 하위, 깊이 중앙값 이상): {DEC}")
+
+# 대조군을 스크린 프레임으로: a3m 은 [CooC1 | ChCODH2] 이므로 앞뒤를 바꾼다
+ctrl_src = DIR["paired"]/f"{CTRLK}__{BAIT_KEY}.a3m"
+jobs = {}            # name -> {mode: (a3m경로, chain1길이)}
+if ctrl_src.exists():
+    rows, drop = query_frame(load_a3m(ctrl_src))
+    if rows and len(rows[0][1]) == LC + LB:
+        swapped = [(n_, s[LC:] + s[:LC]) for n_, s in rows]   # -> [ChCODH2 | CooC1]
+        for m in ("bait", "both"):
+            p = CD/f"CTRL.{m}.a3m"; write_a3m(p, dup(swapped, LB, m))
+            jobs.setdefault("CTRL", {})[m] = (p, 2*LB)
+        print(f"대조군 프레임 교정: {len(rows)}행 (삽입으로 버린 행 {drop}), "
+              f"[CooC1|ChCODH2] -> [ChCODH2x2|CooC1] / [ChCODH2x2|CooC1x2]")
+    else:
+        print(f"⚠ 대조군 a3m 열 수가 {LC}+{LB} 와 맞지 않는다. 대조군 보정 생략.")
+else:
+    print(f"⚠ {ctrl_src} 없음")
+
+for pid in DEC:
+    rows, _ = query_frame(load_a3m(BY_PREY[pid]))
+    if not rows or len(rows[0][1]) <= LB: continue
+    for m in ("bait", "both"):
+        p = CD/f"{pid}.{m}.a3m"; write_a3m(p, dup(rows, LB, m))
+        jobs.setdefault(pid, {})[m] = (p, 2*LB)
+
+for m in ("bait", "both"):
+    lst = [f"{v[m][0]} {v[m][1]}" for v in jobs.values() if m in v]
+    (CD/f"list_{m}").write_text("\n".join(lst) + "\n")
+    print(f"  {m}: {len(lst)}개")
+
+_n = sum(len(v) for v in jobs.values()) * N_REP_DIMER
+print(f"\n보정 예측 {_n}회, 약 {_n*22/60:.0f}분. 전경에서 돈다.")
+for m in ("bait", "both"):
+    if all((CD/f"cal_{m}{r}.log").exists() and (CD/f"cal_{m}{r}.log").stat().st_size > 0
+           for r in range(1, N_REP_DIMER+1)):
+        print(f"  [재사용] cal_{m}*.log 있음")
+    else:
+        run_rf2(CD/f"list_{m}", f"cal_{m}", N_REP_DIMER)
+
+print("\n" + "-" * 100)
+print(f"{'위상':8s} {'대조군':>8s} {'디코이 mean':>12s} {'디코이 sd':>10s} "
+      f"{'간격':>8s} {'z':>7s}")
+Z = {}
+for m in ("bait", "both"):
+    S = read_scores(CD, f"cal_{m}*.log")
+    cs = S.get(f"CTRL.{m}")
+    ds = [_st.mean(v) for k, v in S.items() if not k.startswith("CTRL")]
+    if not cs or len(ds) < 3:
+        print(f"{m:8s} 점수 부족 — 로그 확인 필요"); continue
+    c, dm = _st.mean(cs), _st.mean(ds)
+    ds_sd = _st.pstdev(ds) or 1e-9
+    Z[m] = (c - dm)/ds_sd
+    print(f"{m:8s} {c:8.3f} {dm:12.3f} {ds_sd:10.3f} {c-dm:8.3f} {Z[m]:7.2f}")
+print("-" * 100)
+print("  간격 = 대조군 - 디코이평균. z = 그 간격이 디코이 산포의 몇 배인가.")
+print("  두 위상의 대조군 점수가 같이 오르내리면 그건 오프셋이고, z 는 안 변한다.")
+print("  z 가 큰 위상이 실제로 참을 배경에서 더 잘 떼어내는 위상이다.")
+
+if DIMER_MODE == "auto":
+    if len(Z) == 2:
+        DIMER_MODE = max(Z, key=Z.get)
+        if abs(Z["both"] - Z["bait"]) < 0.5:
+            DIMER_MODE = "both"
+            print("\n  두 위상의 z 차이가 0.5 미만 — 구분되지 않는다.")
+            print("  그러면 생물학이 결정한다: CooC1 의 Ni 자리는 이량체 계면에 있고,")
+            print("  G3E/SIMIBI 과(CooC·HypB·UreG·MeaB·COG0523)는 전부 이량체다.")
+            print("  찾으려는 대상이 이량체라면 prey 복제는 왜곡이 아니라 사전확률이다.")
+        print(f"\n  => DIMER_MODE = {DIMER_MODE}")
+    else:
+        DIMER_MODE = "both"
+        print(f"\n  보정 실패 — 기본값 {DIMER_MODE} 로 간다.")
+
+# =============================== STEP 1 ===============================
+print("\n" + "=" * 100); print(f"### STEP 1 | 전체 스크린  (mode = {DIMER_MODE})"); print("=" * 100)
+_SPP = 24.3 if DIMER_MODE == "both" else 18.3
+print(f"chain1 = {BAIT_KEY} x2 = {2*LB}"
+      f"{' , chain2 = prey x2' if DIMER_MODE=='both' else ' , chain2 = prey (원본)'}")
+print(f"{len(SRCL)}쌍 x {_SPP}s x {N_REP_DIMER}회 = 약 {len(SRCL)*_SPP*N_REP_DIMER/3600:.0f} 시간")
 sh(f"df -h {BASE} | tail -1", check=False)
-print("\n※ a3m 이 1.4배로 는다. 여유가 10 GB 미만이면 먼저 정리할 것.")
+print("※ a3m 이 2배(both) / 1.4배(bait)로 는다. 여유가 10 GB 미만이면 먼저 정리할 것.")
 
-DD = DIR["paired"]/"bait_dimer"; DD.mkdir(exist_ok=True)
+DD = DIR["paired"]/f"bait_dimer_{DIMER_MODE}"; DD.mkdir(exist_ok=True)
 SRC = DIR["script"]/"part9_dimer_prep.py"
 SRC.write_text(f'''
-import sys
+import re
 from pathlib import Path
-LB   = {LB}
+LB, MODE = {LB}, "{DIMER_MODE}"
 SRCL = Path(r"{DIR['rf2ppi']}/input_file")
 OUT  = Path(r"{DD}")
 LIST = Path(r"{DIR['rf2ppi']}/input_file_dimer")
-made, skip, bad = 0, 0, 0
+made = skip = bad = 0
 lines = []
 for ln in SRCL.read_text().split("\\n"):
     ln = ln.strip()
@@ -7061,20 +7221,25 @@ for ln in SRCL.read_text().split("\\n"):
     dst = OUT / Path(p).name
     if dst.exists():
         skip += 1; lines.append(f"{{dst}} {{2*LB}}"); continue
-    nm, buf, out = None, [], []
+    nm, buf, rows = None, [], []
     for l in open(p, errors="ignore"):
         if l.startswith(">"):
-            if nm: out.append((nm, "".join(buf)))
+            if nm is not None: rows.append((nm, "".join(buf)))
             nm, buf = l[1:].rstrip(), []
-        else: buf.append(l.strip())
-    if nm: out.append((nm, "".join(buf)))
-    ok = [(a, b) for a, b in out if len(b) > LB]
-    if not ok:
-        bad += 1; continue
-    dst.write_text("".join(f">{{a}}\\n{{b[:LB]}}{{b[:LB]}}{{b[LB:]}}\\n" for a, b in ok))
+        elif l.strip(): buf.append(l.strip())
+    if nm is not None: rows.append((nm, "".join(buf)))
+    if not rows: bad += 1; continue
+    L = len(re.sub(r"[a-z.]", "", rows[0][1]))     # 질의 좌표계 총 열 수
+    if L <= LB: bad += 1; continue
+    ok = []
+    for a, b in rows:
+        t = re.sub(r"[a-z.]", "", b)               # 삽입 열 제거 — 복제 프레임 유지
+        if len(t) != L: continue
+        ok.append((a, t[:LB] + t[:LB] + t[LB:] + (t[LB:] if MODE == "both" else "")))
+    if not ok: bad += 1; continue
+    dst.write_text("".join(f">{{a}}\\n{{b}}\\n" for a, b in ok))
     made += 1; lines.append(f"{{dst}} {{2*LB}}")
-    if made % 500 == 0:
-        print(f"  made {{made}}", flush=True)
+    if made % 500 == 0: print(f"  made {{made}}", flush=True)
 LIST.write_text("\\n".join(lines) + "\\n")
 print(f"made {{made}} / reuse {{skip}} / skip {{bad}} -> {{LIST}}", flush=True)
 ''')
@@ -7084,30 +7249,25 @@ python "{SRC}"
 cd "{DIR['rf2ppi']}"
 for rep in {' '.join(str(i) for i in range(1, N_REP_DIMER+1))}; do
   cp input_file_dimer in_dimer${{rep}}
-  CUDA_VISIBLE_DEVICES={globals().get('GPU_ID', 1)} python \\
+  CUDA_VISIBLE_DEVICES={_GID} python \\
     "{RF2PPI_DIR}/src/predict_list_PPI.py" -list_fn in_dimer${{rep}} \\
     -model_file "{RF2PPI_DIR}/src/models/RF2-PPI.pt"
   echo "dimer replicate ${{rep}} done"
 done
 echo DONE_dimer_screen
 """
-_busy = subprocess.run("pgrep -af '[b]oltz predict|[p]redict_list_PPI'", shell=True,
-                       capture_output=True, text=True).stdout.strip()
-if _busy:
-    print(f"\n⚠ GPU 작업이 이미 돈다:\n  {_busy}\n  끝난 뒤 다시 실행할 것.")
-elif not already(done("part9_dimer_screen",
-                      *[DIR["rf2ppi"]/f"in_dimer{i}.log"
-                        for i in range(1, N_REP_DIMER+1)]),
-                 "이량체 스크린", f"rm {DIR['rf2ppi']}/in_dimer*.log"):
+if not already(done("part9_dimer_screen",
+                    *[DIR["rf2ppi"]/f"in_dimer{i}.log" for i in range(1, N_REP_DIMER+1)]),
+               "이량체 스크린", f"rm {DIR['rf2ppi']}/in_dimer*.log"):
     sh_bg("part9_dimer_screen", script, env=CONDA_ENV_RF2)
     print("\n  a3m 변환(3,626개)이 먼저 돌고 그다음 추론이다. 변환은 10~20분.")
     print("  진행확인: bg_tail('part9_dimer_screen')")
 
 print("\n### 끝난 뒤")
-print("  in_dimer1~3.log 를 CELL 23 방식으로 replicate 평균내고, 대조군 0.425 를")
-print("  기준선으로 그 위에 몇 개가 남는지 본다.")
+print("  in_dimer1~3.log 를 CELL 23 방식으로 평균내고, STEP 0 의 대조군 점수를")
+print("  기준선으로 그 위에 몇 개가 남는지 본다. 이때 쓰는 기준선은 0.425 가 아니라")
+print("  STEP 0 이 스크린 프레임에서 다시 잰 값이다.")
 print("  단량체 0.266 에서 534개, tandem 0.390 에서 80개였다.")
-print("  0.425 에서 남는 목록이 Track A 의 실질적 후보다 — sd 까지 붙은 채로 나온다.")
 ```
 
 ---
