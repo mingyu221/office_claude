@@ -4016,12 +4016,18 @@ if TGT and _g.exists():
                              "fident": None, "qcov": None, "n_frag": 0}); continue
             r = best[best["query"] == k].iloc[0]
             nfrag = int((d["query"] == k).sum())
-            if r.qcov >= 0.80 and r.fident >= 0.90:
+            # pseudogene 의 서명은 '같은 유전자인데 깨짐' 이다 -> fident 가 높아야 한다.
+            # fident 0.4 대는 깨진 사본이 아니라 먼 상동체(파라로그)다. 예: K-12 의
+            # dksA 는 TraR 의 파라로그이고, K-12 자신의 프로파지 terminase 도 있다.
+            # fident 조건 없이 qcov/n_frag 만 보면 그것들이 전부 pseudogene 으로 찍힌다.
+            if r.fident < 0.80:
+                v = "먼 상동체 — 이 유전자가 아니라 파라로그일 가능성 [균주 특이 유지]"
+            elif r.qcov >= 0.90 and nfrag <= 2:
                 v = "어노테이션 누락 — 게놈에 온전히 있다 [후보 아님]"
-            elif nfrag >= 2 or r.qcov < 0.60:
-                v = "★ pseudogene 의심 — 게놈에 있으나 조각나 있다"
+            elif r.qcov < 0.70 or nfrag >= 3:
+                v = "★ pseudogene 의심 — 같은 유전자가 조각나 있다"
             else:
-                v = "부분 일치 — 수동 확인 필요"
+                v = "부분 일치 — 좌표를 직접 볼 것"
             rows.append({"protein": k, "genome": "있음", "verdict": v,
                          "fident": round(float(r.fident), 3),
                          "qcov": round(float(r.qcov), 3), "n_frag": nfrag})
@@ -4032,8 +4038,9 @@ if TGT and _g.exists():
         G.to_csv(DIR["table"]/"cys4_genome_check.csv", index=False, encoding="utf-8-sig")
         print("\n=== 판정별 ===")
         print(G.verdict.value_counts().to_string())
-        print("\n※ n_frag 는 게놈에서 몇 조각으로 나뉘어 맞았는지다. 2 이상이거나")
-        print("  qcov 가 낮으면 프레임시프트·IS 삽입으로 깨진 것일 수 있다.")
+        print("\n※ 판정 기준: fident 가 낮으면(<0.80) 깨진 사본이 아니라 다른 유전자다.")
+        print("  fident 가 높은데 qcov 가 낮거나 조각이 많으면 프레임시프트·IS 삽입을")
+        print("  의심한다. n_frag 는 번역 검색의 프레임 경계로도 늘 수 있으니 참고값이다.")
         print("  그 경우 해당 좌표를 뽑아 직접 확인할 것 — 이게 사실이면 '조상은 둘 다")
         print("  가졌는데 K-12 에서 깨졌다' 가 되어 표현형을 그대로 설명한다.")
         print(f"\n저장: {DIR['table']/'cys4_genome_check.csv'}")
@@ -4150,6 +4157,103 @@ if best:
     print("  판정과 교차해서 보면 된다.")
 else:
     print("\n4잔기 전부 맞은 구조가 없다. --covered-node 3 으로 한 단계 낮춰 볼 것.")
+```
+
+---
+
+## CELL 29i — dimer4 가 0 인 이유 가르기 (covered-node 기울기)
+
+```python
+# =============================================================================
+# CELL 29i | 4잔기 전부 맞은 구조가 0 인 것이 사실인가, 질의가 성립을 안 한 것인가
+#   AlphaFold 구조 DB 는 전부 단량체 예측이다. CooC1 의 A112,A114 + B112,B114 는
+#   이량체 계면을 가로지르는 배치이고, 그런 배치는 단량체 모델에 존재할 수 없다.
+#   0 이 나온 것이
+#     (a) 기하학적 사실 — 그런 Cys4 배치를 가진 단백질이 없다
+#     (b) 구조적 모순 — 단량체 인덱스에 이량체 질의를 던졌다
+#   중 어느 쪽인지 지금 데이터로는 구분이 안 된다.
+#
+#   가르는 법: --covered-node 를 4 -> 3 -> 2 로 낮추며 기울기를 본다.
+#     3 에서 상당수 나오면 (a) 쪽 — 4잔기 배치만 없는 것이다
+#     3 에서도 0 이면 (b) 쪽 — 질의 자체가 인덱스와 안 맞는다
+#   그리고 필터 없이 node_count 분포를 보면 실제로 몇 잔기가 맞고 있는지 나온다.
+# =============================================================================
+need((have("ASSET", "sh"), "CELL 01 을 먼저 돌릴 것"))
+PDBQ  = Path(globals().get("TARGET", ASSET["cooc1_pdb"]))
+IDX   = {"BL21": ASSET["fd_idx_bl21"], "Y19": ASSET["fd_idx_y19"], "MG1655": ASSET["fd_idx_mg"]}
+FD    = ASSET["folddisco"]
+outd  = DIR["folddisco"]/"covnode"; outd.mkdir(exist_ok=True)
+FMT   = "tid,idf,min_rmsd,nres,plddt,node_count,max_node_cov,matching_residues"
+DIMER = "A112,A114,B112,B114"
+D, A  = 1.5, 15.0          # 가장 넓은 설정으로 고정
+
+rows, KEEP = [], {}
+for cov in [0, 2, 3, 4]:
+    for st in IDX:
+        out = outd/f"dimer4_cov{cov}_{st}.tsv"
+        if not (out.exists() and out.stat().st_size):
+            extra = f"--covered-node {cov}" if cov else ""
+            sh(f'"{FD}" query -p "{PDBQ}" -q {DIMER} -i "{IDX[st]}" -t {min(THREADS,8)} '
+               f'--per-structure --header --sort-by idf -d {D} -a {A} {extra} '
+               f'--format-output "{FMT}" -o "{out}"', check=False)
+        n = 0
+        if out.exists() and out.stat().st_size:
+            df = pd.read_csv(out, sep="\t")
+            df.columns = [c.strip().lstrip("#") for c in df.columns]
+            KEEP[(cov, st)] = df; n = len(df)
+        rows.append({"covered_node": cov, "strain": st, "hits": n})
+        print(f"  covered-node {cov}  {st:7s} {n}")
+
+R = pd.DataFrame(rows).pivot(index="covered_node", columns="strain", values="hits")
+print("\n=== covered-node 별 히트 수 (d=1.5, a=15) ===")
+print(R.to_string())
+print("  covered-node 0 = 필터 없음 (부분 매치 포함)")
+
+# ---- 실제로 몇 잔기가 맞고 있나 ----
+base = KEEP.get((0, "BL21"))
+if base is not None and "node_count" in base.columns:
+    print("\n=== BL21, 필터 없음 — node_count 분포 ===")
+    print(base.node_count.value_counts().sort_index().to_string())
+    print("  질의 잔기 4개 중 실제로 맞은 개수다. 전부 2 에 몰려 있으면")
+    print("  이량체 배치가 단량체 모델에서 재현되지 않는다는 뜻이다.")
+
+print("\n=== 판정 ===")
+_b3 = int(R.loc[3, "BL21"]) if 3 in R.index else 0
+_b4 = int(R.loc[4, "BL21"]) if 4 in R.index else 0
+if _b4 > 0:
+    print(f"4잔기 전부 맞은 구조가 {_b4}개 있다. 그 목록이 가장 좁은 후보 집합이다.")
+elif _b3 > 0:
+    print(f"4잔기는 0 이지만 3잔기는 {_b3}개다. 기하학적 사실 쪽이다 —")
+    print("CooC1 의 이량체 Cys4 배치를 그대로 가진 단백질이 BL21 에 없다.")
+    print("3잔기 목록을 후보로 쓰되, 네 번째 Cys 가 없다는 점을 명시할 것.")
+else:
+    print("3잔기에서도 0 이다. 질의가 인덱스와 안 맞는 쪽이다 —")
+    print("단량체 예측 DB 에 이량체 계면 질의를 던진 것이 원인일 가능성이 높다.")
+    print("→ 이량체 노선은 여기서 접고, 단일 사슬 Cys4 템플릿(CELL 29c 의")
+    print("  QJZ12568.1 · GspE · HslO)으로 뽑은 목록을 쓴다. 그것이 지금 가진")
+    print("  가장 넓고 재현 가능한 금속 자리 집합이다.")
+
+# ---- 나온 것이 있으면 이름을 붙인다 ----
+xw = pd.read_csv(DIR["table"]/"id_crosswalk_struct_to_genbank.csv") \
+     if (DIR["table"]/"id_crosswalk_struct_to_genbank.csv").exists() else pd.DataFrame()
+xwm = xw.dropna(subset=["protein"]).set_index("tid")["protein"].to_dict() if len(xw) else {}
+hdr = {}
+for l in open(ASSET["faa_bl21"], errors="ignore"):
+    if l.startswith(">"):
+        t = l[1:].rstrip(); hdr[t.split()[0]] = t[len(t.split()[0]):].strip()
+for cov in [4, 3]:
+    for st in IDX:
+        df = KEEP.get((cov, st))
+        if df is None or not len(df): continue
+        df = df.copy()
+        df["stem"] = df.tid.apply(lambda x: Path(str(x)).stem)
+        df["protein"] = df.stem.map(xwm).astype(str).str.split(",").str[0]
+        df["desc"] = df.protein.map(lambda k: hdr.get(k, "")[:65])
+        cols = [c for c in ["protein", "idf", "min_rmsd", "node_count", "plddt",
+                            "matching_residues", "desc"] if c in df.columns]
+        print(f"\n--- covered-node {cov} / {st} ({len(df)}개) ---")
+        print(df.sort_values("min_rmsd")[cols].head(30).to_string(index=False))
+        df.to_csv(DIR["table"]/f"dimer4_cov{cov}_{st}.csv", index=False, encoding="utf-8-sig")
 ```
 
 ---
