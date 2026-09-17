@@ -7295,7 +7295,15 @@ for rep in {' '.join(str(i) for i in range(1, N_REP_DIMER+1))}; do
 done
 echo DONE_dimer_screen
 """
-if not already(done("part9_dimer_screen",
+# STEP 0 이 20분 걸리는 사이에 다른 GPU 작업이 끝나거나 시작됐을 수 있다.
+# 맨 앞에서 한 번 본 상태를 믿고 55시간짜리를 띄우면 안 된다 — 다시 본다.
+_busy2 = subprocess.run("pgrep -af '[b]oltz predict|[p]redict_list_PPI'", shell=True,
+                        capture_output=True, text=True).stdout.strip()
+if _busy2:
+    print(f"\n⚠ GPU 작업이 아직 돈다:\n  {_busy2}")
+    print("  스크린을 띄우지 않았다. 끝난 뒤 이 셀을 다시 돌릴 것 "
+          "(STEP 0 은 cal_*.log 재사용으로 즉시 지나간다).")
+elif not already(done("part9_dimer_screen",
                     *[DIR["rf2ppi"]/f"in_dimer{i}.log" for i in range(1, N_REP_DIMER+1)]),
                "이량체 스크린", f"rm {DIR['rf2ppi']}/in_dimer*.log"):
     sh_bg("part9_dimer_screen", script, env=CONDA_ENV_RF2)
