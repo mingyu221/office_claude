@@ -6799,6 +6799,139 @@ print(f"\n저장: {DIR['table']/'g3e_family_sweep.csv'}")
 
 ---
 
+## CELL 53 — 이량체 후속: Boltz OOM 복구 + tandem 상승분의 출처 + 순위 재계산
+
+```python
+# =============================================================================
+# CELL 53 | CELL 50 이 남긴 세 가지를 마무리한다
+#   (A) Boltz 이량체가 OOM 으로 2개 실패했다 (free 14MB). 1,780 토큰에
+#       max_msa_seqs 2048 은 과하다. 512 로 낮춰 실패분만 다시 돌린다.
+#   (B) RF2-PPI tandem 이 0.251 -> 0.390 으로 올랐다. 어느 쪽 복제가 올린 건지
+#       모른다. ChCODH2 만 이량체로 한 변형을 추가해 갈라 본다.
+#         t_both  [CooC1|CooC1] + [ChCODH2|ChCODH2]   (이미 = 0.390)
+#         t_bait  [CooC1]       + [ChCODH2|ChCODH2]   <- 새로
+#         t_prey  [CooC1|CooC1] + [ChCODH2]           <- 새로
+#   (C) 0.390 이 스크리닝 분포에서 몇 등인가. 0.266 일 때는 531/3,625 (14.6%)
+#       였다. 대조군이 위로 올라왔으면 Track A 의 판정이 달라진다.
+# =============================================================================
+need((have("BAIT_ALL", "BAIT_KEY"), "CELL 07 을 먼저 돌릴 것"))
+CTRLK = next((k for k in BAIT_ALL if k.upper().startswith("COOC")), None)
+bseq, cseq = BAIT_ALL[BAIT_KEY], BAIT_ALL[CTRLK]
+LC, LB = len(cseq), len(bseq)
+_GID = globals().get("GPU_ID", 1)
+
+# ---------- (C) 순위부터 (CPU, 즉시) ----------
+print("=" * 100); print("### (C) 0.390 은 스크리닝 분포에서 몇 등인가"); print("=" * 100)
+_rk = DIR["table"]/"trackA_RF2PPI_ranked.csv"
+if _rk.exists():
+    R = pd.read_csv(_rk, index_col=0).dropna(subset=["mean"])
+    for v, tag in [(0.266, "단량체 대조군"), (0.390, "tandem 이량체 대조군")]:
+        n = int((R["mean"] > v).sum())
+        print(f"  {tag:22s} {v:.3f} : 위에 {n:5d} / {len(R)} 개  (상위 {100*n/len(R):5.2f}%)")
+    print("\n  0.266 -> 0.390 으로 대조군이 올라온 만큼 위에 남는 후보가 줄었다.")
+    print("  이 수가 수십 개 수준이면 Track A 를 이량체 입력으로 다시 돌릴 값어치가 있다.")
+    _above = R[R["mean"] > 0.390]
+    if len(_above) <= 60:
+        print(f"\n  대조군(0.390)보다 높은 {len(_above)}개:")
+        print(_above[["best_bait", "mean", "sd", "category", "paired_depth", "desc"]]
+              .head(60).to_string())
+else:
+    print("  trackA_RF2PPI_ranked.csv 없음")
+
+# ---------- (B) tandem 분해 (GPU, 전경 ~3분) ----------
+print("\n" + "=" * 100); print("### (B) 상승분이 어느 쪽 복제에서 왔나"); print("=" * 100)
+src = DIR["paired"]/f"{CTRLK}__{BAIT_KEY}.a3m"
+vdir = DIR["paired"]/"dimer"; vdir.mkdir(exist_ok=True)
+if not src.exists():
+    print(f"  [건너뜀] {src} 없음")
+else:
+    names, seqs, nm, buf = [], [], None, []
+    for l in open(src, errors="ignore"):
+        if l.startswith(">"):
+            if nm is not None: names.append(nm); seqs.append("".join(buf))
+            nm, buf = l[1:].strip(), []
+        else: buf.append(l.strip())
+    if nm is not None: names.append(nm); seqs.append("".join(buf))
+    VAR = {"t_bait": (lambda s: s[:LC] + s[LC:] + s[LC:], LC),      # prey(bait자리)만 2배
+           "t_prey": (lambda s: s[:LC] + s[:LC] + s[LC:], 2*LC)}    # CooC1만 2배
+    lines = []
+    for tag, (fn, first) in VAR.items():
+        raw = vdir/f"{tag}.raw.a3m"
+        raw.write_text("".join(f">{n_}\n{fn(s)}\n" for n_, s in zip(names, seqs)))
+        out = vdir/f"{tag}.a3m"
+        try:
+            subprocess.run(["hhfilter", "-i", str(raw), "-o", str(out), "-id", "90",
+                            "-M", "first"], check=True, capture_output=True)
+        except Exception:
+            shutil.copy(raw, out)
+        d = sum(1 for l in open(out) if l.startswith(">"))
+        print(f"  {tag}: chainA={first} 깊이 {d}")
+        lines.append(f"{out} {first}")
+    (vdir/"input_split").write_text("\n".join(lines) + "\n")
+    sh(f'''cd "{vdir}"
+for rep in 1 2 3; do
+  cp input_split in_s${{rep}}
+  CUDA_VISIBLE_DEVICES={_GID} python "{RF2PPI_DIR}/src/predict_list_PPI.py" \\
+      -list_fn in_s${{rep}} -model_file "{RF2PPI_DIR}/src/models/RF2-PPI.pt" || true
+done''', check=False)
+    import statistics as _st
+    got = {}
+    for rep in (1, 2, 3):
+        lg = vdir/f"in_s{rep}.log"
+        if not lg.exists(): continue
+        for line in open(lg, errors="ignore"):
+            f = line.split()
+            if len(f) >= 2:
+                try: got.setdefault(Path(f[0]).stem, []).append(float(f[1]))
+                except ValueError: pass
+    print("\n  === 변형별 ===")
+    print(f"  {'단량체 (v0_base)':24s} 0.251")
+    for k, v in sorted(got.items()):
+        print(f"  {k:24s} {_st.mean(v):.3f}  sd {_st.pstdev(v):.3f}  n {len(v)}")
+    print(f"  {'tandem 양쪽 (t_both)':24s} 0.390")
+    print("\n  ChCODH2 쪽 복제만으로 올랐다면, 스크리닝은 prey 를 복제할 필요 없이")
+    print("  bait 만 이량체로 만들면 된다 — 길이가 절반이라 비용도 절반이다.")
+
+# ---------- (A) Boltz 이량체 재시도 ----------
+print("\n" + "=" * 100); print("### (A) Boltz 이량체 OOM 복구"); print("=" * 100)
+din = DIR["boltz"]/"inputs_dimer"
+done_names = {re.sub(r"^confidence_|_model_\d+$", "", Path(f).stem)
+              for f in glob.glob(str(DIR["boltz"]/"out_dimer"/"**"/"confidence_*.json"),
+                                 recursive=True)}
+want = {f.stem for f in din.glob("*.yaml")}
+miss = sorted(want - done_names)
+print(f"  완료 {len(done_names)} / 입력 {len(want)}   누락 {len(miss)}: {miss}")
+if miss:
+    d2 = DIR["boltz"]/"inputs_dimer2"; d2.mkdir(parents=True, exist_ok=True)
+    for f in d2.glob("*.yaml"): f.unlink()
+    for n_ in miss: shutil.copy(din/f"{n_}.yaml", d2/f"{n_}.yaml")
+    scr = f"""
+cd "{DIR['boltz']}"
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+CUDA_VISIBLE_DEVICES={_GID} boltz predict inputs_dimer2 \\
+  --out_dir out_dimer2 --use_msa_server --max_msa_seqs 512 \\
+  --recycling_steps 3 --diffusion_samples 5 --output_format mmcif --num_workers 1
+echo DONE_boltz_dimer2
+"""
+    busy = subprocess.run("pgrep -f '[b]oltz predict'", shell=True,
+                          capture_output=True, text=True).stdout.split()
+    if busy:
+        print(f"  ⚠ boltz 가 이미 돈다 (pid {' '.join(busy)})")
+    else:
+        shutil.rmtree(DIR["boltz"]/"out_dimer2", ignore_errors=True)
+        sh_bg("part8_boltz_dimer2", scr, env=CONDA_ENV_BOLTZ)
+        print("  max_msa_seqs 2048 -> 512, num_workers 2 -> 1 로 낮춰 재시도.")
+        print("  1,780 토큰에서 MSA 깊이가 VRAM 을 가장 크게 좌우한다.")
+else:
+    print("  누락 없음 — 파싱으로 넘어가면 된다.")
+
+print("\n### 다음")
+print("  bg_tail('part8_boltz_dimer2') 로 확인 -> 끝나면 out_dimer 와 out_dimer2 를")
+print("  같이 파싱해 CTRL-dimer2x2 vs CTRL-mono1x1(0.300) 을 비교한다.")
+```
+
+---
+
 ## CELL 37 — 최종 리포트 + 남은 TODO
 
 ```python
