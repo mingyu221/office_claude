@@ -1948,7 +1948,25 @@ lst = vdir/"input_ctrlvar"
 lst.write_text("\n".join(f"{p} {fl}" for p, fl, _ in jobs) + "\n")
 
 # ---- 실행: 변형 수가 적어 전경에서 돌린다 (replicate 3회, 수 분) ----
+# GPU 를 이미 누가 쓰고 있으면 붙지 않는다. Boltz 가 14GB 를 쥔 채로 여기에
+# RF2-PPI 를 얹으면 둘 다 OOM 으로 죽는다 — 기다렸다 돌리는 편이 빠르다.
 CV_GPU = globals().get("GPU_ID", 1)
+_mem = subprocess.run(
+    "nvidia-smi --query-gpu=index,memory.used,memory.total --format=csv,noheader,nounits",
+    shell=True, capture_output=True, text=True).stdout.strip().splitlines()
+print("\nGPU 상태:")
+_free = {}
+for _l in _mem:
+    _i, _u, _t = [x.strip() for x in _l.split(",")]
+    _free[int(_i)] = int(_t) - int(_u)
+    print(f"  GPU {_i}: {_u} / {_t} MiB 사용  (여유 {_free[int(_i)]} MiB)")
+if _free.get(CV_GPU, 0) < 8000:
+    print(f"\n⚠ GPU {CV_GPU} 의 여유가 {_free.get(CV_GPU, 0)} MiB 뿐이다. 실행하지 않았다.")
+    print("   돌고 있는 작업이 끝나기를 기다리거나(CELL 15b), 여유 있는 GPU 로")
+    print("   CV_GPU 를 바꿔 이 셀을 다시 실행할 것.")
+    print("   ※ GPU 0 은 디스플레이가 물려 있어 RF2-PPI 가 13배 느렸다. 8쌍x3회라")
+    print("     20~30분이면 끝나므로 급하면 GPU 0 도 쓸 만하다.")
+    raise SystemExit
 sh(f'''cd "{vdir}"
 for rep in 1 2 3; do
   cp input_ctrlvar in_rep${{rep}}
