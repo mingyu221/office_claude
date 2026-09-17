@@ -4012,6 +4012,225 @@ print(f"Tier 표        : {DIR['table']/'FOLDDISCO_candidates.csv'}")
 
 ---
 
+## CELL 36c — 직교체 재현성 + BL21 단독 검출의 원인 규명
+
+```python
+# =============================================================================
+# CELL 36c | 표에서 바로 읽히는 세 가지를 수치로 확정한다
+#   (A) 같은 단백질이 균주마다 같은 값을 받는가 = 각 열의 잡음 바닥
+#       세 균주에 같은 단백질(직교체)이 여럿 있다. 입력이 사실상 같으므로 균주 간
+#       차이는 측정 잡음이다. part7_boltz_rep 을 기다릴 것 없이 지금 계산된다.
+#   (B) BL21 에서만 '검출'된 단백질 — 유전자는 세 균주에 다 있는데 folddisco 가
+#       BL21 에서만 잡았다. 서열 자체가 다른가(진짜), 아니면 같은 서열인데 구조
+#       예측만 다른가(인공물)? 모티프 잔기가 직교체에서도 Cys 인지 보면 갈린다.
+#   (C) 앞 셀의 버그 둘: ni_captured 문자열 불일치, BL21/Y19 유전자명 미추출
+# =============================================================================
+need((have("GENE_HIT", "MOTIF_HIT", "PROT", "C"), "CELL 33 -> 34 -> 36 -> 36b 를 먼저 돌릴 것"))
+import difflib
+
+# ---------- (C1) ni_captured 수정 ----------
+# CELL 28a-7 이 쓰는 문자열은 'B쪽만 (후보)' 인데 앞 셀은 '후보 쪽' 으로 찾았다.
+if "ni_where" in C.columns:
+    C["ni_captured"] = C.ni_where.astype(str).str.contains("후보").astype(int)
+    print(f"[수정] Ni 를 후보 쪽 사슬로 가져간 단백질: {int(C.ni_captured.sum())}개")
+    print(C[C.ni_captured == 1][["protein_id", "description"]].to_string(index=False))
+    print("\n※ ni_where 가 NaN 인 행은 Boltz Ni 배치를 계산한 적이 없다는 뜻이다")
+    print(f"   (계산된 것 {int(C.ni_where.notna().sum())} / {len(C)}. MG1655·Y19 는 out_cmp 를")
+    print("    CELL 28a-7 이 안 읽어서 통째로 비어 있다 — 균주 비교에는 못 쓴다)")
+
+# ---------- (C2) BL21/Y19 유전자명 ----------
+# 설명문의 관용 표기(Tgt, YeiR, HslO ...)를 잡고, 없으면 MG1655 직교체 이름을 빌린다.
+_mgname = {}
+for (st, k), gname in GENE.items():
+    if st == "MG1655" and gname: _mgname[k] = gname
+def pick_gene(row):
+    if isinstance(row.get("gene"), str) and row["gene"]: return row["gene"]
+    d = str(row.get("description", "")).split("[")[0]
+    cands = re.findall(r"\b([A-Z][a-z]{2}[A-Z0-9]{0,3})\b", d)
+    if cands: return cands[-1][0].lower() + cands[-1][1:]
+    m = MOTIF_HIT.get((row["strain"], row["protein_id"]), {}).get("MG1655")
+    return _mgname.get(m[1], "") if m else ""
+C["gene"] = [pick_gene(r) for _, r in C.iterrows()]
+
+# ---------- (A) 직교체 재현성 ----------
+def counterparts(strain, key):
+    d = MOTIF_HIT.get((strain, key), {})
+    return {s: v[1] for s, v in d.items() if s != strain}
+
+idx = C.set_index(["strain", "protein_id"])
+rows = []
+for _, r in C[C.strain == "BL21"].iterrows():
+    cp = counterparts("BL21", r.protein_id)
+    if not cp: continue
+    e = {"protein": r.protein_id, "gene": r.gene, "desc": str(r.description)[:45],
+         "BL21_rmsd": r.metal_rmsd, "BL21_iptm": r.get("boltz_iptm")}
+    for s, k in cp.items():
+        if (s, k) in idx.index:
+            o = idx.loc[(s, k)]
+            e[f"{s}_rmsd"] = float(o.metal_rmsd)
+            e[f"{s}_iptm"] = float(o.boltz_iptm) if pd.notna(o.get("boltz_iptm")) else np.nan
+    rows.append(e)
+O = pd.DataFrame(rows)
+for col in ["rmsd", "iptm"]:
+    cs = [c for c in O.columns if c.endswith(f"_{col}")]
+    O[f"d_{col}"] = O[cs].max(axis=1) - O[cs].min(axis=1)
+
+print("\n" + "=" * 100)
+print("=== (A) 같은 단백질의 균주 간 차이 = 잡음 바닥 ===")
+print(O[[c for c in O.columns if c != "desc"]].round(3).to_string(index=False))
+for col, label in [("rmsd", "metal_rmsd"), ("iptm", "boltz_iptm")]:
+    d = O[f"d_{col}"].dropna()
+    if not len(d): continue
+    print(f"\n{label}: 직교체 {len(d)}쌍  |Δ| 중앙값 {d.median():.3f}  "
+          f"평균 {d.mean():.3f}  최대 {d.max():.3f}")
+
+_rng = C[C.strain == "BL21"].boltz_iptm
+if _rng.notna().any() and "d_iptm" in O:
+    _n = O.d_iptm.median()
+    print(f"\n비교: BL21 ipTM 전체 범위는 {_rng.min():.3f} ~ {_rng.max():.3f} "
+          f"(폭 {_rng.max()-_rng.min():.3f})")
+    print(f"      같은 단백질끼리도 {_n:.3f} 씩 벌어진다.")
+    if _n > (_rng.max() - _rng.min()) / 3:
+        print("      → 잡음이 전체 폭의 1/3 을 넘는다. ipTM 순위는 읽을 수 없다.")
+
+# ---------- (B) BL21 에서만 검출된 것들: 서열이 다른가 ----------
+def map_pos(s1, s2, i):
+    """s1 의 0-based 위치 i 가 s2 의 어느 위치에 대응하는지"""
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, s1, s2).get_opcodes():
+        if i1 <= i < i2:
+            return (j1 + (i - i1)) if tag == "equal" else (j1 if tag == "replace" else None)
+    return None
+
+only = C[(C.strain == "BL21") & (C.motif_pattern == "BL21") &
+         (C.gene_pattern.astype(str).str.contains("MG1655"))]
+print("\n" + "=" * 100)
+print(f"=== (B) 유전자는 다른 균주에도 있는데 BL21 에서만 검출된 것: {len(only)}개 ===")
+print("모티프 잔기가 직교체에서도 Cys 인지 본다. Cys 가 보존돼 있으면 서열이 아니라")
+print("구조 예측이 달랐다는 뜻이다 (인공물). Cys 가 없으면 진짜 차이다.\n")
+for _, r in only.iterrows():
+    bs = PROT["BL21"].get(r.protein_id, "")
+    pos = [int(x[1:]) for x in str(r.metal_residues).split(",") if x[1:].isdigit()]
+    print(f"--- {r.protein_id} {r.gene}  {str(r.description)[:60]}")
+    print(f"    BL21 {r.metal_residues} = " +
+          ",".join(f"{bs[p-1]}{p}" if 0 < p <= len(bs) else "?" for p in pos))
+    for st in ["MG1655", "Y19"]:
+        hit = GENE_HIT.get(("BL21", r.protein_id), {}).get(st)
+        if not hit:
+            print(f"    {st:7s} 직교체 없음"); continue
+        fid, tid = hit
+        os_ = PROT[st].get(tid, "")
+        if not os_:
+            print(f"    {st:7s} {tid} 서열 없음"); continue
+        aa = []
+        for p in pos:
+            j = map_pos(bs, os_, p - 1)
+            aa.append(f"{os_[j]}{j+1}" if j is not None and j < len(os_) else "-")
+        same = all(x and x[0] == "C" for x in aa)
+        print(f"    {st:7s} {tid} (fident {fid:.3f}) -> " + ",".join(aa) +
+              ("   Cys 보존 → 구조 예측 차이" if same else "   Cys 아님 → 서열 차이"))
+    print()
+
+C.to_csv(DIR["table"]/"ALL_motif_candidates_full.csv", index=False, encoding="utf-8-sig")
+O.to_csv(DIR["table"]/"ortholog_reproducibility.csv", index=False, encoding="utf-8-sig")
+print("=" * 100)
+print(f"갱신: {DIR['table']/'ALL_motif_candidates_full.csv'}")
+print(f"신규: {DIR['table']/'ortholog_reproducibility.csv'}")
+```
+
+---
+
+## 부록 A — 검증 지표 · 단위 · 컷오프 · 근거 (참조용, 실행 셀 아님)
+
+각 숫자가 무엇이고, 어디서 온 기준으로 자르며, 그 기준을 왜 쓰는지. 그리고
+**이 계에서 검증됐는지**. 마지막 열이 핵심이다 — 벤치마크에서 통하는 컷오프가
+여기서도 통한다는 보장은 없고, 실제로 두 개는 이미 깨졌다.
+
+### A-1. Folddisco (구조 모티프 검색) — Track C
+
+| 지표 | 단위 | 쓴 값 | 왜 | 이 계에서 |
+|---|---|---|---|---|
+| `--rmsd` | Å | **1.0** | 질의 잔기 2개면 관계쌍이 1개뿐이라 기하 제약이 약하다. 1.0 Å 이 넘어가면 아무 Cys 쌍이나 걸린다 | **확정** — 직교체끼리 \|Δrmsd\| 가 대개 0.02 미만. 재현된다 |
+| `metal_rmsd` | Å | 낮을수록 좋음 | CooC1 의 A112/A114 배치와 얼마나 같은 기하인가 | 동상 |
+| `idf` | 없음 | 정렬용 | 모티프 희귀도. **후보 선별에는 쓰지 않는다** — AlphaFold DB 에서 희귀한 기하는 드문 기능이 아니라 엉망으로 예측된 단편인 경우가 많다 (실측: idf 1위가 44잔기, pLDDT 56.7) | **쓰지 않음** |
+| `--top` | 개 | 2000 | 균주당 상한. 실제 히트는 metal 21~30개라 걸리지 않는다 | — |
+| `atp_match` | n/3 | **3/3 만 완전** | Walker A 질의 3잔기 중 몇 개가 맞았나. 2/3 은 부분 매치다 | **주의** — Tier 1 대부분이 2/3 |
+| ATP 모티프 자체 | — | 단독 필터 금지 | 프로테옴의 **23~26%** 가 보유. 선별력이 없다. CooC1 의 최근접 이웃이 MinD 로 나온 것도 이것 때문 | **선별력 없음 확정** |
+| `struct_plddt` | 0–100 | **< 70 은 기하를 믿지 말 것** | AlphaFold 신뢰도. 낮은 영역의 곁사슬 배치는 예측이 아니라 잡음이다 | RseC 3균주 rmsd 가 0.31/0.56/0.48 로 흩어졌는데 셋 다 pLDDT 55~73 |
+
+### A-2. mmseqs2 (균주 간 대응)
+
+| 지표 | 단위 | 쓴 값 | 왜 |
+|---|---|---|---|
+| `fident` | 0–1 | **≥ 0.50** | 직교체 판정 하한. 장내세균 3종 사이 직교체는 보통 0.8 이상이라 여유 있는 선 |
+| `qcov` | 0–1 | **≥ 0.70** | 도메인 하나만 겹친 것을 직교체로 세지 않기 위해 |
+| `evalue` | 기대값 | ≤ 1e-5 | 검색 단계 관용 컷오프 |
+
+두 대응표를 **분리해서** 만든다. 섞으면 '검출 차이'와 '유전자 부재'가 구분되지 않는다.
+- 모티프 집합 ↔ 모티프 집합 → `motif_pattern` (folddisco 가 잡은 균주)
+- 모티프 집합 → 전체 프로테옴 → `gene_pattern` (유전자가 있는 균주)
+
+### A-3. RF2-PPI (공진화 PPI 분류) — Track A
+
+| 지표 | 단위 | 기준 | 왜 | 이 계에서 |
+|---|---|---|---|---|
+| `mean` (prob) | 확률 0–1 | ≥0.74 strict / 0.30–0.74 회색 / <0.30 배제 | 논문 벤치마크에서 0.74 가 precision 95% 선 | **검증 실패** |
+| `sd` | 확률 | > 0.1 이면 재실행 | 비결정적 모델. README 기준 ~5% 쌍이 SD>0.1 | 유효 |
+| `N_REPLICATE` | 회 | 깊이≥500 이면 3, 아니면 5 | 위와 같은 이유 | 유효 |
+| `paired_depth` | **유전체 개수** | MIN_PAIRED 50 / <200 위음성 의심 | 공진화를 보려면 두 단백질이 같은 유전체에 있어야 한다. 그 짝의 수 | 유효 |
+| gate 깊이 | 유전체 개수 | ≥ 500 | 이보다 얕으면 공진화 신호가 안 선다 | 통과 (2,929) |
+
+**왜 검증 실패인가.** 양성대조군 CooC1–ChCODH2 가 **0.266**. 0.30 미만이니 모델이
+"안 붙는다"고 답한 것이다. 그런데 이 쌍은 문헌상 실제로 붙고, cooC/cooS 는 1,451개
+유전체에서 같은 오페론에 산다 — 공진화가 최대로 잡혀야 할 교과서적 케이스다.
+게다가 깊이 1,451 은 스크리닝 쌍의 75분위(1,392)보다 위라 재료 부족도 아니다.
+이보다 높은 점수를 받은 스크리닝 후보가 **531 / 3,625 (14.6%)**. 정답을 목록에
+넣으려면 531개를 다 가져와야 한다 → 후보 지명에 쓸 수 없다.
+
+### A-4. Boltz-2 (co-folding) — Track B
+
+| 지표 | 단위 | 통상 기준 | 왜 | 이 계에서 |
+|---|---|---|---|---|
+| `iptm` | 0–1 | ≥0.8 강함 / 0.6–0.8 유의 / <0.4 배제 | 계면만 보는 predicted TM-score. PPI 판정의 표준 | **눈금 미검증 + 잡음 과다** |
+| `ptm` | 0–1 | — | 복합체 전체. 큰 사슬이 지배해 계면 판정에 못 씀 | 쓰지 않음 |
+| `ligand_iptm` | 0–1 | — | Ni 이 계면에 놓였나 | **폐기** — 길이와 ρ=−0.807, 348개 중 계면 배치 0건 |
+| `complex_plddt` | 0–1 | 높을수록 | 구조 신뢰도 | 참고 |
+| Ni 배위 거리 | **Å** | ≤ **3.5** | Ni(II)–S/N 배위 결합 길이(1.9–2.2 Å)에 여유를 둔 상한 | 유효 (실측 1.91–2.18 Å) |
+| `--max_msa_seqs` | 줄 | 2048 | VRAM 23.8→14.6 GB. 8192 로는 15%가 OOM 으로 조용히 버려졌다 | 유효 |
+| 입력 길이 | 잔기 | ≤ 1830 | bait+prey 합. 24 GB 에서 안전한 선 | 유효 |
+
+**왜 눈금 미검증인가.** Track B/C 에는 양성대조군을 물린 적이 없다. ipTM 0.68 이
+이 계에서 무슨 뜻인지 정하는 기준이 없다. `part7_boltz_rep` 이 CooC1–ChCODH2 를
+5표본으로 접어 그 기준을 만드는 중이다.
+
+**왜 잡음 과다인가.** 직교체(사실상 같은 입력)끼리도 ipTM 이 크게 벌어진다.
+- yjjP/ThrE (BL21 256aa 0.681 vs MG1655 256aa 0.397) → **Δ0.284**
+- fumA/fumB (같은 BL21 안의 유사 파라로그, 548aa 동일) 0.365 vs 0.213 → **Δ0.152**
+- 반대로 yraI (0.627 vs 0.612) 는 Δ0.015
+
+BL21 ipTM 전체 범위가 0.17–0.68 (폭 0.51) 인데 같은 단백질끼리 0.15~0.28 이 벌어진다.
+순위 차이의 상당 부분이 잡음이다. CELL 36c 가 이걸 전체 직교체에서 계산한다.
+
+### A-5. 지금 후보 선별에 실제로 쓰는 기준
+
+검증된 것만 남기면 이렇게 된다.
+
+| 순서 | 기준 | 근거 등급 |
+|---|---|---|
+| 1 | 금속 모티프 존재 (folddisco, rmsd 1.0 Å 이내) | 확정 — 직교체 재현성 확인됨 |
+| 2 | `struct_plddt` ≥ 70 | 확정 — 이하는 기하 자체가 예측이 아님 |
+| 3 | 금속 + 뉴클레오타이드 두 모티프 (Tier 1), 단 ATP 3/3 만 온전 | 주의 |
+| 4 | 기능 어노테이션 유무 (Tier 2/3) | 보조 |
+| 5 | 생화학적 개연성 — 금속 샤페론 과, Fe-S 운반, 금속 잡았다 놓는 기전 | **사람 판단** |
+
+**PPI 점수(rf2ppi, boltz_iptm)는 1~5 어디에도 들어가지 않는다.** 표에는 싣되
+순위 근거로 쓰지 않는다. 하나는 대조군에서 떨어졌고, 하나는 눈금이 없다.
+
+**균주 특이성은 필터가 아니다.** BL21 금속 모티프 29개 중 27개가 MG1655 에도
+유전자가 있다 — 유전자 유무로는 표현형이 설명되지 않는다. 그리고 *in vitro*
+재구성 assay 는 "MG1655 에도 있나"를 묻지 않고 "이 단백질이 Ni 를 넣나"를 묻는다.
+
+---
+
 ## CELL 37 — 최종 리포트 + 남은 TODO
 
 ```python
