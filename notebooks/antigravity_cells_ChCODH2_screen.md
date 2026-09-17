@@ -2004,11 +2004,168 @@ if _r:
         print(f"최고 {_best:.3f} — 기준 0.7 에는 못 미치지만 base({_b0:.3f}) 보다 올랐다.")
         print("방향은 맞다. 절편을 더 좁혀 한 번 더 시도할 만하다.")
     else:
-        print(f"최고 {_best:.3f} — 어떤 설정에서도 알려진 참을 못 올린다.")
-        print("→ Track A 는 설정 문제가 아니다. 이 계에 RF2-PPI 를 쓰지 않는다.")
-        print("  지금까지의 Track A 계산은 '음성 결과'로 기록하고 Track B/C 로 간다.")
+        print(f"최고 {_best:.3f} — 방향·절편 어느 쪽으로도 안 오른다.")
+        print("  절편이 오히려 더 낮은 것은, C-cluster 주변만 남기면 신호가 농축되는")
+        print("  게 아니라 사라진다는 뜻이다.")
+        print("\n★ 다만 여기서 Track A 를 닫지 않는다. 이 검사는 전부 '단량체 x 단량체'")
+        print("  안에서만 바꿔본 것이다. 올리고머 상태는 한 번도 안 건드렸다.")
+        print("  문헌(Merrouch 2018 / Jeoung et al.): CooC1 의 Ni 자리는 각 monomer 의")
+        print("  Cys112/Cys114 가 **이량체 계면**에서 만드는 4배위 자리다. 단량체")
+        print("  CooC1 에는 그 자리가 존재하지 않는다 — 실재하지 않는 상태를 물어온 것이다.")
+        print("  -> CELL 24d 에서 ChCODH2 x2 + CooC1 x2 로 다시 묻는다.")
 else:
     print("\n로그를 못 읽었다. vdir 의 in_rep*.log 를 직접 확인할 것:", vdir)
+```
+
+---
+
+## CELL 24d — 올리고머 상태로 대조군 재시도 (Boltz 4사슬 + RF2-PPI tandem)
+
+```python
+# =============================================================================
+# CELL 24d | 단량체가 아니라 실제 올리고머로 묻는다
+#   지금까지 대조군은 전부 '단량체 CooC1 × 단량체 ChCODH2' 였다. 그런데
+#   Merrouch et al. 2018 / Jeoung et al. 이 보인 것은:
+#     CooC1 의 Ni 자리는 각 monomer 의 Cys112/Cys114 가 **이량체 계면**에서
+#     만나 만드는 4배위 자리다. 단량체 CooC1 에는 그 자리가 존재하지 않는다.
+#     ADP 결합 시 Zn-S(Cys114) 거리가 2.5 -> 2.2 A 로 줄고 CAP loop 가 열린다.
+#   즉 우리는 실재하지 않는 상태를 놓고 '붙느냐'고 물어 왔다.
+#   Track A/B 대조군 실패(0.266 / ipTM 0.300)의 설명으로 아직 안 지운 가설이다.
+#
+#   두 가지를 돌린다.
+#   (A) Boltz — 4사슬을 네이티브로 지원한다. 이게 진짜 검사다.
+#         chain A,B = ChCODH2 x2 (636 x2)   chain C,D = CooC1 x2 (254 x2)
+#         ligand    = NI                     합계 1,780 (상한 1,830 안)
+#       비교군으로 단량체판(A,C + Ni)도 같이 돌려 같은 축에서 본다.
+#   (B) RF2-PPI — 2사슬만 받는다. 각 사슬을 tandem 반복으로 만들어 우회한다.
+#         chain1 = [CooC1|CooC1] 508    chain2 = [ChCODH2|ChCODH2] 1272
+#       ※ 솔직히: MSA 열을 복제하는 것이라 공진화 정보량은 늘지 않는다.
+#         점수가 공진화 통계에서 나오므로 큰 변화는 기대하기 어렵다. 다만
+#         기존 a3m 을 자르고 붙이는 것뿐이라 비용이 분 단위다. 안 해볼 이유가 없다.
+# =============================================================================
+need((have("BAIT_ALL", "BAIT_KEY"), "CELL 07 을 먼저 돌릴 것"))
+import yaml as _y
+CTRL_KEY = next((k for k in BAIT_ALL if k.upper().startswith("COOC")), None)
+need((CTRL_KEY is not None, "BAIT_ALL 에 CooC 서열이 없다"))
+bseq, cseq = BAIT_ALL[BAIT_KEY], BAIT_ALL[CTRL_KEY]
+print(f"{BAIT_KEY} {len(bseq)}aa · {CTRL_KEY} {len(cseq)}aa")
+print(f"이량체 조합 총 토큰 {2*len(bseq) + 2*len(cseq)}  (상한 1830)")
+
+# ---------- (A) Boltz ----------
+DIMER_GPU  = 1
+REP_N      = 5
+BOLTZ_MAXMSA = globals().get("BOLTZ_MAXMSA", 2048)
+din = DIR["boltz"]/"inputs_dimer"; din.mkdir(parents=True, exist_ok=True)
+for f in din.glob("*.yaml"): f.unlink()
+
+def wr(name, chains, ni=True):
+    seqs = [{"protein": {"id": cid, "sequence": s}} for cid, s in chains]
+    if ni: seqs.append({"ligand": {"id": "Z", "ccd": "NI"}})
+    tot = sum(len(s) for _, s in chains)
+    if tot > 1830:
+        print(f"  길이 초과 제외 {name} ({tot})"); return 0
+    (din/f"{name}.yaml").write_text(_y.safe_dump({"version": 1, "sequences": seqs},
+                                                 sort_keys=False))
+    print(f"  {name}: {len(chains)}사슬 {tot} 토큰")
+    return 1
+
+n = 0
+n += wr("CTRL-dimer2x2", [("A", bseq), ("B", bseq), ("C", cseq), ("D", cseq)])
+n += wr("CTRL-mono1x1",  [("A", bseq), ("C", cseq)])
+n += wr("CTRL-codhdimer", [("A", bseq), ("B", bseq), ("C", cseq)])
+n += wr("APO-codhdimer",  [("A", bseq), ("B", bseq)])       # 파트너 없이 Ni 만
+# 1순위 후보도 같은 축에서
+for pid in ["QJZ12568.1"]:
+    _s = None
+    for l in open(ASSET["faa_bl21"], errors="ignore"):
+        pass
+    seqs_bl = {}
+    nm, buf = None, []
+    for l in open(ASSET["faa_bl21"], errors="ignore"):
+        if l.startswith(">"):
+            if nm: seqs_bl[nm] = "".join(buf)
+            nm, buf = l[1:].split()[0], []
+        else: buf.append(l.strip())
+    if nm: seqs_bl[nm] = "".join(buf)
+    if pid in seqs_bl:
+        n += wr(f"CAND-{pid}-codhdimer", [("A", bseq), ("B", bseq), ("C", seqs_bl[pid])])
+
+print(f"\n입력 {n}개 -> {din}")
+script = f"""
+cd "{DIR['boltz']}"
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+CUDA_VISIBLE_DEVICES={DIMER_GPU} boltz predict inputs_dimer \\
+  --out_dir out_dimer --use_msa_server --max_msa_seqs {BOLTZ_MAXMSA} \\
+  --recycling_steps 3 --diffusion_samples {REP_N} \\
+  --output_format mmcif --num_workers 2
+echo DONE_boltz_dimer
+"""
+_busy = subprocess.run("pgrep -f '[b]oltz predict'", shell=True,
+                       capture_output=True, text=True).stdout.split()
+if _busy:
+    print(f"⚠ boltz 가 이미 돌고 있다 (pid {' '.join(_busy)}). 안 띄웠다.")
+elif n and not already(done("part8_boltz_dimer", DIR["boltz"]/"out_dimer"),
+                       "이량체 대조군", f"rm -rf {DIR['boltz']}/out_dimer"):
+    sh_bg("part8_boltz_dimer", script, env=CONDA_ENV_BOLTZ)
+
+# ---------- (B) RF2-PPI tandem ----------
+src = DIR["paired"]/f"{CTRL_KEY}__{BAIT_KEY}.a3m"
+if not src.exists():
+    print(f"\n[건너뜀] {src} 없음")
+else:
+    LC, LB = len(cseq), len(bseq)
+    names, seqs, nm, buf = [], [], None, []
+    for l in open(src, errors="ignore"):
+        if l.startswith(">"):
+            if nm is not None: names.append(nm); seqs.append("".join(buf))
+            nm, buf = l[1:].strip(), []
+        else: buf.append(l.strip())
+    if nm is not None: names.append(nm); seqs.append("".join(buf))
+    ok = all(len(s) == LC + LB for s in seqs)
+    print(f"\nRF2-PPI tandem: a3m {len(seqs)}행, 길이 일치 {ok}")
+    if ok:
+        vdir = DIR["paired"]/"dimer"; vdir.mkdir(exist_ok=True)
+        raw = vdir/"tandem.raw.a3m"
+        raw.write_text("".join(
+            f">{n_}\n{s[:LC]}{s[:LC]}{s[LC:]}{s[LC:]}\n" for n_, s in zip(names, seqs)))
+        out = vdir/"tandem.a3m"
+        try:
+            subprocess.run(["hhfilter", "-i", str(raw), "-o", str(out),
+                            "-id", "90", "-M", "first"], check=True, capture_output=True)
+        except Exception as e:
+            shutil.copy(raw, out); print(f"  [hhfilter 실패 -> 원본] {e}")
+        d = sum(1 for l in open(out) if l.startswith(">"))
+        print(f"  tandem a3m: chainA={2*LC} chainB={2*LB} 깊이 {d}")
+        (vdir/"input_tandem").write_text(f"{out} {2*LC}\n")
+        CV = globals().get("GPU_ID", 1)
+        sh(f'''cd "{vdir}"
+for rep in 1 2 3; do
+  cp input_tandem in_t${{rep}}
+  CUDA_VISIBLE_DEVICES={CV} python "{RF2PPI_DIR}/src/predict_list_PPI.py" \\
+      -list_fn in_t${{rep}} -model_file "{RF2PPI_DIR}/src/models/RF2-PPI.pt"
+done''', check=False)
+        vals = []
+        for rep in (1, 2, 3):
+            lg = vdir/f"in_t{rep}.log"
+            if lg.exists():
+                for line in open(lg, errors="ignore"):
+                    f = line.split()
+                    if len(f) >= 2:
+                        try: vals.append(float(f[1]))
+                        except ValueError: pass
+        if vals:
+            import statistics as _st
+            print(f"\n=== RF2-PPI tandem 이량체 대조군 ===")
+            print(f"  mean {_st.mean(vals):.3f}  sd {_st.pstdev(vals):.3f}  n {len(vals)}")
+            print(f"  단량체판 기준: 0.251 (CELL 24c v0_base)")
+            if _st.mean(vals) >= 0.7:
+                print("  → 올리고머 상태가 문제였다. Track A 를 이 설정으로 되살린다.")
+            elif _st.mean(vals) > 0.35:
+                print("  → 올랐다. 방향이 맞다. 더 밀어볼 가치가 있다.")
+            else:
+                print("  → 안 오른다. 예상대로 MSA 열 복제로는 공진화 정보가 늘지 않는다.")
+                print("     Track A 의 판단은 Boltz 4사슬 결과(A)를 보고 내린다.")
+print("\n다음: CELL 15b 로 part8_boltz_dimer 확인 -> 끝나면 CELL 28a-13 방식으로 파싱")
 ```
 
 ---
@@ -5682,6 +5839,208 @@ print("\n※ 감점은 제외가 아니다. E 등급도 표에 그대로 있고,
 print("\n※ evidence 에 PPI 점수는 들어가지 않는다. rf2ppi 는 대조군 실패,")
 print("  boltz_iptm 은 직교체 간 잡음 0.102(최대 0.309)로 전체 폭 0.485 의 21~64%.")
 print("  둘 다 열로만 싣는다.")
+```
+
+---
+
+## CELL 40 — Y19 coo 오페론 확보 (양성대조군 세트)
+
+```python
+# =============================================================================
+# CELL 40 | Y19 의 coo 오페론 전체를 뽑는다
+#   Merrouch et al. 2018 (JBIC 23:613) Fig.2: CaY19 의 cooS 뒤에 CooC · CooT ·
+#   CooJ · HypB 가 붙어 있다. 그리고 그 오페론에서 CODH 활성에 필수인 것은
+#   놀랍게도 CooF 하나뿐이었다.
+#   이 다섯이 우리가 한 번도 가져본 적 없는 '진짜 양성대조군 세트' 다.
+#   CooC1 하나로는 대조군이 하나뿐이었고 세 트랙이 전부 그것을 못 맞혔다.
+#
+#   문헌상 크기 (상동체 찾을 때 기준으로 쓴다)
+#     CooS  ~630 aa   CODH 본체
+#     CooC  ~270 aa   MRP/MinD 계열 ATPase, CXC (Cys112/114) 이량체 계면 Ni 자리
+#     CooT  ~65 aa    7.1 kDa, 이량체, Cys2 로 Ni 결합 (Kd 9 nM)
+#     CooJ  ~115 aa   12.6 kDa, C-말단 His-rich (His 16개), Ni 4개/monomer
+#     HypB  ~290 aa   GTPase
+#     CooF  ~200 aa   Fe-S 단백질. Y19 에서 유일하게 필수였던 것
+# =============================================================================
+need((have("ASSET",), "CELL 01 을 먼저 돌릴 것"))
+Y19 = {}
+nm, buf, desc = None, [], {}
+for l in open(ASSET["faa_y19"], errors="ignore"):
+    if l.startswith(">"):
+        if nm: Y19[nm] = "".join(buf)
+        t = l[1:].rstrip(); nm = t.split()[0]; buf = []
+        desc[nm] = t[len(nm):].strip()
+    else: buf.append(l.strip())
+if nm: Y19[nm] = "".join(buf)
+print(f"Y19 프로테옴 {len(Y19)}개")
+
+# AHZ* 은 coo 오페론 별도 제출본이다 (Ainala et al. 2015). 전부 본다.
+AHZ = sorted(k for k in Y19 if k.startswith("AHZ"))
+print(f"\n=== AHZ 계열 {len(AHZ)}개 (coo 오페론 제출본으로 추정) ===")
+for k in AHZ:
+    print(f"  {k}  {len(Y19[k]):5d} aa  {desc[k][:70]}")
+
+# 이름으로도 훑는다
+PAT = r"\bCoo[CSTJF]\b|carbon monoxide dehydrogenase|hydrogenase nickel|\bHypB\b|nickel-binding"
+byname = [k for k, v in desc.items() if re.search(PAT, v, re.I)]
+print(f"\n=== 이름으로 잡힌 것 {len(byname)}개 ===")
+for k in sorted(byname):
+    print(f"  {k}  {len(Y19[k]):5d} aa  {desc[k][:70]}")
+
+# 크기로 후보를 좁힌다 (AHZ 안에서)
+SIZE = {"CooS": (550, 720), "CooC": (220, 320), "CooT": (50, 90),
+        "CooJ": (90, 150), "HypB": (240, 340), "CooF": (150, 250)}
+print("\n=== 크기로 본 배정 후보 (AHZ 계열 안에서) ===")
+ASSIGN = {}
+for role, (lo, hi) in SIZE.items():
+    cands = [k for k in AHZ if lo <= len(Y19[k]) <= hi]
+    print(f"  {role:6s} ({lo}-{hi} aa): {cands if cands else '없음'}")
+    for c in cands: ASSIGN.setdefault(role, []).append(c)
+
+# 질의용 fasta
+SET = sorted(set(AHZ) | set(byname))
+qf = DIR["seq"]/"y19_coo_operon.faa"
+qf.write_text("".join(f">{k}\n{Y19[k]}\n" for k in SET))
+print(f"\n대조군 세트 {len(SET)}개 -> {qf}")
+print("이 세트를 CELL 41 이 BL21·MG1655 에 던진다.")
+print("\n※ AHZ 계열이 2개뿐이면 오페론 나머지가 AKE/AGE 로 들어가 있다는 뜻이다.")
+print("  그 경우 CELL 41 의 서열·구조 검색이 이름과 무관하게 찾아낸다.")
+```
+
+---
+
+## CELL 41 — coo 오페론 상동체를 BL21·MG1655 에서 찾는다 (Foldseek + mmseqs)
+
+```python
+# =============================================================================
+# CELL 41 | 검증된 도구로 다시 찾는다
+#   Folddisco 의 두-Cys 질의는 Y19 CooC 를 못 찾았고 (CELL 29j), Foldseek 은
+#   tm 0.938 로 찾았다 (CELL 29k). 그러니 이번엔 Foldseek 을 쓴다.
+#   서열(mmseqs)도 같이 돌려 둘이 일치하는지 본다 — CooT 는 65잔기라 구조
+#   검색이 짧은 서열에서 불안정할 수 있고, 반대로 CooJ 의 His-rich 꼬리는
+#   서열은 달라도 구조가 남을 수 있다.
+# =============================================================================
+need(((DIR["seq"]/"y19_coo_operon.faa").exists(), "CELL 40 을 먼저 돌릴 것"))
+FS  = shutil.which("foldseek") or globals().get("FOLDSEEK_BIN", "foldseek")
+QF  = DIR["seq"]/"y19_coo_operon.faa"
+FAA = {"BL21": ASSET["faa_bl21"], "MG1655": ASSET["faa_mg1655"], "Y19": ASSET["faa_y19"]}
+STRUCT = {}
+for r in [TOOLS/"database"/"bacteriaDB", TOOLS/"database"]:
+    if Path(r).exists():
+        for d in sorted(Path(r).glob("structures_*")):
+            if d.is_dir(): STRUCT[d.name] = d
+_tmp = DIR["tmp"]/"coo"; _tmp.mkdir(parents=True, exist_ok=True)
+outd = DIR["folddisco"].parent/"foldseek"; outd.mkdir(exist_ok=True)
+
+HDR, SEQ = {}, {}
+for st, fa in FAA.items():
+    nm, buf = None, []
+    for l in open(fa, errors="ignore"):
+        if l.startswith(">"):
+            if nm: SEQ[nm] = "".join(buf)
+            t = l[1:].rstrip(); nm = t.split()[0]; buf = []
+            HDR[nm] = (st, t[len(nm):].strip())
+        else: buf.append(l.strip())
+    if nm: SEQ[nm] = "".join(buf)
+
+# ---------- 서열 검색 ----------
+SFMT = "query,target,fident,alnlen,qcov,tcov,evalue,bits"
+print("=== 서열 검색 (mmseqs -s 7.5) ===")
+SEQHIT = {}
+for st in ["BL21", "MG1655"]:
+    out = DIR["search"]/f"cooop_vs_{st}.m8"
+    if not (out.exists() and out.stat().st_size):
+        sh(f'mmseqs easy-search "{QF}" "{FAA[st]}" "{out}" "{_tmp}" '
+           f'--format-output "{SFMT}" -e 1e-2 -s 7.5 --threads {min(THREADS,16)} -v 1',
+           check=False)
+    if out.exists() and out.stat().st_size:
+        d = pd.read_csv(out, sep="\t", names=SFMT.split(","))
+        SEQHIT[st] = d.sort_values("bits", ascending=False)
+    print(f"  {st}: {len(SEQHIT.get(st, []))}행")
+
+# ---------- 구조 검색 ----------
+xw = pd.read_csv(DIR["table"]/"id_crosswalk_struct_to_genbank.csv") \
+     if (DIR["table"]/"id_crosswalk_struct_to_genbank.csv").exists() else pd.DataFrame()
+xwm = {Path(str(k)).stem: str(v).split(",")[0]
+       for k, v in (xw.dropna(subset=["protein"]).set_index("tid")["protein"].to_dict().items()
+                    if len(xw) else [])}
+rev = {v: k for k, v in xwm.items()}
+FFMT = "query,target,fident,alnlen,qcov,tcov,evalue,bits,prob,alntmscore,lddt"
+
+def struct_of(pid):
+    stem = rev.get(pid)
+    if not stem: return None
+    for sdir in STRUCT.values():
+        for ext in ("cif", "pdb"):
+            f = next(iter(glob.glob(str(sdir/f"{stem}*.{ext}"))), None)
+            if f: return f
+    return None
+
+print("\n=== 구조 검색 (foldseek) ===")
+STRHIT = {}
+for pid in [l[1:].strip() for l in open(QF) if l.startswith(">")]:
+    sp = struct_of(pid)
+    if not sp:
+        print(f"  {pid}: 구조 없음 (서열 검색 결과만 씀)"); continue
+    for sname, sdir in STRUCT.items():
+        out = outd/f"coo_{pid}_vs_{sname}.m8"
+        if not (out.exists() and out.stat().st_size):
+            sh(f'"{FS}" easy-search "{sp}" "{sdir}" "{out}" "{_tmp}" '
+               f'--format-output "{FFMT}" -e 10 --max-seqs 500 '
+               f'--threads {min(THREADS,16)} -v 1', check=False)
+        if out.exists() and out.stat().st_size:
+            d = pd.read_csv(out, sep="\t", names=FFMT.split(","))
+            d["stem"] = d.target.apply(lambda x: Path(str(x)).stem)
+            d["protein"] = d.stem.map(xwm)
+            STRHIT[(pid, sname)] = d
+
+# ---------- 종합 ----------
+print("\n" + "=" * 110)
+print("=== 질의별 최상위 상동체 ===")
+rows = []
+for pid in [l[1:].strip() for l in open(QF) if l.startswith(">")]:
+    qd = HDR.get(pid, ("Y19", ""))[1][:48]
+    print(f"\n--- {pid}  {len(SEQ.get(pid,'')):4d} aa  {qd}")
+    for st in ["BL21", "MG1655"]:
+        s = SEQHIT.get(st)
+        best_s = None
+        if s is not None and len(s):
+            m = s[s["query"] == pid]
+            if len(m): best_s = m.iloc[0]
+        if best_s is not None:
+            print(f"    [서열 {st:7s}] {best_s.target:14s} fident {best_s.fident:.3f} "
+                  f"qcov {best_s.qcov:.2f} e {best_s.evalue:.1e}  "
+                  f"{HDR.get(best_s.target,('',''))[1][:44]}")
+        else:
+            print(f"    [서열 {st:7s}] 없음")
+        # 구조
+        bt = None
+        for (q, sname), d in STRHIT.items():
+            if q != pid: continue
+            dd = d[d.protein.map(lambda k: HDR.get(str(k), ("?",))[0]) == st]
+            dd = dd[dd.protein.astype(str) != pid]
+            if len(dd):
+                c = dd.sort_values("bits", ascending=False).iloc[0]
+                if bt is None or c.bits > bt.bits: bt = c
+        if bt is not None:
+            print(f"    [구조 {st:7s}] {str(bt.protein):14s} tm {bt.alntmscore:.3f} "
+                  f"fident {bt.fident:.3f}  {HDR.get(str(bt.protein),('',''))[1][:44]}")
+        else:
+            print(f"    [구조 {st:7s}] 없음")
+        rows.append({"query": pid, "query_desc": qd, "strain": st,
+                     "seq_hit": best_s.target if best_s is not None else None,
+                     "seq_fident": round(float(best_s.fident), 3) if best_s is not None else None,
+                     "str_hit": str(bt.protein) if bt is not None else None,
+                     "str_tm": round(float(bt.alntmscore), 3) if bt is not None else None,
+                     "str_desc": HDR.get(str(bt.protein), ("", ""))[1][:60] if bt is not None else ""})
+C41 = pd.DataFrame(rows)
+C41.to_csv(DIR["table"]/"coo_operon_homologs.csv", index=False, encoding="utf-8-sig")
+print(f"\n저장: {DIR['table']/'coo_operon_homologs.csv'}")
+print("\n※ 읽는 법")
+print("  BL21 에는 있고 MG1655 에는 없는 행이 있으면 그것이 이 프로젝트가")
+print("  찾던 것이다. 둘 다 있으면 발현량 가설로 넘어간다.")
+print("  tm >= 0.5 는 같은 폴드, fident 는 서열 유사도다. 둘이 어긋나면")
+print("  '기능은 같고 서열은 먼' 경우이므로 오히려 흥미롭다.")
 ```
 
 ---
