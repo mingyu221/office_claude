@@ -3443,6 +3443,132 @@ print(f"\n저장: {DIR['table']/'folddisco_rmsd_sweep.csv'}")
 
 ---
 
+## CELL 29c — 금속 질의의 민감도 진단 + Cys4 기하로 재질의
+
+```python
+# =============================================================================
+# CELL 29c | 왜 29개밖에 안 나오는가 — 병목이 어디인지 찾고, 질의를 바꿔 본다
+#   CELL 29b 결과: --rmsd 를 1.0->2.0 으로 풀어도 히트가 하나도 안 는다.
+#   최대 min_rmsd 가 0.745 인데 그 위로 아무것도 없다. 즉 병목은 RMSD 필터가
+#   아니라 그 앞단(인덱스 검색)이다. folddisco 는 기하 특징을 해시로 찾아온 뒤
+#   RMSD 를 재는데, 가져온 후보가 전부 0.75 이하라는 뜻이다.
+#   -> 임계값을 아무리 풀어도 검색 범위는 안 넓어진다. 질의 자체를 바꿔야 한다.
+#
+#   이 셀이 하는 것:
+#     (1) 민감도 추정 — Boltz 가 Cys4 자리를 찾아준 단백질 중 folddisco 가 몇 개나
+#         잡았나. 정답을 아는 소수 집합에서 재는 recall 이다.
+#     (2) 알려진 Ni 단백질(hyp 오페론·SlyD·Fe-S 운반)이 29개 안에 있는가
+#     (3) 재질의 — CooC1 의 A112/A114 대신, 실제로 Ni 을 잡은 Cys4 기하를 질의로
+#         써서 세 균주를 다시 훑는다. 간격이 다른 자리를 잡기 위해서다.
+# =============================================================================
+need(((DIR["table"]/"ni_site_grade.csv").exists(), "CELL 28a-8b 를 먼저 돌릴 것"))
+G  = pd.read_csv(DIR["table"]/"ni_site_grade.csv")
+MET_SET = set(pd.read_csv(DIR["table"]/"folddisco_metal_motif.csv").protein) \
+          if (DIR["table"]/"folddisco_metal_motif.csv").exists() else set()
+
+# ---------- (1) recall ----------
+A_ = G[G.grade == "A"]
+print("=== (1) Cys4 자리를 가진 단백질 중 folddisco 가 잡은 비율 ===")
+print(A_[["prey", "donors", "folddisco_metal"]].to_string(index=False))
+_hit = int(A_.folddisco_metal.sum())
+print(f"\nrecall = {_hit} / {len(A_)} = {100*_hit/max(1,len(A_)):.0f}%")
+print("  표본이 작지만 방향은 분명하다. Cys4 자리의 대부분을 못 잡는다.")
+print("  이유는 4-7 과 같다 — 질의가 A112/A114 라는 간격 하나만 찾는다.")
+
+# ---------- (2) 알려진 금속 단백질이 29개 안에 있나 ----------
+def read_hdr(path):
+    out = {}
+    for l in open(path, errors="ignore"):
+        if l.startswith(">"):
+            h = l[1:].rstrip(); out[h.split()[0]] = h[len(h.split()[0]):].strip()
+    return out
+BLD = read_hdr(ASSET["faa_bl21"])
+KNOWN = {
+    "hyp 오페론 (Ni 삽입, KO 음성)": r"hydrogenase (matura|nickel)|\bHyp[A-F]\b|HybF",
+    "SlyD (Ni 샤페론)":              r"\bSlyD\b|peptidyl-prolyl.*SlyD",
+    "Ni 수송/조절":                  r"nickel|\bNik[ABCDER]\b|\bRcn[AR]\b",
+    "Fe-S 운반":                     r"iron-sulfur cluster (insertion|assembly|carrier)|\bIsc[AUS]\b|\bSufA\b|\bNfuA\b|\bErpA\b",
+    "COG0523 금속 샤페론":           r"\bYeiR\b|\bYjiA\b|\bCobW\b|\bZigA\b|COG0523",
+    "urease":                        r"urease|\bUre[EFGDH]\b",
+}
+print("\n=== (2) 알려진 금속 관련 단백질이 metal 모티프 29개 안에 있는가 ===")
+for label, pat in KNOWN.items():
+    hits = [k for k, v in BLD.items() if re.search(pat, v, re.I)]
+    inm  = [k for k in hits if k in MET_SET]
+    print(f"\n[{label}]  프로테옴 {len(hits)}개 / 모티프 목록에 {len(inm)}개")
+    for k in hits[:8]:
+        print(f"   {'O' if k in MET_SET else '.'} {k}  {BLD[k][:72]}")
+    if len(hits) > 8: print(f"   ... 외 {len(hits)-8}개")
+print("\n  'O' 가 모티프 목록에 든 것. 알려진 Ni 단백질이 대부분 '.' 이면")
+print("  이 질의의 민감도가 낮다는 직접 증거다.")
+
+# ---------- (3) Cys4 기하로 재질의 ----------
+# 질의 템플릿은 실제로 Ni 을 잡은 구조에서 가져온다. 구조 파일은 folddisco 인덱스가
+# 가리키는 디렉터리에 있으므로 tid 로 찾는다.
+print("\n" + "=" * 90)
+print("=== (3) Cys4 기하로 재질의 ===")
+_roots = [TOOLS/"database"/"bacteriaDB", TOOLS/"database", DIR["external"]]
+def find_struct(pid):
+    xw = DIR["table"]/"id_crosswalk_struct_to_genbank.csv"
+    if not xw.exists(): return None
+    x = pd.read_csv(xw)
+    row = x[x.protein.astype(str).str.contains(str(pid), na=False)]
+    if not len(row): return None
+    stem = Path(str(row.iloc[0].tid)).stem
+    for r in _roots:
+        if not Path(r).exists(): continue
+        for ext in ("pdb", "cif", "pdb.gz", "cif.gz"):
+            f = next(iter(glob.glob(str(Path(r)/"**"/f"{stem}*.{ext}"), recursive=True)), None)
+            if f: return f
+    return None
+
+QUERIES = {}
+for _, r in A_.iterrows():
+    pid = str(r.prey).split("-")[-1]
+    if not pid.startswith("QJZ"): continue        # BL21 구조만 (인덱스 대응이 있다)
+    res = [t for t in str(r.donors).split() if t.startswith("CYS")]
+    if len(res) < 4: continue
+    nums = sorted(int(t[3:]) for t in res)
+    QUERIES[pid] = ",".join(f"A{n}" for n in nums)
+
+print("질의 후보:", QUERIES if QUERIES else "없음")
+FD  = ASSET["folddisco"]
+IDX = {"BL21": ASSET["fd_idx_bl21"], "Y19": ASSET["fd_idx_y19"], "MG1655": ASSET["fd_idx_mg"]}
+outd = DIR["folddisco"]/"cys4"; outd.mkdir(exist_ok=True)
+found = {}
+for pid, qres in QUERIES.items():
+    sp = find_struct(pid)
+    if not sp:
+        print(f"  [구조 못 찾음] {pid} — 인덱스 디렉터리를 확인할 것"); continue
+    print(f"\n>>> 질의 {pid}  {qres}\n    템플릿 {sp}")
+    for strain, idx in IDX.items():
+        out = outd/f"cys4_{pid}_{strain}.tsv"
+        if not (out.exists() and out.stat().st_size):
+            sh(f'"{FD}" query -p "{sp}" -q {qres} -i "{idx}" -t {min(THREADS,8)} '
+               f'--per-structure --header --sort-by idf --rmsd 1.0 --top 5000 -o "{out}"',
+               check=False)
+        if out.exists() and out.stat().st_size:
+            d = pd.read_csv(out, sep="\t"); d.columns = [c.strip().lstrip("#") for c in d.columns]
+            found[(pid, strain)] = len(d)
+            print(f"    {strain:7s} {len(d)}개")
+
+if found:
+    F = (pd.Series(found).rename("hits").rename_axis(["query", "strain"])
+           .reset_index().pivot(index="query", columns="strain", values="hits"))
+    print("\n=== Cys4 질의 히트 수 ===")
+    print(F.to_string())
+    F.to_csv(DIR["table"]/"folddisco_cys4_requery.csv", encoding="utf-8-sig")
+    print(f"\n저장: {DIR['table']/'folddisco_cys4_requery.csv'}")
+    print("\n원래 질의(A112/A114)의 29/21/30 과 비교할 것.")
+    print("  크게 늘면 → 원래 질의가 좁았던 것이고, 새 목록을 후보에 합쳐야 한다.")
+    print("  비슷하면 → 잔기 4개 질의는 원래 특이도가 높다. 지금 목록이 맞다.")
+else:
+    print("\n재질의를 못 돌렸다. 구조 파일 경로(_roots)를 확인할 것:")
+    for r in _roots: print(f"   {r}  {'있음' if Path(r).exists() else '없음'}")
+```
+
+---
+
 ## CELL 30 — Part 8b. ID crosswalk (구조 tid → GenBank protein ID)
 
 ```python
