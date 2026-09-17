@@ -3179,7 +3179,11 @@ elif not already(done("part7_boltz_rep", DIR["boltz"]/"out_rep"),
 #     2) 후보의 SD    — 단일 표본 값이 얼마나 흔들리는지
 #     3) 후보가 대조군 선을 넘는가, 그 차이가 SD 보다 큰가
 # =============================================================================
-need((done("part7_boltz_rep", DIR["boltz"]/"out_rep"), "CELL 28a-12 미완료 (CELL 15b 로 확인)"))
+# 로그가 아니라 결과 파일로 판정한다. done() 은 백그라운드 로그의 완료 마커를
+# 보는데, 로그가 지워지거나 다른 경로로 돌린 경우 결과가 있어도 막힌다.
+_nrep = len(glob.glob(str(DIR["boltz"]/"out_rep"/"**"/"confidence_*.json"), recursive=True))
+need((_nrep > 0, "out_rep 에 결과가 없다 — CELL 28a-12 를 먼저 돌릴 것"))
+print(f"out_rep confidence 파일 {_nrep}개")
 rows = []
 for f in glob.glob(str(DIR["boltz"]/"out_rep"/"**"/"confidence_*.json"), recursive=True):
     c  = json.load(open(f))
@@ -5224,6 +5228,139 @@ BL21 ipTM 전체 범위가 0.17–0.68 (폭 0.51) 인데 같은 단백질끼리 
 **균주 특이성은 필터가 아니다.** BL21 금속 모티프 29개 중 27개가 MG1655 에도
 유전자가 있다 — 유전자 유무로는 표현형이 설명되지 않는다. 그리고 *in vitro*
 재구성 assay 는 "MG1655 에도 있나"를 묻지 않고 "이 단백질이 Ni 를 넣나"를 묻는다.
+
+---
+
+## CELL 39 — 기준 통일 + 최종 후보표 (미팅용)
+
+```python
+# =============================================================================
+# CELL 39 | 흩어진 결과를 하나로 합치고 임계값을 통일한다
+#   지금 판정이 셀마다 다른 기준을 쓰고 있다. 여기서 한 벌로 고정하고, 경계선에
+#   있던 후보(GspE fident 0.600, GspH 0.285)를 그 기준으로 다시 판정한다.
+#
+#   통일 기준
+#     직교체        fident >= 0.50 & qcov >= 0.70 & e <= 1e-5
+#     균주 구간     identical >=0.999 / high >=0.90 / low <0.90 / 히트없음 = specific
+#     게놈 동일유전자 fident >= 0.80         (이보다 낮으면 파라로그이지 깨진 사본이 아니다)
+#     게놈 pseudogene fident >=0.80 & (qcov <0.70 또는 조각 >=3)
+#     구조 신뢰      plddt >= 70            (이하는 기하 자체가 예측이 아니다)
+#     Ni 배위        <= 2.6 A 만 배위로 센다 (Ni-S 2.2 / Ni-N 2.1)
+#
+#   합치는 표
+#     FOLDDISCO_candidates.csv        금속/ATP 모티프 + 균주 판정
+#     ni_site_grade.csv               Ni 배위 도너 등급 (A/B/C/D)
+#     cys4_bl21_strain_specificity.csv Cys4 x 프로테옴 균주 특이
+#     cys4_genome_check.csv           게놈 확인
+#     ALL_motif_candidates_full.csv   PPI 점수 (참고 열)
+# =============================================================================
+TH = {"orth_fident": 0.50, "orth_qcov": 0.70, "orth_evalue": 1e-5,
+      "identical": 0.999, "high": 0.90,
+      "genome_same_gene": 0.80, "pseudo_qcov": 0.70, "pseudo_frag": 3,
+      "plddt": 70.0, "ni_coord": 2.6}
+print("통일 기준:", json.dumps(TH, ensure_ascii=False))
+
+T = DIR["table"]
+def rd(name):
+    p = T/name
+    if p.exists():
+        d = pd.read_csv(p); print(f"  {name}: {len(d)}행"); return d
+    print(f"  {name}: 없음"); return pd.DataFrame()
+
+print("\n읽는 표:")
+FC  = rd("FOLDDISCO_candidates.csv")
+NG  = rd("ni_site_grade.csv")
+CS  = rd("cys4_bl21_strain_specificity.csv")
+GC  = rd("cys4_genome_check.csv")
+AL  = rd("ALL_motif_candidates_full.csv")
+
+# ---- 후보 풀: 금속 모티프 BL21 + Cys4 BL21 합집합 ----
+pool = set()
+if len(FC): pool |= set(FC[FC.strain == "BL21"].protein_id.astype(str))
+if len(CS): pool |= set(CS.protein.astype(str))
+if len(NG):
+    pool |= {p for p in NG.prey.astype(str) if p.startswith("QJZ")}
+print(f"\n후보 풀 (BL21): {len(pool)}개")
+
+hdr = {}
+for l in open(ASSET["faa_bl21"], errors="ignore"):
+    if l.startswith(">"):
+        t = l[1:].rstrip(); hdr[t.split()[0]] = t[len(t.split()[0]):].strip()
+
+def get(df, key, col, k):
+    if not len(df) or key not in df.columns or col not in df.columns: return None
+    r = df[df[key].astype(str) == k]
+    return r.iloc[0][col] if len(r) else None
+
+# ---- 게놈 판정을 통일 기준으로 다시 ----
+def genome_verdict(k):
+    if not len(GC): return ""
+    r = GC[GC.protein.astype(str) == k]
+    if not len(r): return ""
+    r = r.iloc[0]
+    if str(r.get("genome")) == "없음": return "게놈에도 없음 [확정]"
+    f, c = r.get("fident"), r.get("qcov")
+    n = r.get("n_frag", 0)
+    if pd.isna(f) or float(f) < TH["genome_same_gene"]:
+        return "먼 상동체 — 다른 유전자 [균주 특이 유지]"
+    if float(c) < TH["pseudo_qcov"] or (pd.notna(n) and int(n) >= TH["pseudo_frag"]):
+        return "★ pseudogene 의심"
+    return "게놈에 온전히 있음 [어노테이션 누락]"
+
+rows = []
+for k in sorted(pool):
+    ni_g = get(NG, "prey", "grade", k)
+    plddt = get(FC, "protein_id", "struct_plddt", k)
+    rows.append({
+        "protein": k,
+        "desc": hdr.get(k, "")[:70],
+        "length": get(FC, "protein_id", "length", k),
+        "metal_rmsd": get(FC, "protein_id", "metal_rmsd", k),
+        "metal_residues": get(FC, "protein_id", "metal_residues", k),
+        "struct_plddt": plddt,
+        "plddt_ok": (pd.notna(plddt) and float(plddt) >= TH["plddt"]) if plddt is not None else None,
+        "ni_grade": ni_g,
+        "ni_donors": get(NG, "prey", "donors", k),
+        "cys4_query": get(CS, "protein", "queries", k),
+        "vs_MG1655": get(CS, "protein", "vs_MG1655", k) or get(FC, "protein_id", "strain_verdict", k),
+        "fident_MG1655": get(CS, "protein", "fident_MG1655", k),
+        "genome": genome_verdict(k),
+        "boltz_iptm": get(AL, "protein_id", "boltz_iptm", k),
+        "rf2ppi": get(AL, "protein_id", "rf2ppi", k),
+    })
+F = pd.DataFrame(rows)
+
+# ---- 근거 점수: 검증된 축만 센다 ----
+def evidence(r):
+    n = []
+    if pd.notna(r.metal_rmsd) and float(r.metal_rmsd) <= 1.0: n.append("모티프")
+    if r.ni_grade in ("A", "B"): n.append(f"Ni배위{r.ni_grade}")
+    if str(r.vs_MG1655) in ("strain-specific", "low-similarity"): n.append("균주특이")
+    if str(r.genome).startswith(("게놈에도 없음", "먼 상동체", "★")): n.append("게놈확인")
+    return "+".join(n)
+F["evidence"] = [evidence(r) for _, r in F.iterrows()]
+F["n_evidence"] = F.evidence.apply(lambda x: 0 if not x else len(x.split("+")))
+F = F.sort_values(["n_evidence", "ni_grade", "metal_rmsd"],
+                  ascending=[False, True, True], na_position="last")
+F.to_csv(T/"FINAL_candidates.csv", index=False, encoding="utf-8-sig")
+
+pd.set_option("display.max_rows", None); pd.set_option("display.width", 250)
+pd.set_option("display.max_colwidth", 45)
+print("\n" + "=" * 120)
+print("=== 근거 2개 이상 ===")
+_top = F[F.n_evidence >= 2]
+print(_top.drop(columns=["ni_donors"]).to_string(index=False) if len(_top) else "  없음")
+print("\n=== 근거 1개 (상위 20) ===")
+print(F[F.n_evidence == 1].head(20)[
+    ["protein", "evidence", "metal_rmsd", "ni_grade", "vs_MG1655",
+     "struct_plddt", "desc"]].to_string(index=False))
+print(f"\n=== 근거 개수 분포 ===")
+print(F.n_evidence.value_counts().sort_index(ascending=False).to_string())
+print(f"\n저장: {T/'FINAL_candidates.csv'}  (전체 {len(F)}개)")
+print("\n※ evidence 에 PPI 점수는 들어가지 않는다. rf2ppi 는 대조군 실패,")
+print("  boltz_iptm 은 직교체 간 잡음 0.102(최대 0.309)로 전체 폭 0.485 의 21~64%.")
+print("  둘 다 열로만 싣는다.")
+```
 
 ---
 
