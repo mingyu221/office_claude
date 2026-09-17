@@ -3,7 +3,7 @@
 인계문서(`HANDOVER_ChCODH2_screen.md`, `HANDOVER_bacteriaDB.md`, `ChCODH2_Ni_insertase_in_silico_design.md`)와
 원본 노트북(`RF2PPI_ChCODH2_screen.ipynb`)을 합쳐, **epel-af2 서버의 실제 경로와 이미 구축된 자산**을 반영한 셀 모음.
 
-사용법: 아래 `CELL 00` ~ `CELL 33`을 **위에서부터 하나씩 복사해 Antigravity 노트북 셀에 붙여넣고 실행**한다.
+사용법: 아래 `CELL 00` ~ `CELL 37`을 **위에서부터 하나씩 복사해 Antigravity 노트북 셀에 붙여넣고 실행**한다.
 전부 파이썬 셀이다(`%%bash` 매직 없음 — Antigravity/커널 환경에 상관없이 돌아가도록 `subprocess`로 통일).
 셀 사이에 변수가 이어지므로 순서대로 실행해야 한다.
 
@@ -3474,7 +3474,18 @@ print(ni_df.head(10).to_string(index=False))
 #     Ni_motif 0.20 / ATP_motif 0.15 — Folddisco. nucleotide 의존성 실험으로 확정 가능
 #     RF2PPI 0.20 / Boltz ipTM 0.15 — 결합 자체의 증거
 #   ★한 방법에서만 높은 후보보다 독립적인 두 방법에서 동시에 높은 후보가 훨씬 신뢰도 높다
+#
+#   ⚠ 이 셀의 가중치는 검증 전에 정한 것이다. 이후 확인된 사실:
+#       rf2 0.20  — Track A 는 양성대조군 0.266 으로 실패했다 (CELL 24b). 쓸 수 없다.
+#       boltz 0.15 — ipTM 눈금이 이 계에서 검증되지 않았다 (CELL 28a-13 대기).
+#     즉 priority 의 35% 가 못 믿을 값에서 나온다. 후보 지명에는 CELL 36 의
+#     FOLDDISCO_candidates.csv 를 쓰고, 이 표는 '전체 계산 기록'으로만 남긴다.
+#   선행: CELL 12(TRACK_A/B) · 23(R_best) · 28(B) · 31(ni_df/atp_df) 가 메모리에 있어야 한다.
+#     커널을 새로 띄웠다면 변수가 전부 사라졌으므로 처음부터 다시 돌려야 한다.
 # =============================================================================
+need((have("TRACK_A", "TRACK_B", "cls_prey", "hdr2desc"),
+      "CELL 12 까지 다시 돌릴 것 (커널을 새로 띄우면 TRACK_A/B 가 사라진다)"),
+     (have("ni_df", "atp_df"), "CELL 31 을 먼저 돌릴 것"))
 def safe_series(df, key, col):
     try:
         return df.set_index(key)[col]
@@ -3519,11 +3530,11 @@ print("\n독립적 2개 이상 증거를 가진 후보:", int((M.n_evidence >= 2
 
 ---
 
-## CELL 35 — Folddisco 노선 (0) 준비: 정체 확인 + 균주 간 대응표
+## CELL 33 — Folddisco 노선 (0) 준비: 정체 확인 + 균주 간 대응표
 
 ```python
 # =============================================================================
-# CELL 35 | Folddisco 우선 노선 — 0단계. 누가 누구인지부터 확정한다
+# CELL 33 | Folddisco 우선 노선 — 0단계. 누가 누구인지부터 확정한다
 #   ID 체계가 균주마다 다르다.
 #     BL21 / Y19  GenBank protein ID (QJZ*, AKE*) — crosswalk 으로 붙어 있음
 #     MG1655      UniProt accession — 구조 DB 가 공식 배포본이라 crosswalk 없음
@@ -3681,16 +3692,16 @@ def _rd(m8):
 ORTH_SELF = _rd(_self)
 ORTH_FULL = {st: _rd(v) for st, v in _full.items()}
 print(f"\n(2) {len(ORTH_SELF):,}행   (3) " + " / ".join(f"{k} {len(v):,}" for k, v in ORTH_FULL.items()))
-print("\n다음: CELL 36")
+print("\n다음: CELL 34")
 ```
 
 ---
 
-## CELL 36 — Folddisco 노선 (1) metal 모티프 3자 비교
+## CELL 34 — Folddisco 노선 (1) metal 모티프 3자 비교
 
 ```python
 # =============================================================================
-# CELL 36 | 1단계. 금속 모티프를 두 축으로 분류한다
+# CELL 34 | 1단계. 금속 모티프를 두 축으로 분류한다
 #     축1  모티프 검출: folddisco 가 그 균주에서도 이 자리를 잡았는가
 #     축2  유전자 존재: 애초에 그 균주 프로테옴에 이 단백질이 있는가
 #   판정:
@@ -3698,7 +3709,7 @@ print("\n다음: CELL 36")
 #     BL21 검출 + MG1655 유전자 있음 -> 검출 차이일 뿐 (약한 후보, 버리지 않음)
 #   지난번 'BL21 특이 14개'가 사실 대장균 공통 유전자였던 건 축2 를 안 봤기 때문이다.
 # =============================================================================
-need((have("MET_RAW", "ORTH_SELF", "ORTH_FULL", "DESC", "GENE"), "CELL 35 를 먼저 돌릴 것"))
+need((have("MET_RAW", "ORTH_SELF", "ORTH_FULL", "DESC", "GENE"), "CELL 33 를 먼저 돌릴 것"))
 STRAINS = ["BL21", "MG1655", "Y19"]
 ID_THR, COV_THR = 0.50, 0.70
 
@@ -3796,16 +3807,16 @@ print(f"\n저장: {DIR['table']/'motif_metal_3strain.csv'}")
 
 ---
 
-## CELL 37 — Folddisco 노선 (2) ATP 모티프
+## CELL 35 — Folddisco 노선 (2) ATP 모티프
 
 ```python
 # =============================================================================
-# CELL 37 | 2단계. ATP(Walker A) 모티프 — 필터가 아니라 표시로 쓴다
+# CELL 35 | 2단계. ATP(Walker A) 모티프 — 필터가 아니라 표시로 쓴다
 #   실측: 균주당 1,000개 안팎이 걸린다. 프로테옴의 20% 이상이다.
 #   이 해상도로는 후보를 좁힐 수 없다. 그래서 균주 간 대응은 만들지 않고
 #   '같은 균주 안에서 금속 모티프와 겹치는가'(3단계)에만 쓴다.
 # =============================================================================
-need((have("ATP_RAW", "motif_summary"), "CELL 35 -> 36 을 먼저 돌릴 것"))
+need((have("ATP_RAW", "motif_summary"), "CELL 33 -> 34 를 먼저 돌릴 것"))
 ATP = motif_summary(ATP_RAW)
 if not len(ATP):
     print("ATP 결과 없음 — CELL 29 의 RESIDUES_ATP 와 CELL 31 변환을 확인할 것.")
@@ -3823,11 +3834,11 @@ else:
 
 ---
 
-## CELL 38 — Folddisco 노선 (3)(4) 교집합 · 우선순위 · 최종표
+## CELL 36 — Folddisco 노선 (3)(4) 교집합 · 우선순위 · 최종표
 
 ```python
 # =============================================================================
-# CELL 38 | 3단계+4단계. 두 모티프를 겹쳐 우선순위를 매긴다
+# CELL 36 | 3단계+4단계. 두 모티프를 겹쳐 우선순위를 매긴다
 #   Tier 1  금속 + ATP 둘 다             — CooC1 의 두 성질을 모두 가진 것
 #   Tier 2  금속만 + 기능 어노테이션 있음 — ATP 는 안 잡혔지만 정체가 분명한 것
 #   Tier 3  금속만 + 어노테이션 없음      — 삭제하지 않는다. 우선도만 낮춘다
@@ -3835,7 +3846,7 @@ else:
 #   ※ PPI 점수는 순위에 넣지 않는다. RF2-PPI 는 대조군 실패, Boltz ipTM 은 눈금
 #     미검증이다. 참고 열로만 붙인다 — 컷오프로 쓰지 말 것.
 # =============================================================================
-need((have("MET"), "CELL 36 을 먼저 돌릴 것"))
+need((have("MET"), "CELL 34 을 먼저 돌릴 것"))
 _atp = ATP if ("ATP" in dir() and len(ATP)) else pd.DataFrame(columns=["strain","key","idf","rmsd","residues","n_match"])
 
 T = MET.rename(columns={"idf": "metal_idf", "rmsd": "metal_rmsd",
@@ -3888,11 +3899,11 @@ print("  motif_pattern  = folddisco 가 잡은 균주 / gene_pattern = 유전자
 
 ---
 
-## CELL 33 — 최종 리포트 + 남은 TODO
+## CELL 37 — 최종 리포트 + 남은 TODO
 
 ```python
 # =============================================================================
-# CELL 33 | 최종 요약 + 남은 TODO
+# CELL 37 | 최종 요약 + 남은 TODO
 # =============================================================================
 print("### 산출물 ###")
 for f in sorted(DIR["table"].glob("*.csv")):
@@ -3947,7 +3958,7 @@ print(f"""
 [ ] CELL 22-24  RF2-PPI x3(또는 5) replicate       (GPU)
 [ ] CELL 25-28  Boltz-2 Track B                    (GPU, 병렬 가능)
 [ ] CELL 29-31  Folddisco + ID crosswalk
-[ ] CELL 32-33  통합 랭킹 + 리포트
+[ ] CELL 32-37  통합 랭킹 + 리포트
 ```
 
 **병렬화**: CELL 13-21(CPU)이 도는 동안 CELL 25-28(Boltz-2 Track B)을 다른 GPU에서 먼저 시작할 수 있다.
