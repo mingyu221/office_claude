@@ -7385,8 +7385,8 @@ else:
     rev = {}
     for _pth, _v in LEN.items(): rev.setdefault(_v, _pth)
     print(f"\n--- L 상한 프로브: {picks} ---")
-    PROBE = RF2PPI_DIR + "/src/predict_list_PPI.py"
-    MODEL = RF2PPI_DIR + "/src/models/RF2-PPI.pt"
+    PROBE = f"{RF2PPI_DIR}/src/predict_list_PPI.py"
+    MODEL = f"{RF2PPI_DIR}/src/models/RF2-PPI.pt"
     plines = []
     for v in picks:
         (PB/f"p{v}").write_text(f"{rev[v]} {2*LB}\n")
@@ -7430,8 +7430,8 @@ if over:
 # ---------- (5) 길이 오름차순 버킷 ----------
 BUCKET = 200          # 파이썬 한 번이 맡는 쌍 수. 죽으면 이 단위만 잃는다
 runnable = sorted([p for p in PAIRS if LEN[p] <= L_MAX], key=lambda p: LEN[p])
-RUN = RF2PPI_DIR + "/src/predict_list_PPI.py"
-MDL = RF2PPI_DIR + "/src/models/RF2-PPI.pt"
+RUN = f"{RF2PPI_DIR}/src/predict_list_PPI.py"
+MDL = f"{RF2PPI_DIR}/src/models/RF2-PPI.pt"
 cmds, total = [], 0
 for rep in range(1, N_REP_DIMER + 1):
     _sc = scored(rep)
