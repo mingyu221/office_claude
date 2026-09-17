@@ -6868,7 +6868,11 @@ else:
         print(f"  {tag}: chainA={first} 깊이 {d}")
         lines.append(f"{out} {first}")
     (vdir/"input_split").write_text("\n".join(lines) + "\n")
-    sh(f'''cd "{vdir}"
+    # 이미 돌렸으면 GPU 를 다시 쓰지 않는다 (로그만 읽으면 된다)
+    if all((vdir/f"in_s{r}.log").exists() for r in (1, 2, 3)):
+        print("  [재사용] in_s1~3.log 가 이미 있다. 예측을 건너뛴다.")
+    else:
+        sh(f'''cd "{vdir}"
 for rep in 1 2 3; do
   cp input_split in_s${{rep}}
   CUDA_VISIBLE_DEVICES={_GID} python "{RF2PPI_DIR}/src/predict_list_PPI.py" \\
@@ -6881,12 +6885,16 @@ done''', check=False)
         if not lg.exists(): continue
         for line in open(lg, errors="ignore"):
             f = line.split()
-            if len(f) >= 2:
-                try: got.setdefault(Path(f[0]).stem, []).append(float(f[1]))
-                except ValueError: pass
+            if len(f) < 2: continue
+            # setdefault 를 먼저 부르면 float 이 실패해도 빈 리스트가 남아
+            # statistics.mean([]) 에서 죽는다. 변환에 성공한 것만 넣는다.
+            try: _v = float(f[1])
+            except ValueError: continue          # 헤더 줄
+            got.setdefault(Path(f[0]).stem, []).append(_v)
     print("\n  === 변형별 ===")
     print(f"  {'단량체 (v0_base)':24s} 0.251")
     for k, v in sorted(got.items()):
+        if not v: continue
         print(f"  {k:24s} {_st.mean(v):.3f}  sd {_st.pstdev(v):.3f}  n {len(v)}")
     print(f"  {'tandem 양쪽 (t_both)':24s} 0.390")
     print("\n  ChCODH2 쪽 복제만으로 올랐다면, 스크리닝은 prey 를 복제할 필요 없이")
@@ -6928,6 +6936,98 @@ else:
 print("\n### 다음")
 print("  bg_tail('part8_boltz_dimer2') 로 확인 -> 끝나면 out_dimer 와 out_dimer2 를")
 print("  같이 파싱해 CTRL-dimer2x2 vs CTRL-mono1x1(0.300) 을 비교한다.")
+```
+
+---
+
+## CELL 53b — tandem 변형 로그 진단 + 집계 (한 셀)
+
+```python
+# =============================================================================
+# CELL 53b | in_s*.log 가 왜 비었는지 보고, 숫자가 있으면 바로 집계한다
+#   StatisticsError 는 파싱 버그였지만(setdefault 가 float 실패 전에 키를 만듦),
+#   모든 줄이 실패했다면 예측 자체가 안 된 것이다. 둘을 가른다.
+#     1) GPU 와 돌고 있는 프로세스
+#     2) in_t*(성공한 tandem) 과 in_s*(터진 변형) 로그를 나란히
+#     3) 숫자가 있으면 집계, 없으면 재실행 명령을 찍는다
+# =============================================================================
+need((have("DIR",), "CELL 01 을 먼저 돌릴 것"))
+import statistics as _st
+vdir = DIR["paired"]/"dimer"
+
+print("=" * 90); print("### 1. GPU / 프로세스"); print("=" * 90)
+sh("nvidia-smi --query-gpu=index,utilization.gpu,memory.used,memory.total "
+   "--format=csv,noheader", check=False)
+_busy = subprocess.run("pgrep -af '[b]oltz predict|[p]redict_list_PPI'", shell=True,
+                       capture_output=True, text=True).stdout.strip()
+print("돌고 있는 GPU 작업:", _busy if _busy else "없음")
+
+print("\n" + "=" * 90); print("### 2. 로그 내용"); print("=" * 90)
+logs = sorted(vdir.glob("in_*.log"))
+if not logs:
+    print(f"로그가 하나도 없다: {vdir}")
+for f in logs:
+    sz = f.stat().st_size
+    print(f"\n--- {f.name}  ({sz} bytes)")
+    if sz == 0:
+        print("    (비어 있음 — 예측이 아무것도 안 썼다)")
+        continue
+    txt = open(f, errors="ignore").read()
+    for l in txt.splitlines()[:6]:
+        print("    " + l[:110])
+    if len(txt.splitlines()) > 6:
+        print(f"    ... 총 {len(txt.splitlines())}줄")
+
+print("\n" + "=" * 90); print("### 3. 집계"); print("=" * 90)
+def read_scores(pattern):
+    got = {}
+    for f in sorted(vdir.glob(pattern)):
+        for line in open(f, errors="ignore"):
+            p = line.split()
+            if len(p) < 2: continue
+            try: v = float(p[1])          # ★ 변환 먼저. setdefault 를 먼저 부르면
+            except ValueError: continue   #   실패 시 빈 리스트가 남아 mean([]) 로 죽는다
+            got.setdefault(Path(p[0]).stem, []).append(v)
+    return {k: v for k, v in got.items() if v}
+
+T = read_scores("in_t*.log")      # t_both — CooC1·ChCODH2 양쪽 2배
+S = read_scores("in_s*.log")      # t_bait / t_prey
+print(f"{'변형':26s} {'mean':>7s} {'sd':>7s} {'n':>3s}   구성")
+print(f"{'v0_base (단량체)':26s} {0.251:7.3f} {0.031:7.3f} {3:3d}   CooC1 254 + ChCODH2 636")
+for k, v in sorted(T.items()):
+    print(f"{k + ' (양쪽 2배)':26s} {_st.mean(v):7.3f} {_st.pstdev(v):7.3f} {len(v):3d}   508 + 1272")
+DESC = {"t_bait": "254 + 1272  (ChCODH2 만 2배)",
+        "t_prey": "508 +  636  (CooC1 만 2배)"}
+if S:
+    for k, v in sorted(S.items()):
+        print(f"{k:26s} {_st.mean(v):7.3f} {_st.pstdev(v):7.3f} {len(v):3d}   {DESC.get(k,'')}")
+    _b = _st.mean(S["t_bait"]) if "t_bait" in S else None
+    _p = _st.mean(S["t_prey"]) if "t_prey" in S else None
+    print("\n=== 해석 ===")
+    if _b is not None and _p is not None:
+        if _b >= 0.36:
+            print("  ChCODH2 복제만으로 대부분 올랐다.")
+            print("  → 스크리닝 재실행 때 prey 는 그대로 두고 bait 만 이량체로 하면 된다.")
+            print("     chain1=prey, chain2=ChCODH2x2(1272). 길이 ~1,570, 약 60시간.")
+        elif _p >= 0.36:
+            print("  CooC1 복제 쪽이 올렸다. 그런데 스크리닝의 prey 는 대부분 단량체다.")
+            print("  → 이 이득은 일반화되지 않는다. 재실행 전에 다시 생각해야 한다.")
+        else:
+            print("  둘 다 단독으로는 안 오른다. 0.390 은 양쪽을 다 이량체로 놨을 때만 나온다.")
+            print("  → 재실행은 양쪽 2배(~1,870 잔기, 약 90시간)여야 한다. 비싸다.")
+            print("     대안: 단량체 상위 534개만 재채점 (약 9시간).")
+else:
+    print("  in_s*.log 에 숫자가 없다 — 예측이 실패했다.")
+    print("\n  아래로 다시 돌린다 (GPU 가 비어 있을 때):")
+    print(f"""
+cd "{vdir}"
+for rep in 1 2 3; do
+  cp input_split in_s${{rep}}
+  CUDA_VISIBLE_DEVICES={globals().get('GPU_ID', 1)} python \\
+    "{RF2PPI_DIR}/src/predict_list_PPI.py" -list_fn in_s${{rep}} \\
+    -model_file "{RF2PPI_DIR}/src/models/RF2-PPI.pt"
+done""")
+    print("  ※ || true 를 빼서 오류가 그대로 보이게 했다.")
 ```
 
 ---
