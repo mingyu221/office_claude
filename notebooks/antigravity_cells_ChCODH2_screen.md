@@ -6106,101 +6106,109 @@ cseq  = BAIT_ALL.get(CTRLK, "")
 print(f"준비 완료 — 구조 디렉터리 {list(STRUCT)}  crosswalk {len(XWM)}건")
 print(f"{BAIT_KEY} {len(bseq)}aa · {CTRLK} {len(cseq)}aa")
 
-# ================= STEP 1. RF2-PPI tandem (GPU 전경) =================
-step("STEP 1  RF2-PPI tandem — 각 사슬을 반복으로 만들어 이량체를 흉내낸다")
-print("※ MSA 열을 복제하는 것이라 공진화 정보량은 안 는다. 기대는 낮지만 몇 분이면 된다.")
+# ================= STEP 1-2. GPU 작업 준비 =================
+step("STEP 1-2  GPU 작업 준비 — 입력만 만들고 실행은 백그라운드로 보낸다")
+print("RF2-PPI 와 Boltz 를 한 스크립트에 순차로 묶는다. 둘 다 GPU 를 쓰므로")
+print("동시에 띄우면 서로 죽인다. 순차면 경합이 없고, 커널도 안 묶인다.")
+GPU_SCRIPT, n_boltz = [], 0
+_GID = globals().get("GPU_ID", 1)
+
+# --- (a) RF2-PPI tandem a3m 준비 (CPU, 몇 초) ---
 try:
-    src = DIR["paired"]/f"{CTRLK}__{BAIT_KEY}.a3m"
-    if not src.exists(): raise FileNotFoundError(src)
+    src = DIR["paired"] / f"{CTRLK}__{BAIT_KEY}.a3m"
+    if not src.exists():
+        raise FileNotFoundError(src)
     LC, LB = len(cseq), len(bseq)
     names, seqs, nm, buf = [], [], None, []
     for l in open(src, errors="ignore"):
         if l.startswith(">"):
-            if nm is not None: names.append(nm); seqs.append("".join(buf))
+            if nm is not None:
+                names.append(nm); seqs.append("".join(buf))
             nm, buf = l[1:].strip(), []
-        else: buf.append(l.strip())
-    if nm is not None: names.append(nm); seqs.append("".join(buf))
+        else:
+            buf.append(l.strip())
+    if nm is not None:
+        names.append(nm); seqs.append("".join(buf))
     assert all(len(s) == LC + LB for s in seqs), "a3m 길이 불일치"
-    vdir = DIR["paired"]/"dimer"; vdir.mkdir(exist_ok=True)
-    raw = vdir/"tandem.raw.a3m"
-    raw.write_text("".join(f">{n_}\n{s[:LC]}{s[:LC]}{s[LC:]}{s[LC:]}\n"
+    vdir = DIR["paired"] / "dimer"; vdir.mkdir(exist_ok=True)
+    raw = vdir / "tandem.raw.a3m"
+    raw.write_text("".join(">%s\n%s%s%s%s\n" % (n_, s[:LC], s[:LC], s[LC:], s[LC:])
                            for n_, s in zip(names, seqs)))
-    out = vdir/"tandem.a3m"
+    out = vdir / "tandem.a3m"
     try:
         subprocess.run(["hhfilter", "-i", str(raw), "-o", str(out), "-id", "90",
                         "-M", "first"], check=True, capture_output=True)
     except Exception:
         shutil.copy(raw, out)
-    print(f"tandem a3m: chainA={2*LC} chainB={2*LB} "
-          f"깊이 {sum(1 for l in open(out) if l.startswith('>'))}")
-    (vdir/"input_tandem").write_text(f"{out} {2*LC}\n")
-    sh(f'''cd "{vdir}"
-for rep in 1 2 3; do
-  cp input_tandem in_t${{rep}}
-  CUDA_VISIBLE_DEVICES={globals().get("GPU_ID", 1)} python "{RF2PPI_DIR}/src/predict_list_PPI.py" \\
-      -list_fn in_t${{rep}} -model_file "{RF2PPI_DIR}/src/models/RF2-PPI.pt"
-done''', check=False)
-    vals = []
-    for rep in (1, 2, 3):
-        lg = vdir/f"in_t{rep}.log"
-        if lg.exists():
-            for line in open(lg, errors="ignore"):
-                f = line.split()
-                if len(f) >= 2:
-                    try: vals.append(float(f[1]))
-                    except ValueError: pass
-    if vals:
-        m = _st.mean(vals)
-        RESULT["rf2_tandem"] = m
-        print(f"\n>>> tandem 이량체 대조군  mean {m:.3f}  sd {_st.pstdev(vals):.3f}  n {len(vals)}")
-        print(f"    단량체판 0.251 (CELL 24c) 대비 {'상승' if m > 0.30 else '변화 없음'}")
-    else:
-        print("로그를 못 읽었다:", vdir)
+    _d = sum(1 for l in open(out) if l.startswith(">"))
+    (vdir / "input_tandem").write_text("%s %d\n" % (out, 2 * LC))
+    print("  (a) tandem a3m: chainA=%d chainB=%d 깊이 %d" % (2 * LC, 2 * LB, _d))
+    print("      ※ MSA 열 복제라 공진화 정보량은 안 는다. 기대는 낮지만 비용도 낮다.")
+    GPU_SCRIPT.append(
+        'echo "=== RF2-PPI tandem ==="\n'
+        'cd "%s"\n'
+        'for rep in 1 2 3; do\n'
+        '  cp input_tandem in_t${rep}\n'
+        '  CUDA_VISIBLE_DEVICES=%s python "%s/src/predict_list_PPI.py" '
+        '-list_fn in_t${rep} -model_file "%s/src/models/RF2-PPI.pt" || true\n'
+        'done\n'
+        'echo DONE_rf2_tandem\n' % (vdir, _GID, RF2PPI_DIR, RF2PPI_DIR))
 except Exception as e:
-    print(f"[STEP 1 실패] {type(e).__name__}: {e}")
+    print("  (a) RF2-PPI 준비 실패: %s: %s" % (type(e).__name__, e))
 
-# ================= STEP 2. Boltz 이량체 (백그라운드) =================
-step("STEP 2  Boltz 4사슬 이량체 대조군 — 백그라운드 시작")
+# --- (b) Boltz 이량체 YAML 준비 (CPU, 즉시) ---
 try:
-    DIMER_GPU = globals().get("GPU_ID", 1)
     MAXMSA = globals().get("BOLTZ_MAXMSA", 2048)
-    din = DIR["boltz"]/"inputs_dimer"; din.mkdir(parents=True, exist_ok=True)
-    for f in din.glob("*.yaml"): f.unlink()
+    din = DIR["boltz"] / "inputs_dimer"; din.mkdir(parents=True, exist_ok=True)
+    for f in din.glob("*.yaml"):
+        f.unlink()
+
     def wr(name, chains, ni=True):
         tot = sum(len(s) for _, s in chains)
         if tot > 1830:
-            print(f"  제외 {name} ({tot} 토큰 > 1830)"); return 0
+            print("      제외 %s (%d 토큰 > 1830)" % (name, tot)); return 0
         sq = [{"protein": {"id": c, "sequence": s}} for c, s in chains]
-        if ni: sq.append({"ligand": {"id": "Z", "ccd": "NI"}})
-        (din/f"{name}.yaml").write_text(_y.safe_dump({"version": 1, "sequences": sq},
-                                                     sort_keys=False))
-        print(f"  {name}: {len(chains)}사슬 {tot} 토큰"); return 1
-    n = 0
-    n += wr("CTRL-dimer2x2",   [("A", bseq), ("B", bseq), ("C", cseq), ("D", cseq)])
-    n += wr("CTRL-mono1x1",    [("A", bseq), ("C", cseq)])
-    n += wr("CTRL-codhdimer",  [("A", bseq), ("B", bseq), ("C", cseq)])
-    n += wr("APO-codhdimer",   [("A", bseq), ("B", bseq)])
+        if ni:
+            sq.append({"ligand": {"id": "Z", "ccd": "NI"}})
+        (din / (name + ".yaml")).write_text(
+            _y.safe_dump({"version": 1, "sequences": sq}, sort_keys=False))
+        print("      %s: %d사슬 %d 토큰" % (name, len(chains), tot)); return 1
+
+    print("  (b) Boltz 입력")
+    n_boltz += wr("CTRL-dimer2x2",  [("A", bseq), ("B", bseq), ("C", cseq), ("D", cseq)])
+    n_boltz += wr("CTRL-mono1x1",   [("A", bseq), ("C", cseq)])
+    n_boltz += wr("CTRL-codhdimer", [("A", bseq), ("B", bseq), ("C", cseq)])
+    n_boltz += wr("APO-codhdimer",  [("A", bseq), ("B", bseq)])
     for pid in ["QJZ12568.1"]:
         if pid in SEQ:
-            n += wr(f"CAND-{pid}-codhdimer", [("A", bseq), ("B", bseq), ("C", SEQ[pid])])
-    scr = f"""
-cd "{DIR['boltz']}"
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-CUDA_VISIBLE_DEVICES={DIMER_GPU} boltz predict inputs_dimer \\
-  --out_dir out_dimer --use_msa_server --max_msa_seqs {MAXMSA} \\
-  --recycling_steps 3 --diffusion_samples 5 --output_format mmcif --num_workers 2
-echo DONE_boltz_dimer
-"""
-    busy = subprocess.run("pgrep -f '[b]oltz predict'", shell=True,
-                          capture_output=True, text=True).stdout.split()
-    if busy:
-        print(f"⚠ boltz 가 이미 돈다 (pid {' '.join(busy)}). 안 띄웠다.")
-    elif n:
-        shutil.rmtree(DIR["boltz"]/"out_dimer", ignore_errors=True)
-        sh_bg("part8_boltz_dimer", scr, env=CONDA_ENV_BOLTZ)
-        RESULT["boltz_dimer"] = f"{n}개 백그라운드 시작"
+            n_boltz += wr("CAND-%s-codhdimer" % pid,
+                          [("A", bseq), ("B", bseq), ("C", SEQ[pid])])
+    if n_boltz:
+        shutil.rmtree(DIR["boltz"] / "out_dimer", ignore_errors=True)
+        GPU_SCRIPT.append(
+            'echo "=== Boltz dimer ==="\n'
+            'conda activate %s\n'
+            'cd "%s"\n'
+            'export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True\n'
+            'CUDA_VISIBLE_DEVICES=%s boltz predict inputs_dimer '
+            '--out_dir out_dimer --use_msa_server --max_msa_seqs %s '
+            '--recycling_steps 3 --diffusion_samples 5 '
+            '--output_format mmcif --num_workers 2\n'
+            'echo DONE_boltz_dimer\n' % (CONDA_ENV_BOLTZ, DIR["boltz"], _GID, MAXMSA))
 except Exception as e:
-    print(f"[STEP 2 실패] {type(e).__name__}: {e}")
+    print("  (b) Boltz 준비 실패: %s: %s" % (type(e).__name__, e))
+
+# --- (c) 한 스크립트로 묶어 백그라운드 ---
+_busy = subprocess.run("pgrep -f '[b]oltz predict|[p]redict_list_PPI'", shell=True,
+                       capture_output=True, text=True).stdout.split()
+if _busy:
+    print("\n⚠ GPU 작업이 이미 돈다 (pid %s). 새로 안 띄웠다." % " ".join(_busy))
+elif GPU_SCRIPT:
+    sh_bg("part8_gpu", "\n".join(GPU_SCRIPT), env=CONDA_ENV_RF2)
+    RESULT["gpu_bg"] = "RF2 tandem + Boltz %d개" % n_boltz
+    print("\n>>> GPU 작업은 백그라운드. 아래 STEP 들은 CPU 라 그 위에서 같이 돈다.")
+else:
+    print("\n띄울 GPU 작업이 없다.")
 
 # ================= STEP 3. Y19 coo 오페론 =================
 step("STEP 3  Y19 coo 오페론 — 양성대조군 세트 확보")
@@ -6386,11 +6394,19 @@ print("\n저장된 표")
 for f in ["coo_operon_homologs.csv", "hypA_fold_sweep.csv"]:
     p = DIR["table"]/f
     print(f"  {'O' if p.exists() else 'X'} {p}")
-print("\n다음")
-print("  1. CELL 15b 로 part8_boltz_dimer 진행 확인 (5쌍 x 5표본, GPU)")
-print("  2. 끝나면 CELL 28a-13 방식으로 out_dimer 파싱 →")
-print("     CTRL-dimer2x2 의 ipTM 이 CTRL-mono1x1(기존 0.300)보다 높은지가 핵심이다.")
-print("     높으면 지금까지의 Track B 전체를 이량체로 다시 해야 한다.")
+print("\n### GPU 백그라운드 (part8_gpu) — 지금도 돌고 있다")
+print("  진행확인:  bg_tail('part8_gpu')  또는 CELL 15b")
+print("  순서   :  RF2-PPI tandem 3회 -> Boltz dimer 5쌍 x 5표본")
+print("  다 끝나면 로그에 DONE_rf2_tandem 과 DONE_boltz_dimer 가 찍힌다.")
+print("\n### 끝난 뒤 읽는 법")
+print("  (1) RF2-PPI tandem")
+print("      result/paired/dimer/in_t*.log 의 2번째 열이 점수다.")
+print("      단량체판 0.251 (CELL 24c v0_base) 과 비교한다.")
+print("  (2) Boltz dimer — CELL 28a-13 의 파싱 방식을 out_dimer 에 적용")
+print("      ★ CTRL-dimer2x2 의 ipTM 이 CTRL-mono1x1(0.300)보다 높은가")
+print("        높으면 지금까지의 Track B 348개 구조 전체를 이량체로 다시 해야 한다.")
+print("      ★ APO-codhdimer 에서 Ni 이 C-cluster 자리에 들어가는가")
+print("        75 C 무단백 조립 결과와 직접 대응하는 항목이다.")
 ```
 
 ---
