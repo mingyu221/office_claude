@@ -6443,6 +6443,19 @@ for _s, _f in FAA.items():
     for l in open(_f, errors="ignore"):
         if l.startswith(">"):
             t = l[1:].rstrip(); HDR[t.split()[0]] = (_s, t[len(t.split()[0]):].strip())
+# MG1655 의 folddisco 키는 UniProt accession 인데 mg1655_protein.faa 는 NP_/b-number
+# 라 매칭이 안 된다. 이걸 안 하면 MG1655 21개가 통째로 strain='?' 로 빠진다.
+_mgu = DIR["table"]/"mg1655_metal_uniprot.tsv"
+if _mgu.exists():
+    _u = pd.read_csv(_mgu, sep="\t")
+    for _r in _u.itertuples(index=False):
+        _acc = str(_r[0])
+        _nm  = str(_r[2]) if len(_r) > 2 and pd.notna(_r[2]) else ""
+        _gn  = str(_r[1]) if len(_r) > 1 and pd.notna(_r[1]) else ""
+        HDR[_acc] = ("MG1655", (f"{_gn} " if _gn else "") + _nm)
+    print(f"MG1655 UniProt 이름 {len(_u)}개 보강")
+else:
+    print("⚠ mg1655_metal_uniprot.tsv 없음 — MG1655 가 '?' 로 나온다 (CELL 33 먼저)")
 STRUCT = {}
 for r in [TOOLS/"database"/"bacteriaDB", TOOLS/"database"]:
     if Path(r).exists():
@@ -6516,7 +6529,8 @@ for sname, db in TDB.items():
     m8  = FSD/f"fdall_vs_{sname}.m8"
     if not (m8.exists() and m8.stat().st_size):
         sh(f'"{FS}" search "{QDB}" "{db}" "{res}" "{_tmp}/s_{sname}" '
-           f'-e 10 --max-seqs 100 -a 1 --threads {min(THREADS,16)} -v 1', check=False)
+           f'-e 10 --max-seqs 100 -a 1 --exact-tmscore 1 '
+           f'--threads {min(THREADS,16)} -v 1', check=False)
         sh(f'"{FS}" convertalis "{QDB}" "{db}" "{res}" "{m8}" '
            f'--format-output "{FFMT}" --threads {min(THREADS,16)} -v 1', check=False)
     if m8.exists() and m8.stat().st_size:
@@ -6630,6 +6644,157 @@ print("  Foldseek 만  : 과는 맞는데 Folddisco 가 그 자리를 못 잡았
 print("  Folddisco 만 : 과는 다른데 자리 기하가 같다 — 비상동 삽입자 후보")
 print("\n  Folddisco 의 대조군 실패는 '놓친 게 있다'는 뜻이지 '찾은 게 틀렸다'가 아니다.")
 print("  metal_rmsd 는 직교체 간 Δ 0.015 A 로 재현된다. 측정은 멀쩡하다.")
+```
+
+---
+
+## CELL 52 — G3E / SIMIBI 금속 삽입 샤페론 과를 통째로 본다
+
+```python
+# =============================================================================
+# CELL 52 | 실제로 금속을 넣는 단백질 과를 이름이 아니라 구조로 모은다
+#   CELL 51 의 'Foldseek 만' 목록에 중요한 게 섞여 있었다.
+#     QJZ13331.1  MeaB  — 메틸말로닐-CoA 뮤타제의 B12 적재 샤페론 GTPase
+#     AKE61582.1  UreG  — 우레아제 Ni 샤페론
+#     QJZ12661.1  ApbC  — Fe-S 클러스터 운반 ATPase
+#     QJZ12719.1  YeiR  — COG0523
+#   이들은 전부 **G3E / SIMIBI** 계열이다. HypB · UreG · CooC · MeaB · YjiA 가
+#   같은 과이고, 이 과의 공통 업무가 바로 '금속을 다른 단백질에 넣는 것' 이다.
+#   CooC 와 상동인 것을 찾는 대신 **과 전체를 훑는 것**이 맞는 접근이다.
+#
+#   하는 일
+#     (1) seed = 이 과로 알려진 BL21/Y19 단백질 + CooC1 + HypA
+#     (2) foldseek 으로 세 균주에서 tm>=0.5 인 것 전부 수집
+#     (3) 각각에 대해 — MG1655 상동체 유무 / Ni 배위 등급 / 금속 모티프 보유
+#     (4) BL21 에만 있는 과 구성원이 있는가
+# =============================================================================
+need((have("ASSET", "DIR"), "CELL 01 을 먼저 돌릴 것"))
+FS = shutil.which("foldseek") or globals().get("FOLDSEEK_BIN", "foldseek")
+FAA = {"BL21": ASSET["faa_bl21"], "MG1655": ASSET["faa_mg1655"], "Y19": ASSET["faa_y19"]}
+SEQ, HDR = {}, {}
+for _s, _f in FAA.items():
+    nm, buf = None, []
+    for l in open(_f, errors="ignore"):
+        if l.startswith(">"):
+            if nm: SEQ[nm] = "".join(buf)
+            t = l[1:].rstrip(); nm = t.split()[0]; buf = []
+            HDR[nm] = (_s, t[len(nm):].strip())
+        else: buf.append(l.strip())
+    if nm: SEQ[nm] = "".join(buf)
+STRUCT = {}
+for r in [TOOLS/"database"/"bacteriaDB", TOOLS/"database"]:
+    if Path(r).exists():
+        for d in sorted(Path(r).glob("structures_*")):
+            if d.is_dir(): STRUCT[d.name] = d
+_xw = pd.read_csv(DIR["table"]/"id_crosswalk_struct_to_genbank.csv")
+XWM = {Path(str(k)).stem: str(v).split(",")[0]
+       for k, v in _xw.dropna(subset=["protein"]).set_index("tid")["protein"].to_dict().items()}
+REV = {v: k for k, v in XWM.items()}
+FSD = DIR["folddisco"].parent/"foldseek"; FSD.mkdir(exist_ok=True)
+_tmp = DIR["tmp"]/"g3e"; _tmp.mkdir(parents=True, exist_ok=True)
+
+# ---------- (1) seed ----------
+PAT = (r"\bMeaB\b|\bUreG\b|\bApbC\b|\bYeiR\b|\bYjiA\b|\bHypB\b|\bCobW\b|"
+       r"cobalamin biosynthesis|urease accessory|iron-sulfur cluster carrier|"
+       r"nickel metallochaperone|nickel incorporation|methylmalonyl")
+SEEDS = sorted({k for k, v in HDR.items() if re.search(PAT, v[1], re.I)})
+SEEDS += ["QJZ12568.1"]                      # 1순위 후보
+SEEDS = [k for k in dict.fromkeys(SEEDS) if k in REV]
+print(f"seed {len(SEEDS)}개")
+for k in SEEDS: print(f"  {HDR[k][0]:7s} {k}  {HDR[k][1][:66]}")
+
+# ---------- (2) foldseek 수집 ----------
+qdir = _tmp/"q"; shutil.rmtree(qdir, ignore_errors=True); qdir.mkdir(parents=True)
+for pid in SEEDS:
+    stem = REV[pid]
+    for sdir in STRUCT.values():
+        f = next(iter(glob.glob(str(sdir/f"{stem}*.cif"))), None)
+        if f:
+            try: os.symlink(f, qdir/Path(f).name)
+            except FileExistsError: pass
+            break
+QDB = FSD/"db_g3e_query"
+for _f in FSD.glob("db_g3e_query*"):
+    try: _f.unlink()
+    except Exception: pass
+sh(f'"{FS}" createdb "{qdir}" "{QDB}" --threads {min(THREADS,16)} -v 1', check=False)
+
+FFMT = "query,target,fident,alnlen,qcov,tcov,evalue,bits,alntmscore,lddt"
+rows = []
+for sname, sdir in STRUCT.items():
+    db = FSD/f"db_{sname}"
+    if not Path(str(db) + ".dbtype").exists():
+        sh(f'"{FS}" createdb "{sdir}" "{db}" --threads {min(THREADS,16)} -v 1', check=False)
+    m8 = FSD/f"g3e_vs_{sname}.m8"
+    if not (m8.exists() and m8.stat().st_size):
+        sh(f'"{FS}" search "{QDB}" "{db}" "{_tmp}/res_{sname}" "{_tmp}/s_{sname}" '
+           f'-e 10 --max-seqs 200 -a 1 --exact-tmscore 1 '
+           f'--threads {min(THREADS,16)} -v 1', check=False)
+        sh(f'"{FS}" convertalis "{QDB}" "{db}" "{_tmp}/res_{sname}" "{m8}" '
+           f'--format-output "{FFMT}" --threads {min(THREADS,16)} -v 1', check=False)
+    if not (m8.exists() and m8.stat().st_size): continue
+    d = pd.read_csv(m8, sep="\t", names=FFMT.split(","))
+    d["q"] = d["query"].apply(lambda x: XWM.get(Path(str(x)).stem))
+    d["t"] = d.target.apply(lambda x: XWM.get(Path(str(x)).stem))
+    d = d[d.t.notna() & (d.alntmscore >= 0.50)]
+    for r in d.itertuples(index=False):
+        rows.append({"member": str(r.t), "strain": HDR.get(str(r.t), ("?",))[0],
+                     "via_seed": str(r.q), "tm": round(float(r.alntmscore), 3),
+                     "fident": round(float(r.fident), 3)})
+G = (pd.DataFrame(rows).sort_values("tm", ascending=False)
+       .drop_duplicates("member").reset_index(drop=True))
+print(f"\n과 구성원 (tm>=0.5): {len(G)}개")
+print(G.strain.value_counts().to_string())
+
+# ---------- (3) 증거 붙이기 ----------
+_ni = DIR["table"]/"ni_site_grade.csv"
+if _ni.exists():
+    n = pd.read_csv(_ni)
+    n["p"] = n.prey.astype(str).str.split("-").str[-1]
+    G["ni_grade"] = G.member.map(n.drop_duplicates("p").set_index("p")["grade"])
+_mm = DIR["table"]/"motif_metal_3strain.csv"
+if _mm.exists():
+    m = pd.read_csv(_mm)
+    G["metal_rmsd"] = G.member.map(m.drop_duplicates("key").set_index("key")["rmsd"])
+    G["plddt"] = G.member.map(m.drop_duplicates("key").set_index("key")["plddt"])
+G["desc"] = G.member.map(lambda k: HDR.get(k, ("", ""))[1][:62])
+
+# ---------- (4) BL21 구성원의 MG1655 상동체 유무 ----------
+bl = [k for k in G[G.strain == "BL21"].member if k in SEQ]
+if bl:
+    q = DIR["seq"]/"g3e_bl21.faa"
+    q.write_text("".join(f">{k}\n{SEQ[k]}\n" for k in bl))
+    o = DIR["search"]/"g3e_bl21_vs_MG1655.m8"
+    SFMT = "query,target,fident,alnlen,qcov,tcov,evalue,bits"
+    if not (o.exists() and o.stat().st_size):
+        sh(f'mmseqs easy-search "{q}" "{FAA["MG1655"]}" "{o}" "{_tmp}" '
+           f'--format-output "{SFMT}" -e 1e-3 -s 7.5 --threads {min(THREADS,16)} -v 1',
+           check=False)
+    best = {}
+    if o.exists() and o.stat().st_size:
+        d = pd.read_csv(o, sep="\t", names=SFMT.split(","))
+        d = d[d.qcov >= 0.70].sort_values("bits", ascending=False).drop_duplicates("query")
+        best = dict(zip(d["query"], d.fident.round(3)))
+    G["mg1655_fident"] = G.member.map(best)
+    G["bl21_only"] = ((G.strain == "BL21") & G.mg1655_fident.isna()).astype(int)
+
+G.to_csv(DIR["table"]/"g3e_family_sweep.csv", index=False, encoding="utf-8-sig")
+pd.set_option("display.max_rows", None); pd.set_option("display.width", 230)
+COLS = [c for c in ["member", "strain", "via_seed", "tm", "fident", "ni_grade",
+                    "metal_rmsd", "plddt", "mg1655_fident", "bl21_only", "desc"]
+        if c in G.columns]
+print("\n" + "=" * 110)
+print("=== G3E/SIMIBI 과 구성원 ===")
+print(G[COLS].to_string(index=False))
+
+if "bl21_only" in G:
+    hot = G[G.bl21_only == 1]
+    print(f"\n{'='*110}")
+    print(f"=== ★ BL21 에만 있는 과 구성원: {len(hot)}개 ===")
+    print(hot[COLS].to_string(index=False) if len(hot) else "  없음")
+    print("\n  이 과의 공통 업무가 '금속을 다른 단백질에 넣는 것' 이다.")
+    print("  BL21 에만 있는 구성원이 있다면 그것이 가장 직접적인 후보다.")
+print(f"\n저장: {DIR['table']/'g3e_family_sweep.csv'}")
 ```
 
 ---
