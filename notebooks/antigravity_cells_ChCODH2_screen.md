@@ -7261,14 +7261,25 @@ if DIMER_MODE == "auto":
         DIMER_MODE = "both"
         print(f"\n  보정 실패 — 기본값 {DIMER_MODE} 로 간다.")
 
-# =============================== STEP 1 ===============================
+# =============================================================================
+# STEP 1 | 전체 스크린
+#   1차 시도는 몇 시간 돌다 CUDA OOM 으로 죽었다.
+#     Embeddings.py:197  out = self.attn(pair,templ,templ).reshape(B,L,L,-1)
+#     2.33 GiB 할당 실패 (23.56 총량 / 17.52 할당됨 / 1.67 여유 / 20.81 예약)
+#   pair 가 L x L 이라 메모리는 L^2 로 간다. chain1=1272 에 prey 가 얹히면
+#   L 이 1,600~2,000 까지 가고, 보정에서 통과한 t_bait 은 L=1526 이었다.
+#   그리고 한 쌍이 터지자 파이썬이 죽으면서 리스트 전체가 중단됐다.
+#   세 가지를 고친다.
+#     (a) 길이를 먼저 재고, 프로브로 이 카드의 L 상한을 실측한다
+#     (b) 상한을 넘는 쌍은 버리지 않고 따로 적어 둔다 (이량체 점수 없음 등급)
+#     (c) 길이 오름차순 버킷으로 쪼개 부르고 버킷마다 || true 로 격리한다.
+#         한 버킷이 죽어도 나머지는 계속 간다. 이미 채점된 쌍은 건너뛴다.
+#   예약 20.81 vs 할당 17.52 = 3.3GB 파편화. expandable_segments 로 줄인다.
+# =============================================================================
 print("\n" + "=" * 100); print(f"### STEP 1 | 전체 스크린  (mode = {DIMER_MODE})"); print("=" * 100)
-_SPP = 24.3 if DIMER_MODE == "both" else 18.3
 print(f"chain1 = {BAIT_KEY} x2 = {2*LB}"
       f"{' , chain2 = prey x2' if DIMER_MODE=='both' else ' , chain2 = prey (원본)'}")
-print(f"{len(SRCL)}쌍 x {_SPP}s x {N_REP_DIMER}회 = 약 {len(SRCL)*_SPP*N_REP_DIMER/3600:.0f} 시간")
 sh(f"df -h {BASE} | tail -1", check=False)
-print("※ a3m 이 2배(both) / 1.4배(bait)로 는다. 여유가 10 GB 미만이면 먼저 정리할 것.")
 
 DD = DIR["paired"]/f"bait_dimer_{DIMER_MODE}"; DD.mkdir(exist_ok=True)
 SRC = DIR["script"]/"part9_dimer_prep.py"
@@ -7313,38 +7324,148 @@ LIST.write_text("\\n".join(lines) + "\\n")
 print(f"made {{made}} / reuse {{skip}} / skip {{bad}} -> {{LIST}}", flush=True)
 ''')
 
-script = f"""
-python "{SRC}"
-cd "{DIR['rf2ppi']}"
-for rep in {' '.join(str(i) for i in range(1, N_REP_DIMER+1))}; do
-  cp input_file_dimer in_dimer${{rep}}
-  CUDA_VISIBLE_DEVICES={_GID} python \\
-    "{RF2PPI_DIR}/src/predict_list_PPI.py" -list_fn in_dimer${{rep}} \\
-    -model_file "{RF2PPI_DIR}/src/models/RF2-PPI.pt"
-  echo "dimer replicate ${{rep}} done"
-done
-echo DONE_dimer_screen
-"""
-# STEP 0 이 20분 걸리는 사이에 다른 GPU 작업이 끝나거나 시작됐을 수 있다.
-# 맨 앞에서 한 번 본 상태를 믿고 55시간짜리를 띄우면 안 된다 — 다시 본다.
-_busy2 = subprocess.run("pgrep -af '[b]oltz predict|[p]redict_list_PPI'", shell=True,
+# ---------- (1) 변환 (이미 있으면 재사용되어 금방 끝난다) ----------
+print("\n--- a3m 변환 ---")
+_prep_sh = DIR["script"]/"part9_prep.sh"
+_prep_sh.write_text("#!/usr/bin/env bash\n"
+                    'source "$(conda info --base)/etc/profile.d/conda.sh"\n'
+                    f"conda activate {CONDA_ENV_RF2}\n"
+                    f'python "{SRC}"\n')
+_prep_sh.chmod(0o755)
+sh(f'bash "{_prep_sh}"', check=False)
+
+DLIST = DIR["rf2ppi"]/"input_file_dimer"
+PAIRS = [l.rsplit(" ", 1)[0] for l in DLIST.read_text().split("\n") if l.strip()]
+
+# ---------- (2) 길이 ----------
+def qlen(path):
+    """a3m 첫 서열(질의)의 열 수 = 이 쌍의 L."""
+    s = []
+    with open(path, errors="ignore") as fh:
+        fh.readline()
+        for l in fh:
+            if l.startswith(">"): break
+            s.append(l.strip())
+    return len("".join(s))
+
+LEN = {p: qlen(p) for p in PAIRS}
+_ls = pd.Series(LEN)
+print(f"\n--- L 분포 ({len(_ls)}쌍) ---")
+print(f"  min {_ls.min()}  25% {int(_ls.quantile(.25))}  중앙 {int(_ls.median())}  "
+      f"75% {int(_ls.quantile(.75))}  max {_ls.max()}")
+for lo, hi in [(0, 1526), (1526, 1700), (1700, 1900), (1900, 2200), (2200, 99999)]:
+    n = int(((_ls > lo) & (_ls <= hi)).sum())
+    print(f"  {lo:5d} < L <= {hi:5d} : {n:5d}쌍")
+
+# ---------- (3) 이미 채점된 쌍 (재개) ----------
+def scored(rep):
+    got = set()
+    for f in DIR["rf2ppi"].glob(f"in_dimer{rep}*.log"):
+        for line in open(f, errors="ignore"):
+            q = line.split()
+            if len(q) < 2: continue
+            try: float(q[1])
+            except ValueError: continue
+            got.add(q[0])
+    return got
+
+# ---------- (4) L 상한 실측 ----------
+# t_bait 이 L=1526 에서 돌았다. 그 위를 훑어 어디서 죽는지 직접 본다.
+PB = DIR["rf2ppi"]/"probe"; PB.mkdir(exist_ok=True)
+KNOWN_OK = 1526
+above = sorted({v for v in LEN.values() if v > KNOWN_OK})
+if not above:
+    L_MAX = int(_ls.max())
+    print(f"\n상한 프로브 불필요 — 최대 L={L_MAX} 가 이미 안전선 이하")
+else:
+    picks, k = [], min(8, len(above))
+    for i in range(k):
+        v = above[int(i * (len(above) - 1) / max(k - 1, 1))]
+        if v not in picks: picks.append(v)
+    rev = {}
+    for _pth, _v in LEN.items(): rev.setdefault(_v, _pth)
+    print(f"\n--- L 상한 프로브: {picks} ---")
+    PROBE = RF2PPI_DIR + "/src/predict_list_PPI.py"
+    MODEL = RF2PPI_DIR + "/src/models/RF2-PPI.pt"
+    plines = []
+    for v in picks:
+        (PB/f"p{v}").write_text(f"{rev[v]} {2*LB}\n")
+        plines.append(
+            f'if [ ! -s "p{v}.log" ]; then CUDA_VISIBLE_DEVICES=$G python "{PROBE}" '
+            f'-list_fn p{v} -model_file "{MODEL}" || echo "OOM p{v}"; fi')
+    _probe_sh = DIR["script"]/"part9_probe.sh"
+    _probe_sh.write_text("#!/usr/bin/env bash\n"
+                         'source "$(conda info --base)/etc/profile.d/conda.sh"\n'
+                         f"conda activate {CONDA_ENV_RF2}\n"
+                         "export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True\n"
+                         f"G={_GID}\ncd \"{PB}\"\n" + "\n".join(plines) + "\n")
+    _probe_sh.chmod(0o755)
+    print("  쌍당 1회, 모델 로딩 포함 약 1분씩. 죽는 지점을 직접 본다.")
+    sh(f'bash "{_probe_sh}"', check=False)
+    ok = []
+    for v in picks:
+        lg, good = PB/f"p{v}.log", False
+        if lg.exists():
+            for line in open(lg, errors="ignore"):
+                q = line.split()
+                if len(q) >= 2:
+                    try: float(q[1]); good = True
+                    except ValueError: pass
+        ok.append((v, good))
+        print(f"  L={v:5d}  {'통과' if good else 'OOM'}")
+    L_MAX = KNOWN_OK
+    for v, good in ok:            # 아래에서부터 연속으로 통과한 데까지만 인정
+        if good: L_MAX = v
+        else: break
+    print(f"\n  => 이 카드의 L 상한 = {L_MAX}")
+
+over = sorted([p for p, v in LEN.items() if v > L_MAX], key=lambda p: LEN[p])
+print(f"  상한 초과 {len(over)}쌍 — 버리지 않고 따로 적어 둔다 (이량체 점수 없음 등급)")
+if over:
+    pd.DataFrame({"a3m": over, "L": [LEN[p] for p in over],
+                  "prey": [Path(p).stem.split("__")[-1] for p in over]}
+                 ).to_csv(DIR["table"]/"trackA_dimer_oversize.csv", index=False)
+    print(f"  -> {DIR['table']/'trackA_dimer_oversize.csv'}")
+
+# ---------- (5) 길이 오름차순 버킷 ----------
+BUCKET = 200          # 파이썬 한 번이 맡는 쌍 수. 죽으면 이 단위만 잃는다
+runnable = sorted([p for p in PAIRS if LEN[p] <= L_MAX], key=lambda p: LEN[p])
+RUN = RF2PPI_DIR + "/src/predict_list_PPI.py"
+MDL = RF2PPI_DIR + "/src/models/RF2-PPI.pt"
+cmds, total = [], 0
+for rep in range(1, N_REP_DIMER + 1):
+    _sc = scored(rep)
+    todo = [p for p in runnable if p not in _sc]
+    total += len(todo)
+    print(f"  replicate {rep}: 남은 {len(todo)}쌍")
+    for k in range(0, len(todo), BUCKET):
+        lf = DIR["rf2ppi"]/f"in_dimer{rep}_b{k//BUCKET:02d}"
+        lf.write_text("\n".join(f"{p} {2*LB}" for p in todo[k:k+BUCKET]) + "\n")
+        cmds.append(f'CUDA_VISIBLE_DEVICES={_GID} python "{RUN}" -list_fn {lf.name} '
+                    f'-model_file "{MDL}" || echo "BUCKET FAILED {lf.name}"')
+_SPP = 24.3 if DIMER_MODE == "both" else 18.3
+print(f"\n  총 {total}회 x {_SPP}s = 약 {total*_SPP/3600:.0f} 시간, 버킷 {len(cmds)}개")
+
+script = ("export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True\n"
+          f'cd "{DIR["rf2ppi"]}"\n' + "\n".join(cmds) + "\necho DONE_dimer_screen\n")
+_busy2 = subprocess.run("pgrep -af '[p]redict_list_PPI'", shell=True,
                         capture_output=True, text=True).stdout.strip()
 if _busy2:
-    print(f"\n⚠ GPU 작업이 아직 돈다:\n  {_busy2}")
-    print("  스크린을 띄우지 않았다. 끝난 뒤 이 셀을 다시 돌릴 것 "
-          "(STEP 0 은 cal_*.log 재사용으로 즉시 지나간다).")
-elif not already(done("part9_dimer_screen",
-                    *[DIR["rf2ppi"]/f"in_dimer{i}.log" for i in range(1, N_REP_DIMER+1)]),
-               "이량체 스크린", f"rm {DIR['rf2ppi']}/in_dimer*.log"):
+    print(f"\n⚠ RF2-PPI 가 아직 돈다:\n  {_busy2}\n  끝난 뒤 다시 돌릴 것.")
+elif total == 0:
+    print("\n  남은 쌍이 없다 — 집계로 넘어가면 된다.")
+else:
     sh_bg("part9_dimer_screen", script, env=CONDA_ENV_RF2)
-    print("\n  a3m 변환(3,626개)이 먼저 돌고 그다음 추론이다. 변환은 10~20분.")
-    print("  진행확인: bg_tail('part9_dimer_screen')")
+    print("  버킷 하나가 OOM 으로 죽어도 다음 버킷이 이어서 돈다.")
+    print("  이 셀을 다시 돌리면 채점된 쌍을 빼고 남은 것만 다시 짠다 (재개).")
 
 print("\n### 끝난 뒤")
-print("  in_dimer1~3.log 를 CELL 23 방식으로 평균내고, STEP 0 의 대조군 점수를")
-print("  기준선으로 그 위에 몇 개가 남는지 본다. 이때 쓰는 기준선은 0.425 가 아니라")
-print("  STEP 0 이 스크린 프레임에서 다시 잰 값이다.")
+print("  in_dimer*_b*.log 를 전부 모아 replicate 평균을 내고, STEP 0 의 대조군")
+print("  점수(bait 위상 0.438)를 기준선으로 그 위에 몇 개가 남는지 본다.")
 print("  단량체 0.266 에서 534개, tandem 0.390 에서 80개였다.")
+print("  trackA_dimer_oversize.csv 의 쌍들은 이량체 점수가 없다 — 단량체 점수와")
+print("  Folddisco/Foldseek 축으로만 등급을 매기고, 그 사실을 표에 남길 것.")
+
 ```
 
 ---
