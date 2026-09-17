@@ -6964,11 +6964,19 @@ done''', check=False)
   done""")
 
 # ---------- (A) Boltz 이량체 재시도 ----------
-# max_msa_seqs 는 전처리 단계 값이라 실행 중 VRAM 을 거의 못 줄인다 (2048->512
-# 로 낮춰도 free 가 14MB -> 16MB). 1,780 토큰이면 원자가 1만 4천 개 수준이고,
-# diffusion_samples 5 는 그 5벌을 동시에 디퓨전에 태운다. 줄여야 할 건 그쪽이다.
-# --max_parallel_samples 로 샘플 수는 유지한 채 순차 계산으로 바꾼다.
-# 플래그 이름은 boltz 버전마다 다르므로 --help 를 읽어 있는 것만 붙인다.
+# 진단 정정: diffusion_samples 가 아니었다.
+#   dimer3 는 6초 만에 죽었다 (정상 예측은 10~15분). 디퓨전에 들어가기 전,
+#   트렁크(pairformer) 첫 할당에서 터진 것이다. max_parallel_samples 는
+#   디퓨전 단계 손잡이라 이 자리에 영향이 없다.
+#   경합도 아니다 — OOM 세 번 모두 free ~14MB 인데, 첫 번째(part8_boltz_dimer)는
+#   이량체 스크린이 있기도 전이었다. boltz 가 혼자 25GB 를 쓴다.
+#   경계: 1272 토큰 성공 / 1526 실패 / 1780 실패. N^2 이라 1272->1526 이 1.44배다.
+#
+#   로그의 "Generic kernel expects bias to be float32" 는 삼각주의가 일반 경로로
+#   떨어졌다는 뜻이다. 이 경로는 N^2 x head 텐서를 통째로 만든다. 메모리 효율
+#   커널(trifast)이 있으면 트렁크 피크가 크게 줄어든다 — 있는지부터 확인한다.
+#
+#   남은 손잡이는 둘뿐이다. (1) 커널 (2) 토큰 수. MSA 깊이는 MSA 모듈에만 듣는다.
 print("\n" + "=" * 100); print("### (A) Boltz 이량체 OOM 복구"); print("=" * 100)
 din = DIR["boltz"]/"inputs_dimer"
 done_names = set()
@@ -6980,20 +6988,43 @@ miss = sorted(want - done_names)
 print(f"  완료 {len(done_names & want)} / 입력 {len(want)}   누락 {len(miss)}: {miss}")
 
 if miss:
-    _probe = DIR["script"]/"boltz_help.sh"
-    _probe.write_text('#!/usr/bin/env bash\nsource "$(conda info --base)/etc/profile.d/conda.sh"\n'
-                      f'conda activate {CONDA_ENV_BOLTZ}\nboltz predict --help\n')
+    _probe = DIR["script"]/"boltz_probe.sh"
+    _probe.write_text(
+        '#!/usr/bin/env bash\nsource "$(conda info --base)/etc/profile.d/conda.sh"\n'
+        f'conda activate {CONDA_ENV_BOLTZ}\n'
+        'echo "--- help"; boltz predict --help\n'
+        'echo "--- trifast"; python -c "import trifast, sys; '
+        'print(\'trifast\', trifast.__version__ if hasattr(trifast,\'__version__\') else \'ok\')" '
+        '2>&1 | tail -1\n')
     _probe.chmod(0o755)
     _h = sh(f'bash "{_probe}"', check=False, quiet=True)
-    _flag = lambda f: f in _h
-    print(f"  boltz 플래그  max_parallel_samples={_flag('--max_parallel_samples')}  "
+    _flag = lambda f: f in _h.split("--- trifast")[0]
+    _trifast_ok = "trifast" in _h.split("--- trifast")[-1] and \
+                  "ModuleNotFoundError" not in _h.split("--- trifast")[-1]
+    print(f"  플래그  no_trifast={_flag('--no_trifast')}  "
+          f"max_parallel_samples={_flag('--max_parallel_samples')}  "
           f"num_subsampled_msa={_flag('--num_subsampled_msa')}")
+    print(f"  trifast 설치됨: {_trifast_ok}")
+    if not _trifast_ok and _flag("--no_trifast"):
+        print("  ★ boltz 는 trifast 경로를 알지만 모듈이 없다. 이게 1순위 후보다:")
+        print(f"     conda run -n {CONDA_ENV_BOLTZ} pip install trifast")
+        print("     깔고 이 셀을 다시 돌리면 커널이 바뀌어 트렁크 피크가 줄어든다.")
 
-    # 단계별로 낮춘다. 이미 써 본 단계는 out_<tag> 디렉터리 존재로 건너뛴다.
-    LADDER = [dict(tag="dimer2", msa=512, par=None, samp=5, rec=3),
-              dict(tag="dimer3", msa=512, par=1,    samp=5, rec=3),
-              dict(tag="dimer4", msa=256, par=1,    samp=3, rec=1),
-              dict(tag="dimer5", msa=128, par=1,    samp=1, rec=1)]
+    # 스크린이 GPU 1 을 쓰는 중이면 boltz 는 빈 쪽으로 보낸다 (경합 회피).
+    _f = sh("nvidia-smi --query-gpu=index,memory.free --format=csv,noheader,nounits",
+            check=False, quiet=True)
+    try:
+        _pairs = [(int(a), int(b)) for a, b in
+                  (l.split(",") for l in _f.strip().splitlines() if l.strip())]
+        BOLTZ_GID = max(_pairs, key=lambda x: x[1])[0]
+    except Exception:
+        BOLTZ_GID = _GID
+    print(f"  boltz 를 GPU {BOLTZ_GID} 로 보낸다 (여유 메모리 최대). "
+          f"스크린은 GPU {_GID} 에서 계속 돈다.")
+
+    # 토큰을 못 줄이면 커널·깊이밖에 없다. 단계마다 하나씩만 바꾼다.
+    LADDER = [dict(tag="dimer4", msa=128, samp=5, rec=3),
+              dict(tag="dimer5", msa=32,  samp=1, rec=1)]
     step = next((s for s in LADDER
                  if not (DIR["boltz"]/f"out_{s['tag']}").exists()), None)
     busy = subprocess.run("pgrep -f '[b]oltz predict'", shell=True,
@@ -7001,37 +7032,36 @@ if miss:
     if busy:
         print(f"  ⚠ boltz 가 이미 돈다 (pid {' '.join(busy)})")
     elif step is None:
-        print("  사다리를 다 썼는데도 안 들어간다. 24 GB 로는 이 크기가 안 되는 것이다.")
-        print("  남은 길: (1) ChCODH2 를 도메인으로 잘라 C-cluster 주변만 넣거나")
-        print("           (2) CPU 오프로딩이 되는 환경에서 돌리거나")
-        print("           (3) 이량체 대조군을 Boltz 가 아닌 RF2-PPI 쪽 결과로만 판단한다")
+        print("\n  24GB 로는 이 크기의 트렁크가 안 들어간다. 남은 길은 셋이다.")
+        print("   (1) trifast 를 깔고 사다리를 지운 뒤 다시 (out_dimer4,5 삭제)")
+        print("   (2) ChCODH2 를 C-cluster 도메인으로 잘라 토큰을 1272 아래로")
+        print("       — 답이 달라지는 근사다. 쓰면 근사임을 명시할 것")
+        print("   (3) 이량체 대조군 판정을 RF2-PPI 쪽 숫자로만 내린다")
+        print("       STEP 0 에서 bait 위상 z=6.85 로 이미 분리가 나와 있다")
     else:
-        tag, msa, par, samp, rec = (step["tag"], step["msa"], step["par"],
-                                    step["samp"], step["rec"])
+        tag, msa, samp, rec = step["tag"], step["msa"], step["samp"], step["rec"]
         d2 = DIR["boltz"]/f"inputs_{tag}"; d2.mkdir(parents=True, exist_ok=True)
         for f in d2.glob("*.yaml"): f.unlink()
         for n_ in miss: shutil.copy(din/f"{n_}.yaml", d2/f"{n_}.yaml")
         opts = [f"--out_dir out_{tag}", "--use_msa_server", f"--max_msa_seqs {msa}",
                 f"--recycling_steps {rec}", f"--diffusion_samples {samp}",
                 "--output_format mmcif", "--num_workers 1"]
-        if par and _flag("--max_parallel_samples"):
-            opts.append(f"--max_parallel_samples {par}")
-        if _flag("--num_subsampled_msa"):
-            opts.append(f"--num_subsampled_msa {msa}")
-        # 입력을 한 건씩 따로 부른다. 한 건이 터져도 나머지가 새 할당자로 다시 시작한다.
+        if _flag("--max_parallel_samples"): opts.append("--max_parallel_samples 1")
+        if _flag("--num_subsampled_msa"):   opts.append(f"--num_subsampled_msa {msa}")
+        # 작은 것부터 돌린다. 1526 이 들어가면 1780 도 해볼 값이 있고,
+        # 1526 이 터지면 1780 은 볼 것도 없다.
         scr = f"""
 cd "{DIR['boltz']}"
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-for y in inputs_{tag}/*.yaml; do
+for y in $(ls -S -r inputs_{tag}/*.yaml); do
   echo "=== $y"
-  CUDA_VISIBLE_DEVICES={_GID} boltz predict "$y" {' '.join(opts)} || echo "FAILED $y"
+  CUDA_VISIBLE_DEVICES={BOLTZ_GID} boltz predict "$y" {' '.join(opts)} || echo "FAILED $y"
 done
 echo DONE_boltz_{tag}
 """
         sh_bg(f"part8_boltz_{tag}", scr, env=CONDA_ENV_BOLTZ)
-        print(f"  단계 {tag}: max_msa_seqs {msa}, recycling {rec}, "
-              f"diffusion_samples {samp}, max_parallel_samples {par}")
-        print("  입력을 한 건씩 따로 돌린다 — 한 건이 터져도 나머지는 살아남는다.")
+        print(f"  단계 {tag}: max_msa_seqs {msa}, recycling {rec}, diffusion_samples {samp}")
+        print("  MSA 깊이는 MSA 모듈에만 듣는다. 이것도 안 되면 커널이나 토큰 수다.")
 else:
     print("  누락 없음 — 파싱으로 넘어가면 된다.")
 
