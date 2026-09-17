@@ -1763,8 +1763,9 @@ if len(R_ctrl):
     if top >= 0.7:
         print(f"\n  최고 {top:.3f} >= 0.70 -> 파이프라인 검증 통과. 아래 결과를 그대로 해석해도 된다.")
     else:
-        print(f"\n  ⚠ 최고 {top:.3f} < 0.70 -> paired MSA 깊이가 부족하다는 뜻이다.")
-        print("     아래 스크리닝 결과 전체의 신뢰도를 낮춰 해석하고, Track B 결과를 주로 본다.")
+        print(f"\n  ⚠ 최고 {top:.3f} < 0.70 -> 검증 실패. 원인은 아직 모른다.")
+        print("     깊이 부족일 수도, 모델이 이 계를 못 맞히는 것일 수도 있다.")
+        print("     CELL 24b 로 둘을 가른 뒤에 해석할 것. 그 전까지 아래 순위표는 인용 금지.")
 else:
     print("  ⚠ 대조군 결과가 없다. CELL 05 에 CooC/CooT/CooJ 서열을 넣고")
     print("     CELL 07 -> 16 -> 21 -> 22 를 다시 돌려야 검증된 결과가 된다.")
@@ -1787,6 +1788,71 @@ try:
     plt.tight_layout(); plt.show()
 except Exception as e:
     print(f"[그림 생략] matplotlib 사용 불가: {type(e).__name__}: {e}")
+```
+
+---
+
+## CELL 24b — Part 6d. 양성대조군 실패의 원인 분해
+
+```python
+# =============================================================================
+# CELL 24b | Part 6-4. 대조군이 왜 떨어졌나 — 깊이 탓인가, 모델 탓인가
+#   CELL 24 는 0.7 미만이면 "paired MSA 깊이 부족"이라고 출력한다. 그건 가설이지
+#   진단이 아니다. 깊이가 충분한데도 낮다면 원인은 다른 데 있고, 그때는 Track A
+#   순위표를 후보 지명 근거로 쓸 수 없다. 여기서 그 둘을 가른다.
+#     (1) 대조군 쌍의 paired MSA 깊이가 실제로 얕은가
+#     (2) 대조군이 스크리닝 전체에서 몇 등인가          <- 결정적인 숫자
+#     (3) 대조군보다 높은 쌍과 낮은 쌍의 깊이가 다른가  <- 랭킹이 깊이의 그림자인가
+# =============================================================================
+need(((DIR["table"]/"trackA_RF2PPI_all_pairs.csv").exists(), "CELL 23 을 먼저 돌릴 것"))
+_A    = pd.read_csv(DIR["table"]/"trackA_RF2PPI_all_pairs.csv")
+_best = pd.read_csv(DIR["table"]/"trackA_RF2PPI_ranked.csv", index_col=0)
+_sd   = pd.read_csv(DIR["table"]/"paired_msa_stats.csv").query("status=='ok'")
+_dep  = {(r.bait, r.prey): r.paired_depth for r in _sd.itertuples(index=False)}
+
+# ---- (1) 대조군 쌍의 깊이 ----
+_ctrl = _A[_A.prey == BAIT_KEY].copy()
+_ctrl["paired_depth"] = [_dep.get((b, p)) for b, p in zip(_ctrl.bait, _ctrl.prey)]
+print("=== (1) 양성대조군 쌍 ===")
+print(_ctrl[["bait", "prey", "mean", "sd", "paired_depth"]].round(3).to_string(index=False))
+_q = _sd.paired_depth
+print(f"\n스크리닝 쌍 깊이 분포: 중앙값 {_q.median():.0f} "
+      f"(25% {_q.quantile(.25):.0f} / 75% {_q.quantile(.75):.0f} / 최대 {_q.max():.0f})")
+
+# ---- (2) 대조군의 순위 ----
+_scr   = _best.dropna(subset=["mean"])
+_top   = float(_ctrl["mean"].max())
+_above = int((_scr["mean"] > _top).sum())
+print(f"\n=== (2) 대조군 순위 ===")
+print(f"대조군 최고점 {_top:.3f}")
+print(f"이보다 높은 점수를 받은 스크리닝 후보: {_above} / {len(_scr)} 개 "
+      f"({100*_above/len(_scr):.1f}%)")
+print("알려진 참(true positive)이 무작위 대사효소들 아래에 깔리면, 그 위의 순위는")
+print("'붙을 가능성' 순서가 아니다.")
+
+# ---- (3) 랭킹이 깊이의 그림자인가 ----
+_hi = _scr[_scr["mean"] > _top].paired_depth.dropna()
+_lo = _scr[_scr["mean"] <= _top].paired_depth.dropna()
+print(f"\n=== (3) 깊이 비교 ===")
+print(f"대조군보다 높은 쌍 {len(_hi)}개: 깊이 중앙값 {_hi.median():.0f}")
+print(f"대조군보다 낮은 쌍 {len(_lo)}개: 깊이 중앙값 {_lo.median():.0f}")
+print("두 값이 크게 벌어지면 순위는 생물학이 아니라 MSA 깊이를 재고 있는 것이다.")
+
+# ---- 판정 ----
+_cd = _ctrl["paired_depth"].max()
+print("\n=== 판정 ===")
+if pd.isna(_cd):
+    print("대조군 깊이를 못 읽었다. paired_msa_stats.csv 의 bait/prey 이름을 확인할 것.")
+elif _cd < 200:
+    print(f"대조군 깊이 {_cd:.0f} — 얕다. 낮은 점수가 깊이 탓일 수 있다.")
+    print("Track A 를 접기 전에 유전체 DB 를 넓혀 깊이를 올리는 쪽을 먼저 시도한다.")
+else:
+    print(f"대조군 깊이 {_cd:.0f} — 얕지 않다. 깊이로는 설명되지 않는다.")
+    print("즉 RF2-PPI 가 이 계에서 '알려진 참'을 위로 올리지 못한다는 뜻이다.")
+    print("→ Track A 순위는 후보 지명 근거로 쓸 수 없다. 이 점수를 증거로 인용하지 말 것.")
+    print("  상위 40 표는 '계산은 끝났으나 검증 실패' 상태로 남긴다.")
+    print("  (되살리려면 대조군을 맞히는 설정 — 다른 bait 절편, 다른 컷오프, 다른")
+    print("   MSA 페어링 — 을 먼저 찾아야 한다. 찾기 전 결과는 해석 대상이 아니다.)")
 ```
 
 ---
@@ -2618,6 +2684,295 @@ print("   - 균주별 ipTM 평균이 비슷하면 '금속 자리 보유'만으�
 print("   - BL21 이 뚜렷이 높아야 실험 관찰과 방향이 맞는다.")
 print("   - 표본이 작다 (BL21 27 / Y19 30 / MG1655 21). 차이를 단정하지 말 것.")
 print("   - diffusion_samples=1 이라 각 값은 단일 표본이다. 재현성 정보가 없다.")
+```
+
+---
+
+## CELL 28a-11 — Part 7d-11. 같은 단백질끼리 짝지어 비교 (직교체 페어링)
+
+```python
+# =============================================================================
+# CELL 28a-11 | 균주 평균이 아니라 '같은 단백질의 균주 간 차이'를 본다
+#   CELL 28a-10 은 균주별 평균을 냈다. 그런데 세 균주의 금속모티프 단백질 목록은
+#   구성이 다르다 (BL21 27 / Y19 30 / MG1655 20). 구성이 다른 집합의 평균 차이는
+#   균주 차이인지 목록 차이인지 구분되지 않는다.
+#   여기서는 서열로 직교체를 짝지어 두 가지를 얻는다:
+#     (a) 서열이 사실상 동일한 짝의 |Δ ipTM| = 이 측정의 잡음 바닥
+#         같은 서열이면 Boltz 입력이 같다. 남는 차이는 전부 diffusion 표본 오차다.
+#         diffusion_samples=1 로 돌렸으므로 반복이 없다. 동일 서열 짝이 현재
+#         가진 유일한 잡음 추정치다.
+#     (b) 그 잡음 바닥을 넘는 균주 차이가 실제로 있는가
+#   (a) 를 모르면 (b) 를 말할 수 없다. 0.68 대 0.40 이 의미 있는 차이인지는
+#   잡음이 0.05 인지 0.30 인지에 달려 있다.
+# =============================================================================
+need(((DIR["table"]/"metal_motif_3strain_boltz.csv").exists(), "CELL 28a-10 을 먼저 돌릴 것"))
+import difflib, urllib.request
+
+A3 = pd.read_csv(DIR["table"]/"metal_motif_3strain_boltz.csv")
+
+def _read_fasta(path):
+    out, nm, buf = {}, None, []
+    for l in open(path, errors="ignore"):
+        if l.startswith(">"):
+            if nm: out[nm] = "".join(buf)
+            nm, buf = l[1:].split()[0], []
+        else: buf.append(l.strip())
+    if nm: out[nm] = "".join(buf)
+    return out
+
+# MG1655 서열은 CELL 28a-9 와 같은 출처(UniProt)에서 받아 캐시해 둔다.
+_cache = DIR["table"]/"mg1655_metal_motif.faa"
+if not _cache.exists():
+    _acc = sorted(A3[A3.strain == "MG1655"].protein.astype(str).unique())
+    _url = ("https://rest.uniprot.org/uniprotkb/stream?query="
+            + "%20OR%20".join(f"accession:{a}" for a in _acc) + "&format=fasta")
+    with urllib.request.urlopen(_url, timeout=120) as r:
+        _fa = r.read().decode()
+    _cache.write_text("\n".join((">" + l.split("|")[1]) if l.startswith(">") else l
+                                for l in _fa.splitlines()))
+    print(f"MG1655 서열 {_fa.count('>')}개 캐시 -> {_cache}")
+
+POOL = {"BL21":   _read_fasta(ASSET["faa_bl21"]),
+        "Y19":    _read_fasta(ASSET["faa_y19"]),
+        "MG1655": _read_fasta(_cache)}
+have_seq = {st: {p: POOL[st][p] for p in A3[A3.strain == st].protein.astype(str)
+                 if p in POOL[st]} for st in POOL}
+for st in ["BL21", "Y19", "MG1655"]:
+    print(f"{st}: 서열 확보 {len(have_seq[st])} / 예측 {int((A3.strain == st).sum())}")
+
+def best_match(seq, pool, cutoff=0.80):
+    """길이로 1차 거르고 quick_ratio(상한)로 2차 거른 뒤 정확히 잰다."""
+    best, bid = 0.0, None
+    for pid, s in pool.items():
+        if abs(len(s) - len(seq)) / max(len(s), len(seq)) > 0.25:
+            continue
+        sm = difflib.SequenceMatcher(None, seq, s)
+        if sm.quick_ratio() < cutoff:      # quick_ratio 는 ratio 의 상한이다
+            continue
+        r = sm.ratio()
+        if r > best: best, bid = r, pid
+    return bid, best
+
+IPTM = {(r.strain, str(r.protein)): r.iptm for r in A3.itertuples(index=False)}
+DESC = {}
+if "hdr2desc" in dir():
+    DESC = hdr2desc
+
+rows = []
+for pid, sq in have_seq["BL21"].items():
+    row = {"BL21": pid, "len": len(sq), "BL21_iptm": IPTM.get(("BL21", pid)),
+           "desc": str(DESC.get(pid, ""))[:50]}
+    for st in ["MG1655", "Y19"]:
+        m, r = best_match(sq, have_seq[st])
+        row[st] = m
+        row[f"{st}_id"] = round(r, 3) if m else None
+        row[f"{st}_iptm"] = IPTM.get((st, m)) if m else None
+    rows.append(row)
+P = pd.DataFrame(rows).sort_values("BL21_iptm", ascending=False)
+P.to_csv(DIR["table"]/"metal_motif_ortholog_paired.csv", index=False, encoding="utf-8-sig")
+
+# ---- (a) 잡음 바닥 ----
+NOISE = None
+_same = P[(P.MG1655_id >= 0.98) & P.MG1655_iptm.notna()].copy()
+_same["dIPTM"] = (_same.BL21_iptm - _same.MG1655_iptm).abs()
+print(f"\n=== (a) 서열 98% 이상 일치하는 BL21-MG1655 짝: {len(_same)}개 ===")
+if len(_same):
+    print(_same[["BL21", "MG1655", "MG1655_id", "BL21_iptm", "MG1655_iptm",
+                 "dIPTM", "desc"]].round(3).to_string(index=False))
+    NOISE = float(_same.dIPTM.median())
+    print(f"\n|Δ ipTM| 중앙값 {NOISE:.3f} / 평균 {_same.dIPTM.mean():.3f} / "
+          f"최대 {_same.dIPTM.max():.3f}")
+    print("   ← 입력이 사실상 같은데도 이만큼 벌어진다. 이보다 작은 균주 차이는")
+    print("     해석 대상이 아니다. (Boltz 는 diffusion 이라 비결정적이다)")
+else:
+    print("동일 서열 짝이 없다. 잡음 바닥을 못 구했으므로 (b) 는 판정 보류.")
+
+# ---- (b) 짝이 없는 BL21 단백질 ----
+_only = P[P.MG1655.isna()]
+print(f"\n=== (b) MG1655 목록에 짝이 없는 BL21 단백질: {len(_only)}개 ===")
+print("※ '유전자가 없다'가 아니라 'MG1655 folddisco 목록에 안 잡혔다'는 뜻이다.")
+print("  (이전 검토에서 이들 다수가 대장균 공통 유전자로 확인됐다 — 검출 차이다)")
+if len(_only):
+    print(_only[["BL21", "len", "BL21_iptm", "Y19", "Y19_id", "Y19_iptm",
+                 "desc"]].round(3).to_string(index=False))
+
+# ---- 판정 ----
+print("\n=== 판정 ===")
+if NOISE is None:
+    print("잡음 바닥 미측정 — CELL 28a-12 로 반복 측정을 돌린 뒤 다시 본다.")
+else:
+    _gap = A3.groupby("strain").iptm.mean()
+    _spread = float(_gap.max() - _gap.min())
+    print(f"균주 평균 ipTM 최대-최소 차이 {_spread:.3f}  vs  잡음 바닥 {NOISE:.3f}")
+    if _spread <= NOISE:
+        print("→ 균주 간 차이가 잡음보다 작다. 세 균주를 구분할 신호가 없다.")
+        print("  '금속 모티프 보유 + ChCODH2 와의 ipTM' 만으로는 BL21 을 못 고른다.")
+    else:
+        print("→ 균주 차이가 잡음보다 크다. 다만 표본이 20~30개라 아직 단정하지 말 것.")
+    print("  어느 쪽이든 다음 단계는 CELL 28a-12 (반복 측정 + 양성대조군) 다.")
+print("\n저장:", DIR["table"]/"metal_motif_ortholog_paired.csv")
+```
+
+---
+
+## CELL 28a-12 — Part 7d-12. Boltz 양성대조군 + 상위 후보 반복 측정 (백그라운드)
+
+```python
+# =============================================================================
+# CELL 28a-12 | Boltz 쪽에 처음으로 대조군을 물린다 + 오차막대를 만든다
+#   Track A 는 대조군이 있었고 그걸 틀렸다 (CELL 24b). 반면 Track B/C 의 Boltz 는
+#   대조군 자체가 없었다. 즉 ipTM 0.68 이 이 계에서 무슨 뜻인지 아직 모른다.
+#   CooC1-ChCODH2 는 문헌상 실제로 결합하는 쌍이다. 이것을 접어서 '맞는 답이
+#   몇 점을 받는가'를 먼저 정한다.
+#     대조군 ipTM 높음(>=0.6) -> 눈금을 믿고 그 선에서 후보를 자른다
+#     대조군 ipTM 낮음         -> 0.68 짜리 후보도 근거가 못 된다. 눈금이 안 통한다
+#   동시에 상위 후보를 diffusion_samples 5 로 다시 접어 표준편차를 얻는다.
+#   지금 값은 전부 단일 표본이라 0.68 과 0.40 의 차이가 잡음인지 알 수 없다.
+#
+#   비용: 쌍당 약 1~2분 (표본 5개라도 trunk 는 한 번만 돈다). 15쌍 = 30분 안쪽.
+# =============================================================================
+need((have("BAIT_KEY", "BAIT_ALL"), "CELL 07 을 먼저 돌릴 것"),
+     (have("have_seq"), "CELL 28a-11 을 먼저 돌릴 것 (서열 사전이 거기서 만들어진다)"))
+import yaml as _y
+
+REP_GPU      = 1      # RF2-PPI 가 끝났으면 1 이 비어 있다. nvidia-smi 로 확인하고 고칠 것
+REP_SAMPLES  = 5      # diffusion 표본 수 = 오차막대의 근거
+TOPN         = 4      # 균주별 상위 몇 개를 다시 접을지
+BOLTZ_MAXMSA = globals().get("BOLTZ_MAXMSA", 2048)
+MAX_TOTAL    = 1830
+
+bseq = BAIT_ALL[BAIT_KEY]
+rin  = DIR["boltz"]/"inputs_rep"; rin.mkdir(parents=True, exist_ok=True)
+for f in rin.glob("*.yaml"): f.unlink()
+
+def _yam(name, sq):
+    if len(bseq) + len(sq) > MAX_TOTAL:
+        print(f"  길이 초과 제외: {name} ({len(sq)}aa)"); return 0
+    (rin/f"{name}.yaml").write_text(_y.safe_dump({
+        "version": 1,
+        "sequences": [
+            {"protein": {"id": "A", "sequence": bseq}},
+            {"protein": {"id": "B", "sequence": sq}},
+            {"ligand":  {"id": "C", "ccd": "NI"}},
+        ]}, sort_keys=False))
+    return 1
+
+# ---- 1. 양성대조군: CooC1 / CooT / CooJ 중 서열이 있는 것 전부 ----
+n_ctrl = 0
+for k, sq in BAIT_ALL.items():
+    if k == BAIT_KEY or k.startswith("seg"):
+        continue
+    if not k.lower().startswith(("cooc", "coot", "cooj")):
+        continue
+    n_ctrl += _yam(f"CTRL-{k}", sq)
+print(f"양성대조군 {n_ctrl}개")
+if n_ctrl == 0:
+    print("  ⚠ BAIT_ALL 에 Coo 계열 서열이 없다. CELL 05 에 넣고 CELL 07 을 다시 돌릴 것.")
+    print("     대조군 없이 아래 후보 반복만 돌리면 눈금 문제는 그대로 남는다.")
+
+# ---- 2. 상위 후보: 균주별 TOPN ----
+A3 = pd.read_csv(DIR["table"]/"metal_motif_3strain_boltz.csv")
+n_cand = 0
+for st in ["BL21", "MG1655", "Y19"]:
+    for r in A3[A3.strain == st].nlargest(TOPN, "iptm").itertuples(index=False):
+        sq = have_seq.get(st, {}).get(str(r.protein))
+        if sq is None:
+            print(f"  서열 없음: {st}/{r.protein}"); continue
+        n_cand += _yam(f"{st}-{r.protein}", sq)
+print(f"상위 후보 {n_cand}개 (균주별 {TOPN})")
+
+_tot = n_ctrl + n_cand
+print(f"\n입력 {_tot}개 -> {rin}   표본 {REP_SAMPLES}개/쌍   GPU {REP_GPU}")
+
+script = f"""
+cd "{DIR['boltz']}"
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+CUDA_VISIBLE_DEVICES={REP_GPU} boltz predict inputs_rep \\
+  --out_dir out_rep \\
+  --use_msa_server \\
+  --max_msa_seqs {BOLTZ_MAXMSA} \\
+  --recycling_steps 3 \\
+  --diffusion_samples {REP_SAMPLES} \\
+  --output_format mmcif \\
+  --num_workers 2
+echo DONE_boltz_rep
+"""
+_busy = subprocess.run("pgrep -f '[b]oltz predict'", shell=True,
+                       capture_output=True, text=True).stdout.split()
+if _busy:
+    print(f"⚠ boltz 가 이미 돌고 있다 (pid {' '.join(_busy)}). 새로 띄우지 않았다.")
+elif _tot == 0:
+    print("⚠ 입력이 0개다. 띄우지 않았다.")
+elif not already(done("part7_boltz_rep", DIR["boltz"]/"out_rep"),
+                 "반복 측정 + 대조군", f"rm -rf {DIR['boltz']}/out_rep"):
+    sh_bg("part7_boltz_rep", script, env=CONDA_ENV_BOLTZ)
+```
+
+---
+
+## CELL 28a-13 — Part 7d-13. 반복 측정 집계 + 눈금 판정
+
+```python
+# =============================================================================
+# CELL 28a-13 | 표본 5개로 평균과 표준편차를 내고, 대조군으로 눈금을 정한다
+#   읽는 순서:
+#     1) 대조군 ipTM  — 이 계에서 '참'이 받는 점수
+#     2) 후보의 SD    — 단일 표본 값이 얼마나 흔들리는지
+#     3) 후보가 대조군 선을 넘는가, 그 차이가 SD 보다 큰가
+# =============================================================================
+need((done("part7_boltz_rep", DIR["boltz"]/"out_rep"), "CELL 28a-12 미완료 (CELL 15b 로 확인)"))
+rows = []
+for f in glob.glob(str(DIR["boltz"]/"out_rep"/"**"/"confidence_*.json"), recursive=True):
+    c  = json.load(open(f))
+    nm = re.sub(r"^confidence_", "", Path(f).stem)
+    pair, _, _ = nm.rpartition("_model_")
+    rows.append({"pair": (pair or nm).split("__")[-1],
+                 "iptm": c.get("iptm"), "ptm": c.get("ptm"),
+                 "complex_plddt": c.get("complex_plddt"),
+                 "ligand_iptm": c.get("ligand_iptm")})
+D = pd.DataFrame(rows)
+G = (D.groupby("pair")
+       .agg(n=("iptm", "size"), iptm_mean=("iptm", "mean"), iptm_sd=("iptm", "std"),
+            iptm_min=("iptm", "min"), iptm_max=("iptm", "max"),
+            plddt=("complex_plddt", "mean"))
+       .sort_values("iptm_mean", ascending=False).round(3))
+G["kind"] = ["대조군" if p.startswith("CTRL-") else p.split("-")[0] for p in G.index]
+G.to_csv(DIR["table"]/"boltz_replicate_summary.csv", encoding="utf-8-sig")
+print(G.to_string())
+
+_ctrl = G[G.kind == "대조군"]
+_cand = G[G.kind != "대조군"]
+print("\n=== 1) 눈금 ===")
+if len(_ctrl):
+    _c = float(_ctrl.iptm_mean.max())
+    print(f"양성대조군 최고 ipTM {_c:.3f} (SD {float(_ctrl.iptm_sd.max()):.3f})")
+    if _c >= 0.6:
+        print("→ 눈금이 통한다. 알려진 참이 높은 점수를 받았다.")
+        print(f"   이 선({_c:.2f}) 위의 후보만 다음 단계로 넘긴다.")
+    else:
+        print("→ ⚠ 알려진 참조차 낮다. ipTM 으로 이 계의 결합을 못 가린다.")
+        print("   Track B/C 의 ipTM 순위를 '결합 가능성'으로 읽으면 안 된다.")
+        print("   Track A 에 이어 두 번째 대조군 실패다. 계산으로 후보를 좁히는")
+        print("   현재 설계 자체를 다시 봐야 한다.")
+else:
+    print("대조군 결과 없음 — Coo 계열 서열을 넣고 CELL 28a-12 를 다시 돌릴 것.")
+
+print("\n=== 2) 단일 표본의 흔들림 ===")
+if len(_cand):
+    print(f"후보 SD: 중앙값 {_cand.iptm_sd.median():.3f} / 최대 {_cand.iptm_sd.max():.3f}")
+    print(f"후보 (max-min): 중앙값 {(_cand.iptm_max - _cand.iptm_min).median():.3f}")
+    print("   ← CELL 28a-10 의 표는 전부 표본 1개다. 이 폭 안의 순위 차이는 무의미하다.")
+
+print("\n=== 3) 대조군 대비 ===")
+if len(_ctrl) and len(_cand):
+    _c = float(_ctrl.iptm_mean.max())
+    _win = _cand[_cand.iptm_mean - _cand.iptm_sd.fillna(0) > _c]
+    print(f"대조군보다 (평균-SD) 기준으로도 높은 후보: {len(_win)}개")
+    if len(_win):
+        print(_win.to_string())
+    else:
+        print("없다. 지금 후보 중 알려진 참을 넘어서는 것은 없다.")
+print("\n저장:", DIR["table"]/"boltz_replicate_summary.csv")
 ```
 
 ---
