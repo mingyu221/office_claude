@@ -2700,8 +2700,22 @@ need((have("NIP"), "CELL 28a-7 을 먼저 돌릴 것"))
 import math
 from collections import Counter
 
-_M = set(pd.read_csv(DIR["table"]/"folddisco_metal_motif.csv").protein) \
-     if (DIR["table"]/"folddisco_metal_motif.csv").exists() else set()
+# folddisco 금속 목록과의 대조. prey 는 'Y19-AKE60400.1' 처럼 균주 접두사가 붙어
+# 있고, folddisco_metal_motif.csv 는 crosswalk 이 붙은 것만 담아 MG1655 가 0건이다.
+# 둘 다 무시하면 out_cmp 행이 전부 False 로 찍힌다 — 실제로 그랬다.
+# 균주별 (strain, key) 집합으로 비교한다.
+_mp = DIR["table"]/"motif_metal_3strain.csv"
+_MSET = set()
+if _mp.exists():
+    _m3 = pd.read_csv(_mp)
+    _MSET = set(zip(_m3.strain.astype(str), _m3.key.astype(str)))
+else:
+    print("⚠ motif_metal_3strain.csv 없음 (CELL 34) — folddisco 대조를 건너뛴다")
+def _in_motif(prey):
+    t = str(prey)
+    st, key = (t.split("-", 1) if t.split("-", 1)[0] in ("Y19", "MG1655", "BL21")
+               else ("BL21", t))
+    return (st, key) in _MSET
 CUT_NI = globals().get("CUT_NI", 3.5)
 TIGHT  = 2.6      # Ni-S 2.2 / Ni-N 2.1 근처. 이보다 멀면 배위로 세지 않는다
 
@@ -2734,12 +2748,16 @@ for _, r in NIP[NIP.get("B_배위", 0) > 0].iterrows():
     rows.append({"grade": grade, "set": r["set"], "prey": r["prey"],
                  "n_donor": len(donors), "Cys": ncys, "His": nhis, "Asp/Glu": nacid,
                  "min_dist": donors[0][0] if donors else None,
-                 "folddisco_metal": r["prey"] in _M,
+                 "strain": (str(r["prey"]).split("-", 1)[0]
+                            if str(r["prey"]).split("-", 1)[0] in ("Y19", "MG1655") else "BL21"),
+                 "folddisco_metal": _in_motif(r["prey"]),
                  "donors": " ".join(f"{c}{s}" for _, c, s, _ in donors),
                  "why": why, "desc": str(r.get("desc", ""))[:55]})
 
 G = pd.DataFrame(rows).sort_values(["grade", "Cys", "min_dist"],
                                    ascending=[True, False, True])
+if not _MSET:
+    G["folddisco_metal"] = None
 G.to_csv(DIR["table"]/"ni_site_grade.csv", index=False, encoding="utf-8-sig")
 pd.set_option("display.max_colwidth", 60); pd.set_option("display.width", 220)
 print(G.to_string(index=False))
@@ -3467,13 +3485,23 @@ MET_SET = set(pd.read_csv(DIR["table"]/"folddisco_metal_motif.csv").protein) \
           if (DIR["table"]/"folddisco_metal_motif.csv").exists() else set()
 
 # ---------- (1) recall ----------
-A_ = G[G.grade == "A"]
-print("=== (1) Cys4 자리를 가진 단백질 중 folddisco 가 잡은 비율 ===")
-print(A_[["prey", "donors", "folddisco_metal"]].to_string(index=False))
-_hit = int(A_.folddisco_metal.sum())
-print(f"\nrecall = {_hit} / {len(A_)} = {100*_hit/max(1,len(A_)):.0f}%")
-print("  표본이 작지만 방향은 분명하다. Cys4 자리의 대부분을 못 잡는다.")
-print("  이유는 4-7 과 같다 — 질의가 A112/A114 라는 간격 하나만 찾는다.")
+A_ = G[G.grade == "A"].copy()
+print("=== (1) Cys4 자리를 가진 단백질을 folddisco 가 잡았는가 ===")
+print(A_[["strain", "prey", "donors", "folddisco_metal"]].to_string(index=False))
+_miss = A_[A_.folddisco_metal == False]
+print(f"\nfolddisco 금속 목록에 없던 것: {len(_miss)} / {len(A_)}")
+if len(_miss):
+    print(_miss[["strain", "prey", "donors"]].to_string(index=False))
+print("""
+※ 이 숫자를 recall(재현율)로 부르지 말 것. 세 가지 이유로 비율이 성립하지 않는다.
+   1. 표본이 한 자릿수다. 신뢰구간이 사실상 0~90% 다.
+   2. 분모가 정답이 아니다. Boltz 의 Cys4 배치는 또 다른 모델의 예측이지 실측이
+      아니다. 이건 재현율이 아니라 두 방법의 '일치도'다.
+   3. 분모가 편향돼 있다. out_focus 27개와 out_cmp 51개는 전부 folddisco 히트로
+      만든 입력이다. 분모가 folddisco 쪽으로 기울어 일치도가 실제보다 높게 나온다.
+   말할 수 있는 것: 질의 간격(A112/A114)과 다른 Cys4 자리가 실재하고 그것들이
+   목록에 없었다. 사각지대가 있다는 것은 확실하고, 크기는 모른다.
+   크기를 알려면 아래 (3) 재질의로 늘어나는 수를 봐야 한다.""")
 
 # ---------- (2) 알려진 금속 단백질이 29개 안에 있나 ----------
 def read_hdr(path):
