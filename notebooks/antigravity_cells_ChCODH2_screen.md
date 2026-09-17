@@ -7277,6 +7277,9 @@ if DIMER_MODE == "auto":
 #   예약 20.81 vs 할당 17.52 = 3.3GB 파편화. expandable_segments 로 줄인다.
 # =============================================================================
 print("\n" + "=" * 100); print(f"### STEP 1 | 전체 스크린  (mode = {DIMER_MODE})"); print("=" * 100)
+# 할당자 옵션은 환경의 torch 버전을 따른다. expandable_segments 는 2.1+ 전용이라
+# rf2ppi(1.x) 에 주면 CUDA 초기화에서 죽는다 — 실패가 OOM 처럼 보여 상한을 망친다.
+ALLOC_OPT = "max_split_size_mb:512"
 print(f"chain1 = {BAIT_KEY} x2 = {2*LB}"
       f"{' , chain2 = prey x2' if DIMER_MODE=='both' else ' , chain2 = prey (원본)'}")
 sh(f"df -h {BASE} | tail -1", check=False)
@@ -7392,17 +7395,22 @@ else:
         (PB/f"p{v}").write_text(f"{rev[v]} {2*LB}\n")
         plines.append(
             f'if [ ! -s "p{v}.log" ]; then CUDA_VISIBLE_DEVICES=$G python "{PROBE}" '
-            f'-list_fn p{v} -model_file "{MODEL}" || echo "OOM p{v}"; fi')
+            f'-list_fn p{v} -model_file "{MODEL}" 2> "p{v}.err"; fi')
     _probe_sh = DIR["script"]/"part9_probe.sh"
+    # expandable_segments 는 PyTorch 2.1+ 옵션이다. rf2ppi 환경은 1.x 라
+    # 이 값을 주면 CUDA 초기화에서 죽는다 — L 과 무관하게 전부 실패한다.
+    # 1.x/2.x 양쪽에서 유효한 건 max_split_size_mb 다.
     _probe_sh.write_text("#!/usr/bin/env bash\n"
                          'source "$(conda info --base)/etc/profile.d/conda.sh"\n'
                          f"conda activate {CONDA_ENV_RF2}\n"
-                         "export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True\n"
+                         f"export PYTORCH_CUDA_ALLOC_CONF={ALLOC_OPT}\n"
                          f"G={_GID}\ncd \"{PB}\"\n" + "\n".join(plines) + "\n")
     _probe_sh.chmod(0o755)
     print("  쌍당 1회, 모델 로딩 포함 약 1분씩. 죽는 지점을 직접 본다.")
     sh(f'bash "{_probe_sh}"', check=False)
-    ok = []
+    # 실패를 한 덩어리로 "OOM" 이라 부르면 환경 오류가 카드 한계로 둔갑한다.
+    # stderr 를 읽어 메모리 부족인지 그 밖의 오류인지 가른다.
+    ok, broken = [], []
     for v in picks:
         lg, good = PB/f"p{v}.log", False
         if lg.exists():
@@ -7411,10 +7419,22 @@ else:
                 if len(q) >= 2:
                     try: float(q[1]); good = True
                     except ValueError: pass
-        ok.append((v, good))
-        print(f"  L={v:5d}  {'통과' if good else 'OOM'}")
+        errf = PB/f"p{v}.err"
+        err = errf.read_text(errors="ignore") if errf.exists() else ""
+        if good:                      st = "통과"
+        elif "out of memory" in err.lower(): st = "OOM"
+        elif err.strip():             st = "오류"; broken.append((v, err))
+        else:                         st = "실행안됨"; broken.append((v, "(로그·stderr 둘 다 비어 있음)"))
+        ok.append((v, good, st))
+        print(f"  L={v:5d}  {st}")
+    if broken:
+        print("\n  ⚠ 메모리와 무관한 실패가 있다. 상한을 정할 수 없다.")
+        print("  " + "\n  ".join(broken[0][1].strip().splitlines()[-4:]))
+        print("\n  환경 문제를 먼저 고칠 것. 이 상태로 상한을 정하면 멀쩡한 쌍을")
+        print("  '카드가 못 버틴다'로 잘못 분류한다.")
+        raise SystemExit
     L_MAX = KNOWN_OK
-    for v, good in ok:            # 아래에서부터 연속으로 통과한 데까지만 인정
+    for v, good, _st_ in ok:      # 아래에서부터 연속으로 통과한 데까지만 인정
         if good: L_MAX = v
         else: break
     print(f"\n  => 이 카드의 L 상한 = {L_MAX}")
@@ -7446,7 +7466,7 @@ for rep in range(1, N_REP_DIMER + 1):
 _SPP = 24.3 if DIMER_MODE == "both" else 18.3
 print(f"\n  총 {total}회 x {_SPP}s = 약 {total*_SPP/3600:.0f} 시간, 버킷 {len(cmds)}개")
 
-script = ("export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True\n"
+script = (f"export PYTORCH_CUDA_ALLOC_CONF={ALLOC_OPT}\n"
           f'cd "{DIR["rf2ppi"]}"\n' + "\n".join(cmds) + "\necho DONE_dimer_screen\n")
 _busy2 = subprocess.run("pgrep -af '[p]redict_list_PPI'", shell=True,
                         capture_output=True, text=True).stdout.strip()
