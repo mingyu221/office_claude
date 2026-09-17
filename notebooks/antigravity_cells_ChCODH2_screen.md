@@ -4262,6 +4262,140 @@ for cov in [4, 3]:
 
 ---
 
+## CELL 29j — ★ Track C 양성대조군: Y19 의 CooC 를 질의가 찾는가
+
+```python
+# =============================================================================
+# CELL 29j | 빠져 있던 대조군 — Folddisco 질의가 자기 부류를 찾는가
+#   Y19 는 Ni 클러스터를 가진 CODH 를 보유한다. 그러면 자기 CooC(또는 동등한 Ni
+#   삽입 단백질)를 갖고 있어야 한다. 우리 질의는 CooC1 자신의 A112/A114 기하다.
+#   그 질의가 Y19 의 CooC 를 못 찾는다면, 찾으려는 부류조차 못 찾는 것이다.
+#
+#   Track A 는 대조군 0.266 으로 실패했고 (CELL 24b),
+#   Track B 는 대조군 ipTM 0.300 으로 실패했다 (CELL 28a-13).
+#   Track C 만 대조군이 없었다. 여기서 세운다.
+#
+#   순서
+#     (1) 세 균주 프로테옴에서 CooC/CooS 상동체를 서열로 찾는다 (mmseqs)
+#     (2) 이름으로도 찾는다 (어노테이션에 CODH/Coo 가 있는지)
+#     (3) 찾은 단백질이 folddisco 금속 목록에 있는가 — 기본/넓힌 설정 모두
+#   판정
+#     있다  -> 질의가 작동한다. BL21/MG1655 의 음성은 진짜 음성이다
+#     없다  -> Track C 도 대조군 실패. 세 트랙 전부 자기 대조군을 못 맞힌다
+# =============================================================================
+need((have("ASSET", "sh"), "CELL 01 을 먼저 돌릴 것"))
+FAA = {"BL21": ASSET["faa_bl21"], "Y19": ASSET["faa_y19"], "MG1655": ASSET["faa_mg1655"]}
+SEQ, HDR = {}, {}
+for st, fa in FAA.items():
+    s_, h_, nm, buf = {}, {}, None, []
+    for l in open(fa, errors="ignore"):
+        if l.startswith(">"):
+            if nm: s_[nm] = "".join(buf)
+            t = l[1:].rstrip(); nm = t.split()[0]; buf = []
+            h_[nm] = t[len(nm):].strip()
+        else: buf.append(l.strip())
+    if nm: s_[nm] = "".join(buf)
+    SEQ[st], HDR[st] = s_, h_
+
+# ---- (1) 서열로 찾기 ----
+bf = DIR["seq"]/"baits.fasta"
+need((bf.exists(), "baits.fasta 가 없다 — CELL 07 을 먼저 돌릴 것"))
+baits, nm, buf = {}, None, []
+for l in open(bf, errors="ignore"):
+    if l.startswith(">"):
+        if nm: baits[nm] = "".join(buf)
+        nm, buf = l[1:].split()[0], []
+    else: buf.append(l.strip())
+if nm: baits[nm] = "".join(buf)
+CTRLQ = {k: v for k, v in baits.items()
+         if not k.startswith("seg") and (k.upper().startswith("COO") or "CODH" in k.upper())}
+print("질의로 쓸 bait:", {k: len(v) for k, v in CTRLQ.items()})
+
+qf = DIR["seq"]/"coo_controls.faa"
+qf.write_text("".join(f">{k}\n{v}\n" for k, v in CTRLQ.items()))
+_tmp = DIR["tmp"]/"coosearch"; _tmp.mkdir(parents=True, exist_ok=True)
+FMT = "query,target,fident,alnlen,qcov,tcov,evalue,bits"
+FOUND = {}
+print("\n=== (1) 서열 검색 (mmseqs, e<=1e-3) ===")
+for st in FAA:
+    out = DIR["search"]/f"coo_vs_{st}.m8"
+    if not (out.exists() and out.stat().st_size):
+        sh(f'mmseqs easy-search "{qf}" "{FAA[st]}" "{out}" "{_tmp}" '
+           f'--format-output "{FMT}" -e 1e-3 -s 7.5 --threads {min(THREADS,16)} -v 1',
+           check=False)
+    if not (out.exists() and out.stat().st_size):
+        print(f"\n[{st}] 히트 없음"); continue
+    d = pd.read_csv(out, sep="\t", names=FMT.split(","))
+    d = d.sort_values("bits", ascending=False).groupby("query").head(3)
+    print(f"\n[{st}]")
+    for r in d.itertuples(index=False):
+        print(f"  {r.query:12s} -> {r.target:14s} fident {r.fident:.3f} "
+              f"qcov {r.qcov:.2f} e {r.evalue:.1e}  {HDR[st].get(r.target,'')[:55]}")
+        FOUND.setdefault(st, []).append(r.target)
+
+# ---- (2) 이름으로 찾기 ----
+PAT = r"carbon monoxide dehydrogenase|\bCooC\b|\bCooS\b|\bCooF\b|\bCooT\b|\bCooJ\b|CO dehydrogenase|acetyl-CoA synthase"
+print("\n=== (2) 이름 검색 ===")
+for st in FAA:
+    hits = [(k, v) for k, v in HDR[st].items() if re.search(PAT, v, re.I)]
+    print(f"\n[{st}] {len(hits)}개")
+    for k, v in hits[:10]:
+        print(f"   {k}  {v[:70]}")
+        FOUND.setdefault(st, []).append(k)
+
+# ---- (3) folddisco 가 그것을 잡았는가 ----
+print("\n" + "=" * 100)
+print("=== (3) folddisco 금속 목록에 있는가 ===")
+MSET = {}
+_p = DIR["table"]/"motif_metal_3strain.csv"
+if _p.exists():
+    m3 = pd.read_csv(_p)
+    for st in FAA: MSET[st] = set(m3[m3.strain == st].key.astype(str))
+    print("기본 설정 목록 크기:", {k: len(v) for k, v in MSET.items()})
+
+# 넓힌 설정(d=1.5,a=15) 결과도 본다
+xw = pd.read_csv(DIR["table"]/"id_crosswalk_struct_to_genbank.csv") \
+     if (DIR["table"]/"id_crosswalk_struct_to_genbank.csv").exists() else pd.DataFrame()
+xwm = xw.dropna(subset=["protein"]).set_index("tid")["protein"].to_dict() if len(xw) else {}
+WSET = {}
+for f in (DIR["folddisco"]/"widen").glob("mono2_d1.5_a15.0_*.tsv"):
+    st = f.stem.split("_")[-1]
+    if not f.stat().st_size: continue
+    d = pd.read_csv(f, sep="\t"); d.columns = [c.strip().lstrip("#") for c in d.columns]
+    d["stem"] = d.tid.apply(lambda x: Path(str(x)).stem)
+    WSET[st] = {str(k).split(",")[0] for k in d.stem.map(xwm) if pd.notna(k)}
+if WSET: print("넓힌 설정(d=1.5,a=15) 목록 크기:", {k: len(v) for k, v in WSET.items()})
+
+hit_any = False
+for st in FAA:
+    cands = sorted(set(FOUND.get(st, [])))
+    if not cands:
+        print(f"\n[{st}] CooC/CODH 상동체 자체가 없다 — 대조군으로 못 쓴다"); continue
+    print(f"\n[{st}] 상동체 {len(cands)}개")
+    for k in cands:
+        a = "O" if k in MSET.get(st, set()) else "."
+        b = "O" if k in WSET.get(st, set()) else "."
+        if a == "O" or b == "O": hit_any = True
+        print(f"   기본 {a} / 넓힘 {b}   {k}  {HDR[st].get(k,'')[:62]}")
+
+print("\n" + "=" * 100)
+print("=== 판정 ===")
+if hit_any:
+    print("질의가 CooC/CODH 계열을 잡는다. Track C 대조군 통과.")
+    print("→ BL21/MG1655 에서 그런 단백질이 안 나온 것은 진짜 음성이다.")
+else:
+    print("⚠ 질의가 CooC/CODH 계열을 하나도 못 잡는다. Track C 도 대조군 실패다.")
+    print("   Track A (0.266) · Track B (ipTM 0.300) 에 이어 세 번째다.")
+    print("   즉 지금 금속 모티프 목록은 'CooC 같은 단백질'을 찾은 결과가 아니라")
+    print("   'CooC1 의 두 Cys 간격과 우연히 같은 기하를 가진 단백질' 목록이다.")
+    print("   후보를 이 목록에서 고르는 근거가 약해진다 — 미팅에서 이 점을 말할 것.")
+    print("\n   다음 수: Y19 의 CooC 구조를 질의 템플릿으로 삼아 (CooC1 대신)")
+    print("   다시 검색한다. 같은 기능을 하는 두 단백질의 기하가 얼마나 다른지가")
+    print("   이 방법의 한계를 그대로 보여준다.")
+```
+
+---
+
 ## CELL 30 — Part 8b. ID crosswalk (구조 tid → GenBank protein ID)
 
 ```python
