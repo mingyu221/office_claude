@@ -4028,8 +4028,13 @@ if TGT and _g.exists():
                 v = "먼 상동체 — 이 유전자가 아니라 파라로그일 가능성 [균주 특이 유지]"
             elif r.qcov >= 0.90 and nfrag <= 2:
                 v = "어노테이션 누락 — 게놈에 온전히 있다 [후보 아님]"
-            elif r.qcov < 0.70 or nfrag >= 3:
-                v = "★ pseudogene 의심 — 같은 유전자가 조각나 있다"
+            elif r.qcov < 0.70:
+                # 잘린 것만 pseudogene 으로 본다. n_frag 는 번역 검색의 프레임
+                # 경계로도 늘어나므로 단독 근거로 쓰지 않는다 (실측: fident 1.000,
+                # qcov 0.933 인 온전한 유전자가 조각 4개로 나왔다).
+                v = f"★ pseudogene 의심 — 질의의 {r.qcov:.0%} 만 게놈에 있다"
+            elif nfrag >= 3:
+                v = f"온전하나 조각 {nfrag}개 — 번역 프레임 경계일 가능성. 좌표 확인"
             else:
                 v = "부분 일치 — 좌표를 직접 볼 것"
             rows.append({"protein": k, "genome": "있음", "verdict": v,
@@ -4042,6 +4047,10 @@ if TGT and _g.exists():
         G.to_csv(DIR["table"]/"cys4_genome_check.csv", index=False, encoding="utf-8-sig")
         print("\n=== 판정별 ===")
         print(G.verdict.value_counts().to_string())
+        print("\n★ 이 판정은 표시일 뿐 후보에서 빼지 않는다. 어떤 행도 삭제되지 않는다.")
+        print("  '어노테이션 누락' 조차 제외 사유가 아니다 — 이 계의 차이는 유전자")
+        print("  구성이 아니라 발현량 쪽이라는 것이 이미 확인됐으므로(4-12), MG1655 에")
+        print("  유전자가 있다는 사실이 후보를 배제하지 않는다.")
         print("\n※ 판정 기준: fident 가 낮으면(<0.80) 깨진 사본이 아니라 다른 유전자다.")
         print("  fident 가 높은데 qcov 가 낮거나 조각이 많으면 프레임시프트·IS 삽입을")
         print("  의심한다. n_frag 는 번역 검색의 프레임 경계로도 늘 수 있으니 참고값이다.")
@@ -5608,33 +5617,68 @@ for k in sorted(pool):
     })
 F = pd.DataFrame(rows)
 
-# ---- 근거 점수: 검증된 축만 센다 ----
-def evidence(r):
-    n = []
-    if pd.notna(r.metal_rmsd) and float(r.metal_rmsd) <= 1.0: n.append("모티프")
-    if r.ni_grade in ("A", "B"): n.append(f"Ni배위{r.ni_grade}")
-    if str(r.vs_MG1655) in ("strain-specific", "low-similarity"): n.append("균주특이")
-    if str(r.genome).startswith(("게놈에도 없음", "먼 상동체", "★")): n.append("게놈확인")
-    return "+".join(n)
-F["evidence"] = [evidence(r) for _, r in F.iterrows()]
-F["n_evidence"] = F.evidence.apply(lambda x: 0 if not x else len(x.split("+")))
-F = F.sort_values(["n_evidence", "ni_grade", "metal_rmsd"],
-                  ascending=[False, True, True], na_position="last")
+# ---- 등급제: 어떤 행도 제외하지 않는다. 우선순위만 낮춘다 ----
+#   필터링은 위험하다. 걸러낸 것이 답이면 되돌릴 방법이 없다. 그래서 감점만 하고
+#   전부 표에 남긴다. 감점 사유는 reason 열에 그대로 적는다.
+#
+#   가점 (검증된 축만)
+#     +3  Ni 배위 grade A (Cys4)   — 독립 실행 간 Δ 0.01~0.08 A. 가장 재현성 높다
+#     +2  Ni 배위 grade B (Cys3His)
+#     +2  금속 모티프 rmsd <= 1.0   — 직교체 간 Δ 중앙값 0.015 A
+#     +1  Cys4 재질의 히트
+#     +2  균주 특이 (프로테옴)      — MG1655 에 상동체 없음/멂
+#     +1  게놈에서도 확인           — 어노테이션 문제가 아님
+#   감점 (제외가 아니라 강등)
+#     -2  pLDDT < 70               — 기하 자체가 예측이 아니다
+#     -1  MG1655 에 온전한 유전자   — 균주 축의 근거가 없다. 생화학 근거는 남는다
+#     -1  Ni 배위 grade D / 없음
+#   ※ PPI 점수(rf2ppi, boltz_iptm)는 가점에도 감점에도 쓰지 않는다. 둘 다 자기
+#     양성대조군에서 떨어졌다 (0.266 / ipTM 0.300).
+def score_row(r):
+    pts, why = 0, []
+    if r.ni_grade == "A":            pts += 3; why.append("+3 Ni배위 Cys4")
+    elif r.ni_grade == "B":          pts += 2; why.append("+2 Ni배위 Cys3His")
+    elif r.ni_grade in ("C", "D"):   pts -= 1; why.append("-1 Ni배위 약함")
+    if pd.notna(r.metal_rmsd) and float(r.metal_rmsd) <= 1.0:
+        pts += 2; why.append(f"+2 금속모티프 {float(r.metal_rmsd):.3f}A")
+    if isinstance(r.cys4_query, str) and r.cys4_query:
+        pts += 1; why.append("+1 Cys4 재질의")
+    if str(r.vs_MG1655) in ("strain-specific", "low-similarity") or \
+       str(r.vs_MG1655).startswith(("BL21 특이", "검출 차이")):
+        pts += 2; why.append(f"+2 균주특이({r.vs_MG1655})")
+    g = str(r.genome)
+    if g.startswith(("게놈에도 없음", "★")):
+        pts += 1; why.append("+1 게놈확인")
+    elif g.startswith("게놈에 온전히"):
+        pts -= 1; why.append("-1 MG1655 에 유전자 온전")
+    if r.plddt_ok is False:
+        pts -= 2; why.append(f"-2 pLDDT {r.struct_plddt:.0f} (<70)")
+    return pts, " / ".join(why)
+
+_sc = [score_row(r) for _, r in F.iterrows()]
+F["score"]  = [x[0] for x in _sc]
+F["reason"] = [x[1] for x in _sc]
+F["tier"] = pd.cut(F.score, bins=[-99, 0, 2, 4, 6, 99],
+                   labels=["E", "D", "C", "B", "A"]).astype(str)
+F = F.sort_values(["score", "metal_rmsd"], ascending=[False, True], na_position="last")
 F.to_csv(T/"FINAL_candidates.csv", index=False, encoding="utf-8-sig")
 
 pd.set_option("display.max_rows", None); pd.set_option("display.width", 250)
-pd.set_option("display.max_colwidth", 45)
-print("\n" + "=" * 120)
-print("=== 근거 2개 이상 ===")
-_top = F[F.n_evidence >= 2]
-print(_top.drop(columns=["ni_donors"]).to_string(index=False) if len(_top) else "  없음")
-print("\n=== 근거 1개 (상위 20) ===")
-print(F[F.n_evidence == 1].head(20)[
-    ["protein", "evidence", "metal_rmsd", "ni_grade", "vs_MG1655",
-     "struct_plddt", "desc"]].to_string(index=False))
-print(f"\n=== 근거 개수 분포 ===")
-print(F.n_evidence.value_counts().sort_index(ascending=False).to_string())
-print(f"\n저장: {T/'FINAL_candidates.csv'}  (전체 {len(F)}개)")
+pd.set_option("display.max_colwidth", 42)
+COLS = ["tier", "score", "protein", "ni_grade", "metal_rmsd", "vs_MG1655",
+        "genome", "struct_plddt", "desc"]
+print("\n" + "=" * 130)
+print(f"=== 전체 {len(F)}개 — 제외된 행 없음 ===")
+print(F[COLS].to_string(index=False))
+print("\n=== 등급 분포 ===")
+print(F.tier.value_counts().reindex(["A","B","C","D","E"]).fillna(0).astype(int).to_string())
+print("\n=== 상위 등급의 감점·가점 내역 ===")
+for _, r in F[F.tier.isin(["A", "B"])].iterrows():
+    print(f"\n[{r.tier}] {r.protein}  score {r.score}")
+    print(f"    {r.desc}")
+    print(f"    {r.reason}")
+print(f"\n저장: {T/'FINAL_candidates.csv'}")
+print("\n※ 감점은 제외가 아니다. E 등급도 표에 그대로 있고, 실험에서 뒤집힐 수 있다.")
 print("\n※ evidence 에 PPI 점수는 들어가지 않는다. rf2ppi 는 대조군 실패,")
 print("  boltz_iptm 은 직교체 간 잡음 0.102(최대 0.309)로 전체 폭 0.485 의 21~64%.")
 print("  둘 다 열로만 싣는다.")
