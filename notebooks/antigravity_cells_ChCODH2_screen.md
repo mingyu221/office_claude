@@ -4043,6 +4043,117 @@ elif TGT:
 
 ---
 
+## CELL 29h — 검색 허용폭을 풀고(넓게) 4잔기 전부 맞은 것만 남긴다(좁게)
+
+```python
+# =============================================================================
+# CELL 29h | 원래 의도대로 — 2잔기로 넓게, 4잔기로 좁게
+#   --help 로 드러난 사실 셋:
+#     -d/--distance [0.5] · -a/--angle [5.0]  검색(해시) 단계 허용폭. 진짜 병목이다.
+#     --covered-node [0]                       질의 잔기 중 몇 개가 맞아야 보고할지.
+#                                              기본 0 이라 4잔기 질의도 2개만 맞으면
+#                                              보고된다. dimer4 가 mono2 와 같았던 이유.
+#     --rmsd [no limit]                        기본이 제한 없음. 우리가 1.0 을 준 것이
+#                                              오히려 필터를 추가한 셈이었다.
+#   그래서:
+#     1단계  mono2 + 넉넉한 -d/-a       -> 후보를 크게 늘린다
+#     2단계  dimer4 + --covered-node 4  -> 네 잔기가 모두 맞은 것만 남긴다
+#   CooC1 은 호모다이머이고 A112/A114 가 반대편 것과 계면에서 Cys4 를 이룬다.
+#   dimer4 는 그 자신의 기하이므로 HslO/GspE 템플릿을 빌릴 필요가 없다.
+# =============================================================================
+need((have("ASSET", "sh"), "CELL 01 을 먼저 돌릴 것"))
+PDBQ = Path(globals().get("TARGET", ASSET["cooc1_pdb"]))
+IDX  = {"BL21": ASSET["fd_idx_bl21"], "Y19": ASSET["fd_idx_y19"], "MG1655": ASSET["fd_idx_mg"]}
+FD   = ASSET["folddisco"]
+outd = DIR["folddisco"]/"widen"; outd.mkdir(exist_ok=True)
+FMT  = "tid,idf,min_rmsd,nres,plddt,node_count,matching_residues"
+
+# (d, angle) 조합. 기본은 (0.5, 5.0)
+GRID  = [(0.5, 5.0), (1.0, 10.0), (1.5, 15.0)]
+MONO  = "A112,A114"
+DIMER = "A112,A114,B112,B114"
+
+def run(tag, q, strain, d, a, extra=""):
+    out = outd/f"{tag}_d{d}_a{a}_{strain}.tsv"
+    if not (out.exists() and out.stat().st_size):
+        sh(f'"{FD}" query -p "{PDBQ}" -q {q} -i "{IDX[strain]}" -t {min(THREADS,8)} '
+           f'--per-structure --header --sort-by idf -d {d} -a {a} {extra} '
+           f'--format-output "{FMT}" -o "{out}"', check=False)
+    if not (out.exists() and out.stat().st_size): return None
+    df = pd.read_csv(out, sep="\t")
+    df.columns = [c.strip().lstrip("#") for c in df.columns]
+    return df
+
+# ---------- 1단계: 허용폭을 풀어 2잔기로 넓게 ----------
+print("=== 1단계: mono2 (A112,A114) — 검색 허용폭을 푼다 ===")
+W = []
+for d, a in GRID:
+    for st in IDX:
+        df = run("mono2", MONO, st, d, a)
+        W.append({"d": d, "angle": a, "strain": st, "hits": 0 if df is None else len(df)})
+        print(f"  d={d} a={a} {st:7s} {W[-1]['hits']}")
+Wd = pd.DataFrame(W).pivot_table(index=["d", "angle"], columns="strain", values="hits")
+print("\n" + Wd.to_string())
+print("\n기본 (0.5, 5.0) 대비 얼마나 늘었는지가 핵심이다. 안 늘면 병목이 또 다른 데 있다.")
+
+# ---------- 2단계: 4잔기 전부 맞은 것만 ----------
+print("\n" + "=" * 90)
+print("=== 2단계: dimer4 (A112,A114,B112,B114) + --covered-node 4 ===")
+print("질의 잔기 4개가 모두 맞은 구조만 남긴다. 부분 매치를 세지 않는다.\n")
+KEEP = {}
+D = []
+for d, a in GRID:
+    for st in IDX:
+        df = run("dimer4cov", DIMER, st, d, a, extra="--covered-node 4")
+        n = 0 if df is None else len(df)
+        D.append({"d": d, "angle": a, "strain": st, "hits": n})
+        if df is not None and len(df): KEEP[(d, a, st)] = df
+        print(f"  d={d} a={a} {st:7s} {n}")
+Dd = pd.DataFrame(D).pivot_table(index=["d", "angle"], columns="strain", values="hits")
+print("\n" + Dd.to_string())
+
+# ---------- 깔때기 ----------
+print("\n=== 깔때기 (BL21) ===")
+for d, a in GRID:
+    m = Wd.loc[(d, a), "BL21"] if (d, a) in Wd.index else None
+    k = Dd.loc[(d, a), "BL21"] if (d, a) in Dd.index else None
+    if m is not None and k is not None:
+        print(f"  d={d} a={a}:  2잔기 {int(m):5d}  ->  4잔기 전부 맞음 {int(k):4d}"
+              f"  ({100*k/max(1,m):.1f}%)")
+print("\n이게 '2개로 넓게 뽑고 4개로 줄인다' 의 실제 모습이다.")
+
+# ---------- 가장 넓은 설정의 dimer4 결과를 이름과 함께 ----------
+xw = pd.read_csv(DIR["table"]/"id_crosswalk_struct_to_genbank.csv") \
+     if (DIR["table"]/"id_crosswalk_struct_to_genbank.csv").exists() else pd.DataFrame()
+xwm = xw.dropna(subset=["protein"]).set_index("tid")["protein"].to_dict() if len(xw) else {}
+hdr = {}
+for l in open(ASSET["faa_bl21"], errors="ignore"):
+    if l.startswith(">"):
+        t = l[1:].rstrip(); hdr[t.split()[0]] = t[len(t.split()[0]):].strip()
+
+best = max((k for k in KEEP if k[2] == "BL21"), key=lambda k: (k[0], k[1]), default=None)
+if best:
+    df = KEEP[best].copy()
+    df["stem"] = df.tid.apply(lambda x: Path(str(x)).stem)
+    df["protein"] = df.stem.map(xwm).astype(str).str.split(",").str[0]
+    df["desc"] = df.protein.map(lambda k: hdr.get(k, "")[:70])
+    df = df.sort_values("min_rmsd")
+    cols = [c for c in ["protein", "idf", "min_rmsd", "nres", "plddt",
+                        "node_count", "matching_residues", "desc"] if c in df.columns]
+    pd.set_option("display.max_rows", None); pd.set_option("display.width", 240)
+    print(f"\n=== BL21 · d={best[0]} a={best[1]} · 4잔기 전부 맞음: {len(df)}개 ===")
+    print(df[cols].to_string(index=False))
+    df.to_csv(DIR["table"]/"folddisco_dimer4_widened.csv", index=False, encoding="utf-8-sig")
+    print(f"\n저장: {DIR['table']/'folddisco_dimer4_widened.csv'}")
+    print("\n※ 이 목록은 CooC1 자신의 이량체 Ni 자리 기하를 네 잔기 모두 만족한다.")
+    print("  지금까지 중 가장 근거가 좁고 분명한 집합이다. CELL 29e 의 균주 특이")
+    print("  판정과 교차해서 보면 된다.")
+else:
+    print("\n4잔기 전부 맞은 구조가 없다. --covered-node 3 으로 한 단계 낮춰 볼 것.")
+```
+
+---
+
 ## CELL 30 — Part 8b. ID crosswalk (구조 tid → GenBank protein ID)
 
 ```python
