@@ -155,6 +155,7 @@ print(PLAN)
 #   - 원본 BASE=/data/chcodh2_ppi 는 서버에 없어 workspace/ppi_discovery 로 변경
 # =============================================================================
 import os, re, sys, json, gzip, shutil, subprocess, textwrap, glob, time
+import numpy as np
 from pathlib import Path
 
 # ---------------- 작업 루트 ----------------
@@ -3523,39 +3524,25 @@ print("\n독립적 2개 이상 증거를 가진 후보:", int((M.n_evidence >= 2
 ```python
 # =============================================================================
 # CELL 35 | Folddisco 우선 노선 — 0단계. 누가 누구인지부터 확정한다
-#   지금 folddisco 결과는 균주마다 ID 체계가 다르고 이름이 안 붙어 있다.
+#   ID 체계가 균주마다 다르다.
 #     BL21 / Y19  GenBank protein ID (QJZ*, AKE*) — crosswalk 으로 붙어 있음
-#     MG1655      UniProt accession (P*, Q*) — 구조 DB 가 공식 배포본이라 crosswalk 없음
-#   여기서 세 가지를 만든다.
-#     (1) 이름·설명 — MG1655 는 UniProt 에서 유전자명까지 받아온다
-#     (2) 모티프 집합끼리의 대응  -> "다른 균주에서도 folddisco 가 잡았나"
-#     (3) 모티프 집합 vs 전체 프로테옴 -> "그 균주에 유전자가 아예 없나"
-#   (2) 와 (3) 은 다른 질문이다. 이 둘을 나눠야 '검출 차이'와 '유전자 부재'가 구분된다.
-#   지금까지 BL21 14개를 'BL21 특이'라고 불렀는데 대부분 대장균 공통 유전자였다 —
-#   그건 (3) 을 한 번도 안 봤기 때문이다.
+#     MG1655      UniProt accession — 구조 DB 가 공식 배포본이라 crosswalk 없음
+#
+#   ★ 균주 간 대응은 metal 모티프 단백질에만 건다.
+#     ATP(Walker A) 는 균주당 1,000개 안팎이 걸린다 (프로테옴의 20% 이상). 이걸
+#     전부 대응시키면 계산이 몇 배로 늘어나는데, ATP 는 3단계에서 '같은 균주 안에서
+#     금속과 겹치는가'로만 쓰므로 균주 간 대응이 애초에 필요 없다.
+#
+#   대응표는 두 개를 따로 만든다. 섞으면 '검출 차이'와 '유전자 부재'가 구분되지 않는다.
+#     (2) 모티프 집합끼리        -> 다른 균주에서도 folddisco 가 잡았나
+#     (3) 모티프 집합 vs 프로테옴 -> 그 균주에 유전자가 있기는 한가
 # =============================================================================
 need(((DIR["table"]/"folddisco_metal_motif_detail.csv").exists(),
       "CELL 29 -> 30 -> 31 을 먼저 돌릴 것"))
 import urllib.request
+import numpy as np
 
-FDD = {}
-for tag, fn in [("metal", "folddisco_metal_motif_detail.csv"),
-                ("atp",   "folddisco_atp_motif_detail.csv")]:
-    p = DIR["table"]/fn
-    if not p.exists():
-        print(f"[없음] {fn} — CELL 31 에서 {tag} 변환이 안 됐다"); continue
-    d = pd.read_csv(p); d["motif"] = tag
-    FDD[tag] = d
-    print(f"{tag:6s} {len(d):5d}행   {d.strain.value_counts().to_dict()}")
-need((bool(FDD), "folddisco detail CSV 가 하나도 없다"))
-
-A = pd.concat(FDD.values(), ignore_index=True)
-A["uniprot"] = A.tid_stem.astype(str).str.extract(r"AF-([A-Z0-9]+)-F", expand=False)
-A["key"]     = A.protein.where(A.protein.notna(), A.uniprot)   # 균주 안에서 유일한 ID
-A = A.dropna(subset=["key"])
-print(f"\n정체 확인된 행 {len(A)} / 단백질 {A.groupby(['strain','key']).ngroups}개")
-
-# ---------- (1) 이름과 설명 ----------
+# ---------- 프로테옴 먼저 (ID 검증에 쓴다) ----------
 def read_fasta(path, with_desc=False):
     seq, desc, nm, buf = {}, {}, None, []
     for l in open(path, errors="ignore"):
@@ -3567,61 +3554,110 @@ def read_fasta(path, with_desc=False):
     if nm: seq[nm] = "".join(buf)
     return (seq, desc) if with_desc else seq
 
-PROT = {}      # strain -> {id: seq}   전체 프로테옴
-DESC = {}      # (strain, key) -> 설명
-GENE = {}      # (strain, key) -> 유전자명
-for st, fa in [("BL21", ASSET["faa_bl21"]), ("Y19", ASSET["faa_y19"]),
-               ("MG1655", ASSET["faa_mg1655"])]:
+FAA  = {"BL21": ASSET["faa_bl21"], "Y19": ASSET["faa_y19"], "MG1655": ASSET["faa_mg1655"]}
+PROT, DESC, GENE = {}, {}, {}
+for st, fa in FAA.items():
     s, d = read_fasta(fa, with_desc=True)
     PROT[st] = s
     for k, v in d.items(): DESC[(st, k)] = v
     print(f"{st:7s} 프로테옴 {len(s):5d}개  ({Path(fa).name})")
 
-# MG1655 모티프 단백질만 UniProt 에서 유전자명·이름·서열을 한 번에 받는다
+# ---------- folddisco 결과 읽기 ----------
+FDD = {}
+for tag, fn in [("metal", "folddisco_metal_motif_detail.csv"),
+                ("atp",   "folddisco_atp_motif_detail.csv")]:
+    p = DIR["table"]/fn
+    if not p.exists():
+        print(f"[없음] {fn}"); continue
+    d = pd.read_csv(p); d["motif"] = tag
+    FDD[tag] = d
+    print(f"{tag:6s} {len(d):5d}행   {d.strain.value_counts().to_dict()}")
+need((bool(FDD), "folddisco detail CSV 가 하나도 없다"))
+
+# ---------- 정체(key) 확정 ----------
+# crosswalk 이 tid 하나에 단백질 여러 개를 콤마로 붙여 준 행이 있다 -> 첫 번째만 쓴다.
+# 그리고 균주가 뒤섞인 행이 있다 (BL21 행에 Y19 의 AKE* 가 붙어 있었다). 자기 균주
+# 프로테옴에 그 ID 가 실제로 있는지로 검증해 걸러낸다.
+UP_RE = re.compile(r"^[OPQ][0-9][A-Z0-9]{3}[0-9]$|^[A-NR-Z][0-9]([A-Z][A-Z0-9]{2}[0-9]){1,2}$")
+
+def resolve(d):
+    d = d.copy()
+    d["uniprot"] = d.tid_stem.astype(str).str.extract(r"AF-([A-Z0-9]+)-F", expand=False)
+    k = d.protein.where(d.protein.notna(), d.uniprot).astype(str)
+    d["key"] = k.str.split(",").str[0].str.strip()
+    ok = []
+    for st, key in zip(d.strain, d.key):
+        if st == "MG1655": ok.append(bool(UP_RE.match(str(key))))
+        else:              ok.append(str(key) in PROT.get(st, {}))
+    d["key_ok"] = ok
+    return d
+
+RAW = {t: resolve(v) for t, v in FDD.items()}
+for t, d in RAW.items():
+    bad = d[~d.key_ok]
+    print(f"\n{t}: 정체 확정 {int(d.key_ok.sum())}행 / 버림 {len(bad)}행")
+    if len(bad):
+        print("  버린 예:", list(zip(bad.strain, bad.key))[:5])
+        print("  (crosswalk 이 균주를 넘나들거나 tid 하나에 단백질 여럿을 붙인 행이다)")
+MET_RAW = RAW["metal"][RAW["metal"].key_ok].copy()
+ATP_RAW = RAW["atp"][RAW["atp"].key_ok].copy() if "atp" in RAW else pd.DataFrame()
+print(f"\nmetal 단백질 {MET_RAW.groupby(['strain','key']).ngroups}개 / "
+      f"atp 단백질 {ATP_RAW.groupby(['strain','key']).ngroups if len(ATP_RAW) else 0}개")
+
+# ---------- MG1655 이름·서열 (metal 만, 묶어서 조회) ----------
 MGSEQ  = {}
-_mgacc = sorted(A[A.strain == "MG1655"].key.dropna().unique())
-_cache = DIR["table"]/"mg1655_motif_uniprot.tsv"
-if _mgacc and not _cache.exists():
-    _url = ("https://rest.uniprot.org/uniprotkb/stream?query="
-            + "%20OR%20".join(f"accession:{a}" for a in _mgacc)
-            + "&format=tsv&fields=accession,gene_primary,protein_name,sequence")
-    try:
-        with urllib.request.urlopen(_url, timeout=180) as r:
-            _cache.write_bytes(r.read())
-        print(f"UniProt 조회 저장 -> {_cache.name}")
-    except Exception as e:
-        print(f"⚠ UniProt 조회 실패: {e}  (MG1655 이름/서열 없이 진행)")
+_acc   = sorted(MET_RAW[MET_RAW.strain == "MG1655"].key.unique())
+_cache = DIR["table"]/"mg1655_metal_uniprot.tsv"
+
+def uniprot_fetch(accs, chunk=90):
+    """URL 길이 제한 때문에 묶어서 받는다. 한 번에 1,000개를 넣으면 HTTP 400 이다."""
+    hdr, body = None, []
+    for i in range(0, len(accs), chunk):
+        url = ("https://rest.uniprot.org/uniprotkb/accessions?accessions="
+               + ",".join(accs[i:i+chunk])
+               + "&format=tsv&fields=accession,gene_primary,protein_name,sequence")
+        try:
+            with urllib.request.urlopen(url, timeout=120) as r:
+                ls = r.read().decode().splitlines()
+        except Exception as e:
+            print(f"  ⚠ {i}~{i+chunk} 실패: {e}"); continue
+        if not ls: continue
+        if hdr is None: hdr = ls[0]
+        body += ls[1:]
+    return hdr, body
+
+if _acc and not _cache.exists():
+    _h, _b = uniprot_fetch(_acc)
+    if _h: _cache.write_text("\n".join([_h] + _b))
+    print(f"UniProt: {len(_b)}/{len(_acc)}개 조회 -> {_cache.name}")
 if _cache.exists():
     _u = pd.read_csv(_cache, sep="\t")
-    _u.columns = [c.strip() for c in _u.columns]
     for r in _u.itertuples(index=False):
-        acc = r[0]
-        GENE[("MG1655", acc)] = str(r[1]) if len(r) > 1 else ""
-        DESC[("MG1655", acc)] = str(r[2]) if len(r) > 2 else ""
+        acc = str(r[0])
+        GENE[("MG1655", acc)] = str(r[1]) if len(r) > 1 and pd.notna(r[1]) else ""
+        DESC[("MG1655", acc)] = str(r[2]) if len(r) > 2 and pd.notna(r[2]) else ""
         if len(r) > 3 and isinstance(r[3], str): MGSEQ[acc] = r[3]
     print(f"MG1655 이름 {len(_u)}개 / 서열 {len(MGSEQ)}개")
 
-# BL21/Y19 유전자명은 설명문의 대괄호 앞 관용 표기에서 뽑는다 (없으면 빈칸)
+# BL21/Y19 유전자명은 설명문의 관용 표기(예: FlgH, GmhB)에서 뽑는다
 for (st, k), d in list(DESC.items()):
-    if st == "MG1655": continue
-    m = re.search(r"\b([a-z]{3}[A-Z])\b", str(d))
-    GENE[(st, k)] = m.group(1) if m else ""
+    if st != "MG1655":
+        m = re.search(r"\b([a-z]{3}[A-Z])\b", str(d))
+        GENE[(st, k)] = m.group(1) if m else ""
 
-# ---------- 모티프 단백질 서열 모으기 ----------
-QF, missing = DIR["seq"]/"folddisco_motif_proteins.faa", []
+# ---------- metal 단백질 서열 -> mmseqs 대응표 ----------
+QF, missing = DIR["seq"]/"folddisco_metal_proteins.faa", []
 with open(QF, "w") as fh:
-    for (st, k), _ in A.groupby(["strain", "key"]).size().items():
+    for st, k in sorted(set(zip(MET_RAW.strain, MET_RAW.key))):
         sq = MGSEQ.get(k) if st == "MG1655" else PROT.get(st, {}).get(k)
         if not sq: missing.append((st, k)); continue
         fh.write(f">{st}|{k}\n{sq}\n")
 _n = sum(1 for l in open(QF) if l.startswith(">"))
-print(f"\n모티프 단백질 서열 {_n}개 -> {QF.name}   (서열 못 찾음 {len(missing)}개)")
-if missing: print("  ", missing[:8])
+print(f"\nmetal 단백질 서열 {_n}개 -> {QF.name}  (못 찾음 {len(missing)}개 {missing[:5]})")
+need((_n > 0, "서열을 하나도 못 모았다"))
 
-# ---------- (2)(3) mmseqs 로 두 가지 대응표 ----------
 _tmp = DIR["tmp"]/"fdmap"; _tmp.mkdir(parents=True, exist_ok=True)
 FMT  = "query,target,fident,alnlen,qcov,tcov,evalue,bits"
-
 def _search(target_fa, out_name):
     out = DIR["search"]/out_name
     if out.exists() and out.stat().st_size:
@@ -3630,26 +3666,22 @@ def _search(target_fa, out_name):
        f'--format-output "{FMT}" -e 1e-5 --threads {min(THREADS,16)} -v 1', check=False)
     return out
 
-print("\n(2) 모티프 집합끼리 — '다른 균주에서도 folddisco 가 잡았나'")
-M_SELF = _search(QF, "fd_motif_vs_motif.m8")
-print("(3) 전체 프로테옴 대상 — '그 균주에 유전자가 있기는 한가'")
-M_FULL = {}
-for st, fa in [("BL21", ASSET["faa_bl21"]), ("Y19", ASSET["faa_y19"]),
-               ("MG1655", ASSET["faa_mg1655"])]:
-    M_FULL[st] = _search(fa, f"fd_motif_vs_{st}.m8")
+print("\n(2) 모티프 집합끼리 — 다른 균주에서도 folddisco 가 잡았나")
+_self = _search(QF, "fdm_motif_vs_motif.m8")
+print("(3) 전체 프로테옴 — 그 균주에 유전자가 있기는 한가")
+_full = {st: _search(fa, f"fdm_motif_vs_{st}.m8") for st, fa in FAA.items()}
 
 COLS = FMT.split(",")
-def _best(m8, split_query=True):
-    if not Path(m8).exists() or not Path(m8).stat().st_size: return pd.DataFrame(columns=COLS)
-    d = pd.read_csv(m8, sep="\t", names=COLS)
-    if split_query:
-        d[["q_strain", "q_key"]] = d["query"].str.split("|", n=1, expand=True)
+def _rd(m8):
+    p = Path(m8)
+    if not p.exists() or not p.stat().st_size: return pd.DataFrame(columns=COLS + ["q_strain","q_key"])
+    d = pd.read_csv(p, sep="\t", names=COLS)
+    d[["q_strain", "q_key"]] = d["query"].str.split("|", n=1, expand=True)
     return d
-
-ORTH_SELF, ORTH_FULL = _best(M_SELF), {st: _best(v) for st, v in M_FULL.items()}
-print(f"\n(2) 히트 {len(ORTH_SELF):,}행   (3) 히트 " +
-      " / ".join(f"{k} {len(v):,}" for k, v in ORTH_FULL.items()))
-print("\n다음: CELL 36 (metal 3자 분류)")
+ORTH_SELF = _rd(_self)
+ORTH_FULL = {st: _rd(v) for st, v in _full.items()}
+print(f"\n(2) {len(ORTH_SELF):,}행   (3) " + " / ".join(f"{k} {len(v):,}" for k, v in ORTH_FULL.items()))
+print("\n다음: CELL 36")
 ```
 
 ---
@@ -3658,71 +3690,65 @@ print("\n다음: CELL 36 (metal 3자 분류)")
 
 ```python
 # =============================================================================
-# CELL 36 | 1단계. 금속 모티프 매칭을 세 균주로 나눠 분류한다
-#   분류를 두 축으로 나눈다. 이걸 섞으면 지난번처럼 'BL21 특이 14개'가
-#   실제로는 대장균 공통 유전자였던 일이 또 생긴다.
+# CELL 36 | 1단계. 금속 모티프를 두 축으로 분류한다
 #     축1  모티프 검출: folddisco 가 그 균주에서도 이 자리를 잡았는가
 #     축2  유전자 존재: 애초에 그 균주 프로테옴에 이 단백질이 있는가
-#   두 축을 합쳐 판정한다.
-#     BL21 검출 + MG1655 유전자 없음  -> 진짜 균주 특이 (강한 후보)
-#     BL21 검출 + MG1655 유전자 있음  -> 검출 차이일 뿐 (약한 후보, 버리지는 않음)
-#                                        구조 예측 버전 차이(BL21 v6 / MG1655 v4)나
-#                                        구조 품질 차이로도 갈릴 수 있다
+#   판정:
+#     BL21 검출 + MG1655 유전자 없음 -> 진짜 균주 특이 (강한 후보)
+#     BL21 검출 + MG1655 유전자 있음 -> 검출 차이일 뿐 (약한 후보, 버리지 않음)
+#   지난번 'BL21 특이 14개'가 사실 대장균 공통 유전자였던 건 축2 를 안 봤기 때문이다.
 # =============================================================================
-need((have("A", "ORTH_SELF", "ORTH_FULL", "DESC", "GENE"), "CELL 35 를 먼저 돌릴 것"))
+need((have("MET_RAW", "ORTH_SELF", "ORTH_FULL", "DESC", "GENE"), "CELL 35 를 먼저 돌릴 것"))
 STRAINS = ["BL21", "MG1655", "Y19"]
 ID_THR, COV_THR = 0.50, 0.70
 
 def parse_match(s):
     """'A27,A30:0.5054;A50,A52:0.81' -> (가장 잘 맞은 잔기, 그 RMSD, 매치 수)"""
-    if not isinstance(s, str) or not s.strip(): return ("", np.nan, 0)
+    if not isinstance(s, str) or not s.strip(): return ("", float("nan"), 0)
     items = []
     for part in s.split(";"):
         part = part.strip()
         if not part: continue
         res, sep, rm = part.rpartition(":")
         try: items.append((res if sep else part, float(rm)))
-        except ValueError: items.append((part, np.nan))
-    if not items: return ("", np.nan, 0)
+        except ValueError: items.append((part, float("nan")))
+    if not items: return ("", float("nan"), 0)
     ok = [i for i in items if i[1] == i[1]]
     b = min(ok, key=lambda x: x[1]) if ok else items[0]
     return (b[0], b[1], len(items))
 
-# --- 대응표를 dict 로: (strain, key) -> {other_strain: fident} ---
 _s = ORTH_SELF[(ORTH_SELF.fident >= ID_THR) & (ORTH_SELF.qcov >= COV_THR)].copy()
-_s[["t_strain", "t_key"]] = _s.target.str.split("|", n=1, expand=True)
 MOTIF_HIT = {}
-for r in _s.itertuples(index=False):
-    d = MOTIF_HIT.setdefault((r.q_strain, r.q_key), {})
-    if r.fident > d.get(r.t_strain, (0, ""))[0]:
-        d[r.t_strain] = (r.fident, r.t_key)
+if len(_s):
+    _s[["t_strain", "t_key"]] = _s.target.str.split("|", n=1, expand=True)
+    for r in _s.itertuples(index=False):
+        d = MOTIF_HIT.setdefault((r.q_strain, r.q_key), {})
+        if r.fident > d.get(r.t_strain, (0, ""))[0]: d[r.t_strain] = (r.fident, r.t_key)
 
 GENE_HIT = {}
 for st, df in ORTH_FULL.items():
     if not len(df): continue
-    f = df[(df.fident >= ID_THR) & (df.qcov >= COV_THR)]
-    for r in f.itertuples(index=False):
+    for r in df[(df.fident >= ID_THR) & (df.qcov >= COV_THR)].itertuples(index=False):
         d = GENE_HIT.setdefault((r.q_strain, r.q_key), {})
-        if r.fident > d.get(st, (0, ""))[0]:
-            d[st] = (r.fident, r.target)
+        if r.fident > d.get(st, (0, ""))[0]: d[st] = (r.fident, r.target)
 
-def motif_summary(tag):
-    """모티프 하나에 대해 (strain, key) 단위 요약표를 만든다."""
-    d = A[A.motif == tag].copy()
+def motif_summary(d):
+    """(strain, key) 단위로 가장 잘 맞은 매치 한 줄만 남긴다."""
     if not len(d): return pd.DataFrame()
-    pm = d.matching_residues.apply(parse_match) if "matching_residues" in d else None
-    if pm is not None:
-        d["residues"], d["rmsd"], d["n_match"] = [x[0] for x in pm], [x[1] for x in pm], [x[2] for x in pm]
+    d = d.copy()
+    if "matching_residues" in d.columns:
+        pm = d.matching_residues.apply(parse_match)
+        d["residues"] = [x[0] for x in pm]
+        d["rmsd"]     = [x[1] for x in pm]
+        d["n_match"]  = [x[2] for x in pm]
     else:
-        d["residues"], d["rmsd"], d["n_match"] = "", np.nan, 0
-    d["rmsd"] = d["rmsd"].fillna(d.get("min_rmsd", np.nan))
+        d["residues"], d["rmsd"], d["n_match"] = "", float("nan"), 0
+    if "min_rmsd" in d.columns:
+        d["rmsd"] = d["rmsd"].fillna(d["min_rmsd"])
     d = d.sort_values(["rmsd", "idf"], ascending=[True, False])
     g = d.groupby(["strain", "key"], as_index=False).first()
-    return g[["strain", "key", "idf", "rmsd", "residues", "n_match",
-              "nres", "plddt", "tid_stem"]]
-
-MET = motif_summary("metal")
-need((len(MET) > 0, "metal 모티프 요약이 비었다"))
+    keep = ["strain", "key", "idf", "rmsd", "residues", "n_match", "nres", "plddt", "tid_stem"]
+    return g[[c for c in keep if c in g.columns]]
 
 def annotate(g):
     g = g.copy()
@@ -3731,8 +3757,6 @@ def annotate(g):
     for st in STRAINS:
         g[f"motif_in_{st}"] = [int(st in MOTIF_HIT.get((s, k), {})) for s, k in zip(g.strain, g.key)]
         g[f"gene_in_{st}"]  = [int(st in GENE_HIT.get((s, k), {}))  for s, k in zip(g.strain, g.key)]
-    # 자기 균주는 당연히 1
-    for st in STRAINS:
         g.loc[g.strain == st, [f"motif_in_{st}", f"gene_in_{st}"]] = 1
     g["motif_pattern"] = ["+".join(s for s in STRAINS if r[f"motif_in_{s}"]) for _, r in g.iterrows()]
     g["gene_pattern"]  = ["+".join(s for s in STRAINS if r[f"gene_in_{s}"])  for _, r in g.iterrows()]
@@ -3740,60 +3764,61 @@ def annotate(g):
                                      str(x), re.I) else 1 for x in g.description]
     def verdict(r):
         if r.strain != "BL21": return "-"
-        if not r.motif_in_MG1655 and not r.gene_in_MG1655: return "BL21 특이 (유전자 자체가 없음)"
-        if not r.motif_in_MG1655 and r.gene_in_MG1655:     return "검출 차이 (유전자는 MG1655 에도 있음)"
+        if not r.motif_in_MG1655 and not r.gene_in_MG1655: return "BL21 특이 (유전자 없음)"
+        if not r.motif_in_MG1655 and r.gene_in_MG1655:     return "검출 차이 (유전자는 있음)"
         return "공통"
     g["strain_verdict"] = [verdict(r) for _, r in g.iterrows()]
     return g
 
-MET = annotate(MET)
+MET = annotate(motif_summary(MET_RAW))
+need((len(MET) > 0, "metal 요약이 비었다"))
 MET.to_csv(DIR["table"]/"motif_metal_3strain.csv", index=False, encoding="utf-8-sig")
 
 print("=== 균주별 metal 모티프 단백질 수 ===")
 print(MET.strain.value_counts().to_string())
-print("\n=== 검출 패턴 (어느 균주에서 folddisco 가 잡았나) ===")
+print("\n=== 검출 패턴 (folddisco 가 잡은 균주) ===")
 print(MET.motif_pattern.value_counts().to_string())
-print("\n=== 유전자 존재 패턴 (프로테옴에 있기는 한가) ===")
+print("\n=== 유전자 존재 패턴 (프로테옴에 있는 균주) ===")
 print(MET.gene_pattern.value_counts().to_string())
 print("\n=== BL21 판정 ===")
 print(MET[MET.strain == "BL21"].strain_verdict.value_counts().to_string())
 _hot = MET[(MET.strain == "BL21") & MET.strain_verdict.str.startswith("BL21 특이")]
-print(f"\n--- BL21 특이 (유전자 자체가 MG1655 에 없음): {len(_hot)}개 ---")
+print(f"\n--- BL21 특이 (MG1655 에 유전자 자체가 없음): {len(_hot)}개 ---")
 if len(_hot):
     print(_hot[["key", "gene", "rmsd", "idf", "residues", "plddt", "description"]]
           .sort_values("rmsd").to_string(index=False))
-print(f"\n전체 표 저장: {DIR['table']/'motif_metal_3strain.csv'}")
+else:
+    print("  없음 — 모든 BL21 금속 모티프 단백질이 MG1655 에도 유전자가 있다는 뜻이다.")
+    print("  그러면 BL21/MG1655 차이는 유전자 유무가 아니라 발현·안정성·구조 예측")
+    print("  품질 쪽이라는 것이고, '검출 차이' 목록을 후보로 봐야 한다.")
+print(f"\n저장: {DIR['table']/'motif_metal_3strain.csv'}")
 ```
 
 ---
 
-## CELL 37 — Folddisco 노선 (2) ATP 모티프 3자 비교
+## CELL 37 — Folddisco 노선 (2) ATP 모티프
 
 ```python
 # =============================================================================
-# CELL 37 | 2단계. ATP(Walker A) 모티프도 같은 방식으로 분류한다
-#   ⚠ 해상도 한계를 알고 쓴다. Walker A 는 대장균 프로테옴의 20% 이상이 갖고 있고,
-#     CooC1 의 가장 가까운 BL21 구조 이웃이 MinD 로 나온 것도 이 모티프 때문이다.
-#     즉 ATP 모티프 단독으로는 후보를 좁히지 못한다. 3단계의 '금속과 겹치는가'
-#     에서만 값을 한다. 그래서 여기서는 필터가 아니라 '표시'로만 쓴다.
+# CELL 37 | 2단계. ATP(Walker A) 모티프 — 필터가 아니라 표시로 쓴다
+#   실측: 균주당 1,000개 안팎이 걸린다. 프로테옴의 20% 이상이다.
+#   이 해상도로는 후보를 좁힐 수 없다. 그래서 균주 간 대응은 만들지 않고
+#   '같은 균주 안에서 금속 모티프와 겹치는가'(3단계)에만 쓴다.
 # =============================================================================
-need((have("motif_summary", "annotate"), "CELL 36 을 먼저 돌릴 것"))
-ATP = motif_summary("atp")
+need((have("ATP_RAW", "motif_summary"), "CELL 35 -> 36 을 먼저 돌릴 것"))
+ATP = motif_summary(ATP_RAW)
 if not len(ATP):
-    print("ATP 모티프 결과가 없다. CELL 29 의 RESIDUES_ATP 와 CELL 31 변환을 확인할 것.")
+    print("ATP 결과 없음 — CELL 29 의 RESIDUES_ATP 와 CELL 31 변환을 확인할 것.")
 else:
-    ATP = annotate(ATP)
+    ATP["gene"] = [GENE.get((s, k), "") for s, k in zip(ATP.strain, ATP.key)]
+    ATP["description"] = [str(DESC.get((s, k), ""))[:90] for s, k in zip(ATP.strain, ATP.key)]
     ATP.to_csv(DIR["table"]/"motif_atp_3strain.csv", index=False, encoding="utf-8-sig")
-    print("=== 균주별 ATP 모티프 단백질 수 ===")
-    print(ATP.strain.value_counts().to_string())
-    print("\n=== 검출 패턴 ===")
-    print(ATP.motif_pattern.value_counts().to_string())
-    _n = len(ATP[ATP.strain == "BL21"])
-    _tot = len(PROT.get("BL21", {}))
-    if _tot:
-        print(f"\nBL21: ATP 모티프 {_n}개 / 프로테옴 {_tot}개 = {100*_n/_tot:.1f}%")
-        print("  이 비율이 높으면 ATP 모티프는 선별력이 없다는 뜻이다 (예상대로다).")
-    print(f"\n저장: {DIR['table']/'motif_atp_3strain.csv'}")
+    print("=== 균주별 ATP 모티프 단백질 수 / 프로테옴 대비 ===")
+    for st in STRAINS:
+        n, tot = int((ATP.strain == st).sum()), len(PROT.get(st, {}))
+        if tot: print(f"  {st:7s} {n:5d} / {tot:5d} = {100*n/tot:5.1f}%")
+    print("\n→ 이 비율이면 ATP 모티프 단독 선별력은 없다. 3단계 교집합에서만 쓴다.")
+    print(f"저장: {DIR['table']/'motif_atp_3strain.csv'}")
 ```
 
 ---
@@ -3803,65 +3828,62 @@ else:
 ```python
 # =============================================================================
 # CELL 38 | 3단계+4단계. 두 모티프를 겹쳐 우선순위를 매긴다
-#   Tier 1  금속 + ATP 둘 다        — CooC1 이 가진 두 성질을 모두 가진 것
+#   Tier 1  금속 + ATP 둘 다             — CooC1 의 두 성질을 모두 가진 것
 #   Tier 2  금속만 + 기능 어노테이션 있음 — ATP 는 안 잡혔지만 정체가 분명한 것
-#   Tier 3  금속만 + 어노테이션 없음     — 버리지 않는다. 우선도만 낮춘다
-#   같은 Tier 안에서는 (1) BL21 특이 여부 (2) RMSD 낮은 순 으로 본다.
-#   ※ 이 순위에 PPI 점수는 넣지 않는다. RF2-PPI 는 대조군 실패, Boltz ipTM 은
-#     눈금 미검증이다. 두 값은 참고 열로만 붙여 둔다 — 컷오프로 쓰지 말 것.
+#   Tier 3  금속만 + 어노테이션 없음      — 삭제하지 않는다. 우선도만 낮춘다
+#   같은 Tier 안에서는 (1) BL21 특이 (2) 검출 차이 (3) RMSD 낮은 순.
+#   ※ PPI 점수는 순위에 넣지 않는다. RF2-PPI 는 대조군 실패, Boltz ipTM 은 눈금
+#     미검증이다. 참고 열로만 붙인다 — 컷오프로 쓰지 말 것.
 # =============================================================================
 need((have("MET"), "CELL 36 을 먼저 돌릴 것"))
-_atp = ATP if ("ATP" in dir() and len(ATP)) else pd.DataFrame(
-    columns=["strain", "key", "idf", "rmsd", "residues", "n_match"])
+_atp = ATP if ("ATP" in dir() and len(ATP)) else pd.DataFrame(columns=["strain","key","idf","rmsd","residues","n_match"])
 
 T = MET.rename(columns={"idf": "metal_idf", "rmsd": "metal_rmsd",
                         "residues": "metal_residues", "n_match": "metal_n_match"}).copy()
-_a = _atp[["strain", "key", "idf", "rmsd", "residues", "n_match"]].rename(
-        columns={"idf": "atp_idf", "rmsd": "atp_rmsd",
-                 "residues": "atp_residues", "n_match": "atp_n_match"})
-T = T.merge(_a, on=["strain", "key"], how="left")
+T = T.merge(_atp[["strain","key","idf","rmsd","residues","n_match"]].rename(
+                columns={"idf": "atp_idf", "rmsd": "atp_rmsd",
+                         "residues": "atp_residues", "n_match": "atp_n_match"}),
+            on=["strain", "key"], how="left")
 T["has_atp"] = T.atp_idf.notna().astype(int)
-
-def tier(r):
-    if r.has_atp:      return 1
-    if r.annotated:    return 2
-    return 3
-T["tier"] = [tier(r) for _, r in T.iterrows()]
+T["tier"] = [1 if r.has_atp else (2 if r.annotated else 3) for _, r in T.iterrows()]
 T["bl21_specific"] = T.strain_verdict.str.startswith("BL21 특이").astype(int)
+T["bl21_detect_diff"] = T.strain_verdict.str.startswith("검출 차이").astype(int)
 
-# --- 참고 열: Boltz ipTM (컷오프 아님) ---
-for _f, _col in [("metal_motif_3strain_boltz.csv", "iptm"),
-                 ("trackB_boltz2_ranked.csv", "iptm")]:
+# 참고 열: Boltz ipTM (컷오프 아님)
+_ip = {}
+for _f in ["metal_motif_3strain_boltz.csv", "trackB_boltz2_ranked.csv"]:
     _p = DIR["table"]/_f
     if not _p.exists(): continue
     _b = pd.read_csv(_p)
     _k = "protein" if "protein" in _b.columns else "prey"
-    _m = {str(x): y for x, y in zip(_b[_k], _b[_col])}
-    T["boltz_iptm"] = T.boltz_iptm.fillna(T.key.map(_m)) if "boltz_iptm" in T else T.key.map(_m)
+    if "iptm" in _b.columns:
+        _ip.update({str(x): y for x, y in zip(_b[_k], _b["iptm"]) if pd.notna(y)})
+if _ip: T["boltz_iptm"] = T.key.map(_ip)
 
-OUT = ["tier", "strain", "key", "gene", "description", "annotated",
-       "metal_idf", "metal_rmsd", "metal_residues", "metal_n_match",
-       "has_atp", "atp_idf", "atp_rmsd", "atp_residues",
-       "nres", "plddt", "motif_pattern", "gene_pattern", "strain_verdict",
-       "bl21_specific"] + (["boltz_iptm"] if "boltz_iptm" in T else [])
-T = T[[c for c in OUT if c in T.columns]].sort_values(
-        ["tier", "bl21_specific", "metal_rmsd"], ascending=[True, False, True])
-T = T.rename(columns={"key": "protein_id", "nres": "length", "plddt": "struct_plddt"})
+T = T.sort_values(["tier", "bl21_specific", "bl21_detect_diff", "metal_rmsd"],
+                  ascending=[True, False, False, True])
+OUT = ["tier","strain","key","gene","description","annotated",
+       "metal_idf","metal_rmsd","metal_residues","metal_n_match",
+       "has_atp","atp_idf","atp_rmsd","atp_residues",
+       "nres","plddt","motif_pattern","gene_pattern","strain_verdict","bl21_specific","boltz_iptm"]
+T = T[[c for c in OUT if c in T.columns]].rename(
+        columns={"key": "protein_id", "nres": "length", "plddt": "struct_plddt"})
 T.to_csv(DIR["table"]/"FOLDDISCO_candidates.csv", index=False, encoding="utf-8-sig")
 
 print("=== Tier x 균주 ===")
 print(pd.crosstab(T.tier, T.strain).to_string())
-print("\n=== Tier 1 (금속 + ATP 둘 다) ===")
-_t1 = T[T.tier == 1]
-print(_t1.to_string(index=False) if len(_t1) else "  없음")
-print("\n=== Tier 2 (금속만 + 어노테이션 있음) — BL21 상위 15 ===")
+print("\n=== Tier 1 (금속 + ATP 둘 다) — BL21 ===")
+_t1 = T[(T.tier == 1) & (T.strain == "BL21")]
+print(_t1[["protein_id","gene","metal_rmsd","metal_residues","atp_residues",
+           "strain_verdict","description"]].to_string(index=False) if len(_t1) else "  없음")
+print(f"\n=== Tier 2 (금속만 + 어노테이션) — BL21 상위 15 ===")
 _t2 = T[(T.tier == 2) & (T.strain == "BL21")].head(15)
-print(_t2[["protein_id", "gene", "metal_rmsd", "metal_residues", "strain_verdict",
+print(_t2[["protein_id","gene","metal_rmsd","metal_residues","strain_verdict",
            "description"]].to_string(index=False) if len(_t2) else "  없음")
-print(f"\n=== Tier 3 (금속만 + 어노테이션 없음): {int((T.tier == 3).sum())}개 — 삭제하지 않고 보관 ===")
-print(f"\n최종표 저장: {DIR['table']/'FOLDDISCO_candidates.csv'}")
-print("  열 설명: metal_residues = 가장 잘 맞은 매치의 잔기, metal_rmsd = 그 매치의 RMSD")
-print("           motif_pattern  = folddisco 가 잡은 균주, gene_pattern = 유전자가 있는 균주")
+print(f"\n=== Tier 3 (어노테이션 없음): {int((T.tier == 3).sum())}개 — 보관 ===")
+print(f"\n최종표: {DIR['table']/'FOLDDISCO_candidates.csv'}")
+print("  metal_residues = 가장 잘 맞은 매치의 잔기 / metal_rmsd = 그 매치의 RMSD")
+print("  motif_pattern  = folddisco 가 잡은 균주 / gene_pattern = 유전자가 있는 균주")
 ```
 
 ---
