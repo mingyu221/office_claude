@@ -6411,6 +6411,229 @@ print("        75 C 무단백 조립 결과와 직접 대응하는 항목이다.
 
 ---
 
+## CELL 51 — Folddisco × Foldseek 교차 (모티프 기하 vs 폴드)
+
+```python
+# =============================================================================
+# CELL 51 | 두 도구는 다른 질문에 답한다. 교차해야 의미가 나온다.
+#   Foldseek   "이 단백질이 무슨 **과**인가"  — 구조 전체 유사도
+#   Folddisco  "이 단백질에 그 **자리**가 있는가" — 국소 잔기 기하
+#
+#   Folddisco 대조군 실패(Y19 CooC 를 놓침)가 뜻하는 것은 '놓친 게 있다'(재현율)
+#   이지 '찾은 게 틀렸다'(정밀도)가 아니다. metal_rmsd 는 직교체 간 Δ 0.015 A 로
+#   재현되므로 측정 자체는 멀쩡하다.
+#
+#   ★ 그리고 이 교차가 가설에 직접 닿는다.
+#     Foldseek 결과: BL21 에 CooC 상동체가 없다 (최고 ApbC tm 0.690).
+#     그렇다면 BL21 의 Ni 삽입자는 CooC 와 **비상동**일 수밖에 없고, 그건
+#     '폴드는 다른데 자리 기하는 같은' 경우다 — Folddisco 만 잡는 범주다.
+#
+#     둘 다        같은 과 + 같은 자리        가장 확실
+#     Foldseek 만  같은 과, 자리는 다름/누락
+#     Folddisco 만 다른 과, 같은 자리 기하   <- 비상동 삽입자 가설에 부합
+#
+#   성능: easy-search 는 호출마다 target DB 를 새로 만든다(37초 x N). 여기서는
+#   createdb 를 한 번만 하고 search 를 재사용한다.
+# =============================================================================
+need((have("ASSET", "DIR"), "CELL 01 을 먼저 돌릴 것"))
+FS = shutil.which("foldseek") or globals().get("FOLDSEEK_BIN", "foldseek")
+FAA = {"BL21": ASSET["faa_bl21"], "MG1655": ASSET["faa_mg1655"], "Y19": ASSET["faa_y19"]}
+HDR = {}
+for _s, _f in FAA.items():
+    for l in open(_f, errors="ignore"):
+        if l.startswith(">"):
+            t = l[1:].rstrip(); HDR[t.split()[0]] = (_s, t[len(t.split()[0]):].strip())
+STRUCT = {}
+for r in [TOOLS/"database"/"bacteriaDB", TOOLS/"database"]:
+    if Path(r).exists():
+        for d in sorted(Path(r).glob("structures_*")):
+            if d.is_dir(): STRUCT[d.name] = d
+_xwp = DIR["table"]/"id_crosswalk_struct_to_genbank.csv"
+_xw = pd.read_csv(_xwp) if _xwp.exists() else pd.DataFrame()
+XWM = {Path(str(k)).stem: str(v).split(",")[0]
+       for k, v in (_xw.dropna(subset=["protein"]).set_index("tid")["protein"]
+                    .to_dict().items() if len(_xw) else [])}
+REV = {v: k for k, v in XWM.items()}
+FSD = DIR["folddisco"].parent/"foldseek"; FSD.mkdir(exist_ok=True)
+_tmp = DIR["tmp"]/"x51"; _tmp.mkdir(parents=True, exist_ok=True)
+
+# ---------- 1. Folddisco 쪽 집합 ----------
+FD_METAL, FD_CYS4 = set(), set()
+_p = DIR["table"]/"motif_metal_3strain.csv"
+if _p.exists():
+    _m = pd.read_csv(_p)
+    FD_METAL = set(_m.key.astype(str))
+    print(f"Folddisco metal 모티프 : {len(FD_METAL)}개  {_m.strain.value_counts().to_dict()}")
+for f in (DIR["folddisco"]/"cys4").glob("cys4_*.tsv"):
+    if not f.stat().st_size: continue
+    d = pd.read_csv(f, sep="\t"); d.columns = [c.strip().lstrip("#") for c in d.columns]
+    FD_CYS4 |= {XWM.get(Path(str(x)).stem) for x in d.tid}
+FD_CYS4 = {k for k in FD_CYS4 if k}
+print(f"Folddisco Cys4 재질의   : {len(FD_CYS4)}개")
+FD_ALL = FD_METAL | FD_CYS4
+need((len(FD_ALL) > 0, "Folddisco 결과가 없다 — CELL 33~34, 29c 를 먼저"))
+
+# ---------- 2. 구조 DB 를 한 번만 만든다 ----------
+print("\n=== foldseek DB 준비 (한 번만) ===")
+TDB = {}
+for sname, sdir in STRUCT.items():
+    db = FSD/f"db_{sname}"
+    if not Path(str(db) + ".dbtype").exists():
+        print(f"  createdb {sname} ... (수십 초)")
+        sh(f'"{FS}" createdb "{sdir}" "{db}" --threads {min(THREADS,16)} -v 1', check=False)
+    else:
+        print(f"  [재사용] db_{sname}")
+    TDB[sname] = db
+
+# 질의 = Folddisco 가 잡은 것 전부 (구조가 있는 것만)
+qdir = _tmp/"q"; shutil.rmtree(qdir, ignore_errors=True); qdir.mkdir(parents=True)
+nq = 0
+for pid in sorted(FD_ALL):
+    stem = REV.get(pid)
+    if not stem: continue
+    src = None
+    for sdir in STRUCT.values():
+        for ext in ("cif", "pdb"):
+            f = next(iter(glob.glob(str(sdir/f"{stem}*.{ext}"))), None)
+            if f: src = f; break
+        if src: break
+    if src:
+        os.symlink(src, qdir/Path(src).name); nq += 1
+print(f"\n질의 구조 {nq} / {len(FD_ALL)}개")
+QDB = FSD/"db_query_fd"
+shutil.rmtree(str(QDB) + ".dbtype", ignore_errors=True)
+for _f in FSD.glob("db_query_fd*"):
+    try: _f.unlink()
+    except Exception: pass
+sh(f'"{FS}" createdb "{qdir}" "{QDB}" --threads {min(THREADS,16)} -v 1', check=False)
+
+# ---------- 3. 한 번의 search 로 전부 ----------
+FFMT = "query,target,fident,alnlen,qcov,tcov,evalue,bits,alntmscore,lddt"
+print("\n=== foldseek search (질의 전체 x 균주) ===")
+HITS = []
+for sname, db in TDB.items():
+    res = _tmp/f"res_{sname}"
+    m8  = FSD/f"fdall_vs_{sname}.m8"
+    if not (m8.exists() and m8.stat().st_size):
+        sh(f'"{FS}" search "{QDB}" "{db}" "{res}" "{_tmp}/s_{sname}" '
+           f'-e 10 --max-seqs 100 -a 1 --threads {min(THREADS,16)} -v 1', check=False)
+        sh(f'"{FS}" convertalis "{QDB}" "{db}" "{res}" "{m8}" '
+           f'--format-output "{FFMT}" --threads {min(THREADS,16)} -v 1', check=False)
+    if m8.exists() and m8.stat().st_size:
+        d = pd.read_csv(m8, sep="\t", names=FFMT.split(","))
+        d["q_prot"] = d["query"].apply(lambda x: XWM.get(Path(str(x)).stem))
+        d["t_prot"] = d.target.apply(lambda x: XWM.get(Path(str(x)).stem))
+        d["t_strain"] = sname
+        HITS.append(d)
+        print(f"  {sname}: {len(d):,}행")
+H = pd.concat(HITS, ignore_index=True) if HITS else pd.DataFrame()
+
+# ---------- 4. 폴드 배정 ----------
+print("\n" + "=" * 110)
+print("=== Folddisco 히트의 폴드 정체 (Foldseek 최상위 이웃) ===")
+rows = []
+if len(H):
+    HH = H[(H.q_prot.notna()) & (H.t_prot.notna()) & (H.q_prot != H.t_prot)]
+    HH = HH[HH.alntmscore >= 0.50]
+    for q, g in HH.groupby("q_prot"):
+        g = g.sort_values("alntmscore", ascending=False)
+        top = g.iloc[0]
+        rows.append({"protein": str(q), "strain": HDR.get(str(q), ("?",))[0],
+                     "n_fold_nb": len(g),
+                     "top_fold_hit": str(top.t_prot),
+                     "top_tm": round(float(top.alntmscore), 3),
+                     "top_fident": round(float(top.fident), 3),
+                     "fold_desc": HDR.get(str(top.t_prot), ("", ""))[1][:58],
+                     "desc": HDR.get(str(q), ("", ""))[1][:58]})
+FOLD = pd.DataFrame(rows)
+
+# ---------- 5. 교차 ----------
+# Foldseek 쪽 집합: CooC1 폴드 / HypA 폴드 (앞 셀들이 만든 m8 재사용)
+def fs_set(pattern, tm=0.50):
+    out = set()
+    for f in FSD.glob(pattern):
+        if not f.stat().st_size: continue
+        try:
+            d = pd.read_csv(f, sep="\t", header=None)
+        except Exception:
+            continue
+        ncol = d.shape[1]
+        d.columns = (FFMT.split(",") + ["x"]*9)[:ncol]
+        if "alntmscore" not in d.columns: continue
+        d["p"] = d.iloc[:, 1].apply(lambda x: XWM.get(Path(str(x)).stem))
+        out |= set(d[d.alntmscore >= tm].p.dropna().astype(str))
+    return out
+
+FS_COOC = fs_set("cooc1_vs_*.m8")
+FS_HYPA = fs_set("hypa_*_vs_*.m8") | fs_set("QJZ12568.1_vs_*.m8")
+print(f"\nFoldseek CooC1 폴드(tm>=0.5): {len(FS_COOC)}개")
+print(f"Foldseek HypA  폴드(tm>=0.5): {len(FS_HYPA)}개")
+
+FS_ALL = FS_COOC | FS_HYPA
+X = pd.DataFrame({"protein": sorted(FD_ALL | FS_ALL)})
+X["strain"]      = X.protein.map(lambda k: HDR.get(k, ("?",))[0])
+X["fd_metal"]    = X.protein.isin(FD_METAL).astype(int)
+X["fd_cys4"]     = X.protein.isin(FD_CYS4).astype(int)
+X["fs_cooC"]     = X.protein.isin(FS_COOC).astype(int)
+X["fs_hypA"]     = X.protein.isin(FS_HYPA).astype(int)
+X["category"] = np.where((X.fd_metal + X.fd_cys4 > 0) & (X.fs_cooC + X.fs_hypA > 0), "둘 다",
+                 np.where(X.fs_cooC + X.fs_hypA > 0, "Foldseek 만", "Folddisco 만"))
+# 증거 열 붙이기
+for f, cols in [("ni_site_grade.csv", ["prey", "grade", "donors"]),
+                ("cys4_bl21_strain_specificity.csv", ["protein", "vs_MG1655"]),
+                ("cys4_genome_check.csv", ["protein", "verdict"]),
+                ("motif_metal_3strain.csv", ["key", "rmsd", "plddt"])]:
+    p = DIR["table"]/f
+    if not p.exists(): continue
+    d = pd.read_csv(p)
+    kcol = cols[0]
+    if kcol not in d.columns: continue
+    d = d.copy()
+    d[kcol] = d[kcol].astype(str).str.split("-").str[-1]
+    d = d.drop_duplicates(kcol).set_index(kcol)
+    for c in cols[1:]:
+        if c in d.columns: X[c] = X.protein.map(d[c])
+X = X.merge(FOLD[["protein", "top_fold_hit", "top_tm", "fold_desc"]], on="protein", how="left")
+X["desc"] = X.protein.map(lambda k: HDR.get(k, ("", ""))[1][:62])
+X.to_csv(DIR["table"]/"folddisco_x_foldseek.csv", index=False, encoding="utf-8-sig")
+
+pd.set_option("display.max_rows", None); pd.set_option("display.width", 250)
+pd.set_option("display.max_colwidth", 40)
+print("\n=== 범주 x 균주 ===")
+print(pd.crosstab(X.category, X.strain).to_string())
+
+SHOW = [c for c in ["protein", "strain", "fd_metal", "fd_cys4", "fs_cooC", "fs_hypA",
+                    "grade", "rmsd", "plddt", "vs_MG1655", "verdict",
+                    "top_fold_hit", "top_tm", "desc"] if c in X.columns]
+for cat in ["둘 다", "Foldseek 만", "Folddisco 만"]:
+    sub = X[X.category == cat]
+    print(f"\n{'='*110}\n=== {cat} : {len(sub)}개 ===")
+    if cat == "Folddisco 만":
+        print("※ 폴드는 CooC/HypA 와 다른데 자리 기하는 같은 것들.")
+        print("  BL21 에 CooC 상동체가 없다면 삽입자는 비상동일 수밖에 없고,")
+        print("  그 경우 답은 이 범주 안에 있다. 다만 수가 많으므로 아래 순으로 좁힌다:")
+        print("  Ni 배위 grade A/B  ->  균주 특이  ->  pLDDT>=70  ->  rmsd 낮은 순")
+        sub = sub.sort_values(["grade", "rmsd"], na_position="last")
+        _hot = sub[(sub.get("grade").isin(["A", "B"]) if "grade" in sub else False)]
+        if len(_hot):
+            print(f"\n  [Ni 배위 A/B 인 것 {len(_hot)}개]")
+            print(_hot[SHOW].to_string(index=False))
+        print(f"\n  [전체 {len(sub)}개 중 상위 30]")
+        print(sub[SHOW].head(30).to_string(index=False))
+    else:
+        print(sub[SHOW].to_string(index=False) if len(sub) else "  없음")
+
+print(f"\n저장: {DIR['table']/'folddisco_x_foldseek.csv'}")
+print("\n### 읽는 법")
+print("  둘 다        : 같은 과 + 같은 자리. 가장 확실하지만 BL21 엔 CooC 과가 없다")
+print("  Foldseek 만  : 과는 맞는데 Folddisco 가 그 자리를 못 잡았다 (재현율 문제)")
+print("  Folddisco 만 : 과는 다른데 자리 기하가 같다 — 비상동 삽입자 후보")
+print("\n  Folddisco 의 대조군 실패는 '놓친 게 있다'는 뜻이지 '찾은 게 틀렸다'가 아니다.")
+print("  metal_rmsd 는 직교체 간 Δ 0.015 A 로 재현된다. 측정은 멀쩡하다.")
+```
+
+---
+
 ## CELL 37 — 최종 리포트 + 남은 TODO
 
 ```python
