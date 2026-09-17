@@ -2679,6 +2679,83 @@ print("     모델이 표면에 얹어놓은 것이다. coordination.txt 로 뷰
 
 ---
 
+## CELL 28a-8b — Ni 배위 자리를 도너 종류로 분류 (Cys4 > Cys3His > His/Asp)
+
+```python
+# =============================================================================
+# CELL 28a-8b | "Ni 가 후보 쪽에 붙었다"를 화학으로 등급 매긴다
+#   앞 셀은 '붙었나 안 붙었나'만 봤다. 그런데 같은 '붙었다'도 자리의 성격이 다르다.
+#     Cys4 (티올레이트 4개)  Ni(II) 같은 연한 금속에 가장 맞는 자리. 전달·저장형
+#     Cys3His / Cys2His2     구조적 아연 자리의 전형. Ni 도 들어갈 수 있다
+#     His/Asp/Glu 중심       가수분해효소의 촉매 금속 자리. Zn/Mg/Mn 용이고
+#                            배위 거리도 길어지는 경향. 전달 단백질일 가능성 낮음
+#   Irving-Williams 로는 Ni(II) 가 Zn(II) 자리에 들어갈 수 있으니 아연 어노테이션을
+#   이유로 빼지는 않는다. 다만 '어떤 자리인가'는 우선순위의 근거가 된다.
+#
+#   ★ Track B(out) 에서 온 것도 같이 본다. 그쪽은 folddisco 를 안 거친 후보라
+#     CooC1 의 A112/A114 간격과 다른 금속 자리를 가진 단백질이 들어올 수 있다.
+#     실제로 Cys4 자리를 가진 hypothetical 이 거기서 나왔다.
+# =============================================================================
+need((have("NIP"), "CELL 28a-7 을 먼저 돌릴 것"))
+import math
+from collections import Counter
+
+_M = set(pd.read_csv(DIR["table"]/"folddisco_metal_motif.csv").protein) \
+     if (DIR["table"]/"folddisco_metal_motif.csv").exists() else set()
+CUT_NI = globals().get("CUT_NI", 3.5)
+TIGHT  = 2.6      # Ni-S 2.2 / Ni-N 2.1 근처. 이보다 멀면 배위로 세지 않는다
+
+rows = []
+for _, r in NIP[NIP.get("B_배위", 0) > 0].iterrows():
+    cif = next(iter(glob.glob(str(DIR["boltz"]/r["set"]/"**"/f"{r['pair']}_model_0.cif"),
+                              recursive=True)), None)
+    if not cif: continue
+    A = cif_atoms(cif)
+    ni = [a for a in A if a[0] == "NI"]
+    if not ni: continue
+    _, _, _, _, x, y, z = ni[0]
+    donors = []
+    for comp, ch, seq, at, ax, ay, az in A:
+        if comp == "NI" or ch != "B": continue
+        d = math.dist((x, y, z), (ax, ay, az))
+        if d <= TIGHT and at not in ("N", "O", "C", "CA", "CB"):
+            donors.append((round(d, 2), comp, seq, at))
+        elif d <= TIGHT and comp in ("ASP", "GLU", "HIS", "CYS"):
+            donors.append((round(d, 2), comp, seq, at))
+    donors = sorted({(c, s): (d, c, s, a) for d, c, s, a in donors}.values())
+    cnt = Counter(c for _, c, _, _ in donors)
+    ncys, nhis = cnt.get("CYS", 0), cnt.get("HIS", 0)
+    nacid = cnt.get("ASP", 0) + cnt.get("GLU", 0)
+    if   ncys >= 4:            grade, why = "A", "Cys4 — 연한 금속 전달·저장형 자리"
+    elif ncys == 3:            grade, why = "B", "Cys3 + 보조 — 구조적 금속 자리"
+    elif ncys == 2 and nhis:   grade, why = "B", "Cys2His — 구조적 금속 자리"
+    elif ncys or nhis >= 3:    grade, why = "C", "His 중심 — 촉매 금속 자리 가능성"
+    else:                      grade, why = "D", "산소 공여체 위주 — 표면 부착 의심"
+    rows.append({"grade": grade, "set": r["set"], "prey": r["prey"],
+                 "n_donor": len(donors), "Cys": ncys, "His": nhis, "Asp/Glu": nacid,
+                 "min_dist": donors[0][0] if donors else None,
+                 "folddisco_metal": r["prey"] in _M,
+                 "donors": " ".join(f"{c}{s}" for _, c, s, _ in donors),
+                 "why": why, "desc": str(r.get("desc", ""))[:55]})
+
+G = pd.DataFrame(rows).sort_values(["grade", "Cys", "min_dist"],
+                                   ascending=[True, False, True])
+G.to_csv(DIR["table"]/"ni_site_grade.csv", index=False, encoding="utf-8-sig")
+pd.set_option("display.max_colwidth", 60); pd.set_option("display.width", 220)
+print(G.to_string(index=False))
+print("\n=== 등급별 ===")
+print(G.groupby("grade").size().to_string())
+print("\n=== folddisco 금속 모티프에 없던 것 (Track B 에서만 나온 후보) ===")
+_new = G[~G.folddisco_metal]
+print(_new[["grade", "prey", "Cys", "His", "donors", "desc"]].to_string(index=False)
+      if len(_new) else "  없음")
+print("\n※ folddisco 질의는 CooC1 의 A112/A114 간격 하나만 찾는다. 간격이 다른 금속")
+print("  자리는 원리상 안 잡힌다. 위 목록이 그 사각지대에 있던 후보들이다.")
+print(f"\n저장: {DIR['table']/'ni_site_grade.csv'}")
+```
+
+---
+
 ## CELL 28a-9 — Part 7d-9. MG1655 · Y19 metal 모티프 단백질 co-folding (대조군)
 
 ```python
@@ -3266,6 +3343,102 @@ FD_ATP   = folddisco_query("atp_run02",   RESIDUES_ATP)
 # 이미 돌려둔 run01 결과가 있으면 그것도 후보에 넣는다
 prev = sorted((ASSET["fd_ws"]/"result"/"run01").glob("*.tsv")) if (ASSET["fd_ws"]/"result"/"run01").exists() else []
 print("\n기존 run01 결과:", [p.name for p in prev])
+```
+
+---
+
+## CELL 29b — Folddisco --rmsd 민감도 (1.0 / 1.5 / 2.0)
+
+```python
+# =============================================================================
+# CELL 29b | 컷오프 1.0 A 가 맞는 선인지 재 본다
+#   지금 후보 목록은 '--rmsd 1.0' 이라는 선을 정해서 만든 표다. 그런데 그 선이
+#   충분한지 검증한 적이 없다. 너무 빡빡하면 진짜 후보가 밖에 있고, 너무 느슨하면
+#   아무 Cys 쌍이나 들어온다.
+#   기준점으로 MinD 를 쓴다 — CooC1 의 최근접 BL21 구조 이웃(MinD/ParA 폴드)이다.
+#   1.0 에서 잡히면 현재 선이 충분한 것이고, 1.5~2.0 에서야 들어오면 지금 목록이
+#   너무 좁은 것이다.
+#   또 하나: 임계값을 올릴 때 히트가 몇 배로 늘어나는지가 이 모티프의 특이도를 말한다.
+#   잔기 2개짜리 질의는 느슨하게 풀면 급격히 무너진다.
+# =============================================================================
+need((have("ASSET", "sh"), "CELL 01 을 먼저 돌릴 것"))
+FD  = ASSET["folddisco"]
+IDX = {"BL21": ASSET["fd_idx_bl21"], "Y19": ASSET["fd_idx_y19"], "MG1655": ASSET["fd_idx_mg"]}
+RES_METAL = globals().get("RESIDUES_METAL", "A112,A114")
+SWEEP = [1.0, 1.5, 2.0]
+
+out_dir = DIR["folddisco"]/"sweep"; out_dir.mkdir(exist_ok=True)
+for rm in SWEEP:
+    tag = f"metal_r{int(rm*10):02d}"
+    for strain, idx in IDX.items():
+        out = out_dir/f"{tag}_{strain}.tsv"
+        if out.exists() and out.stat().st_size:
+            print(f"  [재사용] {out.name}"); continue
+        sh(f'"{FD}" query -p "{ASSET["cooc1_pdb"]}" -q {RES_METAL} -i "{idx}" '
+           f'-t {min(THREADS,8)} --per-structure --header --sort-by idf '
+           f'--rmsd {rm} --top 20000 -o "{out}"', check=False)
+
+# ---------- 집계 ----------
+xw = pd.read_csv(DIR["table"]/"id_crosswalk_struct_to_genbank.csv") \
+     if (DIR["table"]/"id_crosswalk_struct_to_genbank.csv").exists() else pd.DataFrame()
+xwm = xw.dropna(subset=["protein"]).set_index("tid")["protein"].to_dict() if len(xw) else {}
+
+def load(tag, strain):
+    p = out_dir/f"{tag}_{strain}.tsv"
+    if not p.exists() or not p.stat().st_size: return pd.DataFrame()
+    d = pd.read_csv(p, sep="\t")
+    d.columns = [c.strip().lstrip("#") for c in d.columns]
+    d["tid_stem"] = d.tid.apply(lambda x: Path(str(x)).stem)
+    d["protein"]  = d.tid_stem.map(xwm)
+    d["uniprot"]  = d.tid_stem.astype(str).str.extract(r"AF-([A-Z0-9]+)-F", expand=False)
+    d["key"] = d.protein.where(d.protein.notna(), d.uniprot).astype(str).str.split(",").str[0]
+    return d
+
+TAB, KEYS = [], {}
+for rm in SWEEP:
+    tag = f"metal_r{int(rm*10):02d}"
+    for strain in IDX:
+        d = load(tag, strain)
+        if not len(d): continue
+        KEYS[(rm, strain)] = set(d.key)
+        TAB.append({"rmsd": rm, "strain": strain, "hits": len(d),
+                    "max_min_rmsd": round(float(d.min_rmsd.max()), 3) if "min_rmsd" in d else None})
+S = pd.DataFrame(TAB)
+print("\n=== 임계값별 히트 수 ===")
+print(S.pivot_table(index="rmsd", columns="strain", values="hits").to_string())
+print("\n=== 각 파일의 실제 최대 min_rmsd (컷오프가 하드 필터인지 확인) ===")
+print(S.pivot_table(index="rmsd", columns="strain", values="max_min_rmsd").to_string())
+print("  임계값과 최대값이 거의 같으면 하드 필터다. 훨씬 작으면 애초에 그 위가 없던 것이다.")
+
+print("\n=== 임계값을 올릴 때 새로 들어오는 것 (BL21) ===")
+prev = set()
+for rm in SWEEP:
+    cur = KEYS.get((rm, "BL21"), set())
+    new = cur - prev
+    print(f"  rmsd {rm}: 총 {len(cur)}개 (신규 {len(new)})")
+    prev = cur
+
+# ---------- MinD 기준점 ----------
+_bl = {}
+for l in open(ASSET["faa_bl21"], errors="ignore"):
+    if l.startswith(">"):
+        h = l[1:].rstrip(); _bl[h.split()[0]] = h[len(h.split()[0]):]
+mind = [k for k, v in _bl.items() if re.search(r"\bMinD\b|septum site-determining", str(v), re.I)]
+print(f"\n=== 기준점: MinD (CooC1 의 최근접 BL21 구조 이웃) ===")
+print(f"BL21 프로테옴에서 찾은 MinD: {mind}")
+for k in mind:
+    hit_at = [rm for rm in SWEEP if k in KEYS.get((rm, "BL21"), set())]
+    print(f"  {k} {_bl[k][:60]}")
+    print(f"    잡히는 임계값: {hit_at if hit_at else '어느 값에서도 안 잡힘'}")
+if mind and not any(k in KEYS.get((SWEEP[0], "BL21"), set()) for k in mind):
+    print("\n  → 1.0 A 에서 MinD 가 안 잡힌다. 두 가지 중 하나다:")
+    print("     (a) 현재 컷오프가 너무 빡빡하다 -> 더 큰 값에서 잡히는지 위 표로 확인")
+    print("     (b) MinD 는 금속 자리가 없다 (Walker A 만 공유) -> 애초에 기준점으로")
+    print("         부적합. 그렇다면 metal 모티프의 민감도는 다른 방법으로 재야 한다.")
+    print("     CooC1 의 Ni 자리는 CXC 인데 MinD 에는 그 Cys 가 없을 수 있다.")
+    print("     위 '신규' 열이 임계값마다 몇 배로 느는지를 보고 특이도 손실을 판단할 것.")
+S.to_csv(DIR["table"]/"folddisco_rmsd_sweep.csv", index=False, encoding="utf-8-sig")
+print(f"\n저장: {DIR['table']/'folddisco_rmsd_sweep.csv'}")
 ```
 
 ---
