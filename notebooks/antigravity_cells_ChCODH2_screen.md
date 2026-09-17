@@ -2507,7 +2507,8 @@ print("   RF2-PPI(공진화)는 셋 모두와 무관한 축이므로 Track A 결
 # CELL 28a-7 | ligand_iptm 이 무엇을 재고 있었는지 좌표로 확인한다
 #   Ni 을 리간드로 넣은 이유는 "Ni 이 두 사슬 경계면에 놓이는가"를 묻기 위해서였다.
 #   그게 실제로 일어났는지는 점수가 아니라 좌표를 봐야 안다.
-#   실측(348 구조): 계면 0 / ChCODH2 쪽 335 / 후보 쪽 13.
+#   실측(out+out_focus 348 구조): 계면 0 / ChCODH2 쪽 335 / 후보 쪽 13.
+#   후보 쪽으로 간 것: Tgt · YeiR · GmhB · PhnP · HslO · HisB (focus 27개 중 6개)
 #   -> 전달 복합체는 한 번도 모델링되지 않았다. ligand_iptm 은 "Ni 이 계면에 있나"가
 #      아니라 "ChCODH2 안 어디에 박혔나"를 재고 있었고, 그래서 길이와 rho=-0.81 로
 #      묶였다 (CELL 28a). 이 지표는 랭킹 축에서 제외한다.
@@ -2542,7 +2543,14 @@ def cif_atoms(cif):
     return out
 
 rows = []
-for d in ["out", "out_focus"]:
+# out_cmp(MG1655·Y19) 와 out_rep(반복 측정) 이 나중에 생겼다. 고정 목록으로 들면
+# 새로 만든 예측이 조용히 빠진다 — 실제로 MG1655·Y19 의 Ni 배치가 통째로 비어
+# 있었던 원인이다. 있는 out* 를 전부 훑는다.
+_SETS = sorted(d.name for d in DIR["boltz"].glob("out*") if d.is_dir())
+print("읽을 예측 폴더:", _SETS)
+for d in _SETS:
+    # diffusion_samples>1 인 폴더(out_rep)도 model_0 한 개만 본다. 배치 재현성은
+    # ipTM 이 아니라 좌표로 따로 봐야 하므로 여기서는 대표값으로 충분하다.
     for cif in glob.glob(str(DIR["boltz"]/d/"**"/"*_model_0.cif"), recursive=True):
         name = Path(cif).stem.replace("_model_0", "")
         A = cif_atoms(cif)
