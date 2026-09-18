@@ -299,12 +299,14 @@ def locus_num(pid, desc):
     return int(m.group(1)) if m else None
 
 ONLY = V[V.bl21_only == 1].merge(CAND[["protein", "desc", "len"]], on="protein", how="left")
-ONLY["loc"] = [locus_num(p, d) for p, d in zip(ONLY.protein, ONLY.desc)]
-ONLY = ONLY.dropna(subset=["loc"]).sort_values("loc")
+# 열 이름을 'loc' 으로 두면 안 된다 — Series.loc 은 pandas 의 인덱서라
+# r.loc 이 열 값이 아니라 _LocIndexer 를 준다. 이름을 바꿔 충돌을 없앤다.
+ONLY["locnum"] = [locus_num(p, d) for p, d in zip(ONLY.protein, ONLY.desc)]
+ONLY = ONLY.dropna(subset=["locnum"]).sort_values("locnum")
 
 blocks, cur = [], []
 for _, r in ONLY.iterrows():
-    if cur and r.loc - cur[-1]["loc"] <= GAP: cur.append(r)
+    if cur and r["locnum"] - cur[-1]["locnum"] <= GAP: cur.append(r)
     else:
         if cur: blocks.append(cur)
         cur = [r]
@@ -314,7 +316,7 @@ print("=" * 100); print("### MG1655 에 없는 것들의 유전체 배치"); pri
 MOBILE = set()
 for b in blocks:
     ids = [x.protein for x in b]
-    lo, hi = int(b[0].loc), int(b[-1].loc)
+    lo, hi = int(b[0]["locnum"]), int(b[-1]["locnum"])
     kw = sum(1 for x in b if re.search("|".join(MOBILE_KW), str(x.desc), re.I))
     tag = ""
     if len(b) >= MIN_BLOCK:
