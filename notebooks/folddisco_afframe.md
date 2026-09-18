@@ -926,9 +926,34 @@ for st in ["BL21", "MG1655", "Y19"]:
                      "Fold-only 0.50-0.70":  int(((sub.tm >= 0.50) & (sub.tm < 0.70)).sum()),
                      "Top hit": top.protein, "TM": round(float(top.tm), 3)})
 T1 = pd.DataFrame(rows)
+
+# 필터 전 매칭 수(cooc_fold_counts.csv)를 같은 표에 합친다.
+# 두 파일을 오가며 손으로 조합하지 않도록 한 장으로 만든다.
+_cp = TBL/"cooc_fold_counts.csv"
+if _cp.exists():
+    C0 = pd.read_csv(_cp)
+    C0["Strain"] = C0.strain.map(LABEL)
+    C0["Frame"]  = C0.frame.map({"예측": "AFDB", "결정": "Crystal"})
+    C0 = C0.rename(columns={"정렬총수": "Total aln", "프로테옴": "Proteome",
+                            "비율(≥0.5)": "per proteome %"})
+    keep = ["Strain", "Frame", "Total aln", "≥0.3", "≥0.4", "≥0.7",
+            "Proteome", "per proteome %"]
+    T1 = T1.merge(C0[[c for c in keep if c in C0.columns]],
+                  on=["Strain", "Frame"], how="left")
+    ORD = ["Strain", "Frame", "Proteome", "Total aln", "≥0.3", "≥0.4",
+           "Fold hits", "per proteome %", "Near 0.70-0.90", "Core >=0.90",
+           "Fold-only 0.50-0.70", "Top hit", "TM"]
+    T1 = T1[[c for c in ORD if c in T1.columns] +
+            [c for c in T1.columns if c not in ORD]]
+else:
+    print("  ⚠ cooc_fold_counts.csv 없음 — F6 을 먼저 돌리면 필터 전 수가 합쳐진다")
+
 T1.to_csv(SLIDE/"table1_fold_counts.csv", index=False, encoding="utf-8-sig")
-print("=" * 96); print("### 표1 — 폴드 검색 결과"); print("=" * 96)
+print("=" * 96); print("### 표1 — 폴드 검색 결과 (필터 전후 합본)"); print("=" * 96)
 print(T1.to_string(index=False))
+print("\n  'Fold hits' 가 ≥0.5 통과 수다. Total aln 은 -e 10 --max-seqs 2000 으로")
+print("  되돌아온 전부라 그 자체에 의미는 없고, ≥0.3 / ≥0.4 와 같이 봐야")
+print("  '어디서 신호가 갈리는가' 가 보인다.")
 
 C = pd.read_csv(TBL/"cooc_fold_mg1655.csv")
 NOTE = {".": "", "~": "annotation gap", "O": "ABSENT in MG1655"}
@@ -968,7 +993,18 @@ print(f"  All {n_in}/{len(C)} also present in MG1655"
       f"  -> no strain difference at family level")
 print("\n  ※ 위 숫자는 모두 프레임을 명시한 것이다. 슬라이드에 옮길 때")
 print("    crystal 값과 AFDB 값을 한 줄에 섞지 말 것 — 표와 안 맞게 된다.")
+LINES = []
+LINES.append("Control PASSED : ChCooC1 -> Y19 CooC")
+if c_cry and c_af:
+    LINES.append(f"    TM {c_cry:.3f} (crystal query) / {c_af:.3f} (AFDB query)")
+LINES.append(f"BL21 CooC-family : {len(bl)} proteins, max TM {bl.tm.max():.3f}  [AFDB frame]")
+LINES.append(f"Core (TM >= 0.90) in AFDB frame : {_core}")
+LINES.append(f"All {n_in}/{len(C)} BL21 members also present in MG1655")
+(SLIDE/"slide_lines.txt").write_text("\n".join(LINES) + "\n", encoding="utf-8")
 print(f"\n저장: {SLIDE}")
+print(f"  table1_fold_counts.csv          필터 전후 합본")
+print(f"  table2_bl21_family_vs_MG1655.csv")
+print(f"  slide_lines.txt                 위 문장 그대로")
 ```
 
 ---
