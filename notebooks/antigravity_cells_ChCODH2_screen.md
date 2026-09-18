@@ -3724,6 +3724,14 @@ print("질의 후보:", QUERIES if QUERIES else "없음")
 FD  = ASSET["folddisco"]
 IDX = {"BL21": ASSET["fd_idx_bl21"], "Y19": ASSET["fd_idx_y19"], "MG1655": ASSET["fd_idx_mg"]}
 outd = DIR["folddisco"]/"cys4"; outd.mkdir(exist_ok=True)
+# ★ --covered-node 기본값은 0 이다. 4잔기 질의를 날려도 2잔기만 맞은 구조가
+#   히트로 잡힌다 (CELL 29f 에서 node_count 가 전부 2 인 것으로 확인됐다).
+#   그래서 같은 질의를 두 설정으로 돌려 나란히 본다.
+#     part : covered-node 미지정 (기존 결과 — 부분 일치 포함)
+#     cov4 : --covered-node 4     (네 잔기가 모두 맞은 것만)
+#   완전 일치 수가 부분 일치와 비슷하면 재질의는 유효했던 것이고,
+#   크게 떨어지면 증가분의 대부분이 부분 일치였다는 뜻이다.
+MODES = {"part": "", "cov4": "--covered-node 4"}
 found = {}
 for pid, qres in QUERIES.items():
     sp = find_struct(pid)
@@ -3731,26 +3739,39 @@ for pid, qres in QUERIES.items():
         print(f"  [구조 못 찾음] {pid} — 인덱스 디렉터리를 확인할 것"); continue
     print(f"\n>>> 질의 {pid}  {qres}\n    템플릿 {sp}")
     for strain, idx in IDX.items():
-        out = outd/f"cys4_{pid}_{strain}.tsv"
-        if not (out.exists() and out.stat().st_size):
-            sh(f'"{FD}" query -p "{sp}" -q {qres} -i "{idx}" -t {min(THREADS,8)} '
-               f'--per-structure --header --sort-by idf --rmsd 1.0 --top 5000 -o "{out}"',
-               check=False)
-        if out.exists() and out.stat().st_size:
-            d = pd.read_csv(out, sep="\t"); d.columns = [c.strip().lstrip("#") for c in d.columns]
-            found[(pid, strain)] = len(d)
-            print(f"    {strain:7s} {len(d)}개")
+        line = []
+        for mode, opt in MODES.items():
+            out = outd/(f"cys4_{pid}_{strain}.tsv" if mode == "part"
+                        else f"cys4cov4_{pid}_{strain}.tsv")
+            if not (out.exists() and out.stat().st_size):
+                sh(f'"{FD}" query -p "{sp}" -q {qres} -i "{idx}" -t {min(THREADS,8)} '
+                   f'--per-structure --header --sort-by idf --rmsd 1.0 --top 5000 '
+                   f'{opt} -o "{out}"', check=False)
+            n = 0
+            if out.exists() and out.stat().st_size:
+                d = pd.read_csv(out, sep="\t")
+                d.columns = [c.strip().lstrip("#") for c in d.columns]
+                n = len(d)
+            found[(pid, strain, mode)] = n
+            line.append(f"{mode} {n}")
+        print(f"    {strain:7s} " + "  /  ".join(line))
 
 if found:
-    F = (pd.Series(found).rename("hits").rename_axis(["query", "strain"])
-           .reset_index().pivot(index="query", columns="strain", values="hits"))
-    print("\n=== Cys4 질의 히트 수 ===")
-    print(F.to_string())
-    F.to_csv(DIR["table"]/"folddisco_cys4_requery.csv", encoding="utf-8-sig")
+    F = (pd.Series(found).rename("hits").rename_axis(["query", "strain", "mode"])
+           .reset_index().pivot(index=["query", "strain"], columns="mode", values="hits")
+           .reset_index())
+    F["완전일치비율"] = (F.get("cov4", 0) / F.get("part", 1).replace(0, np.nan)).round(3)
+    print("\n=== Cys4 질의 히트 수 (part = 부분 일치 포함 / cov4 = 4잔기 전부) ===")
+    print(F.to_string(index=False))
+    F.to_csv(DIR["table"]/"folddisco_cys4_requery.csv", index=False, encoding="utf-8-sig")
     print(f"\n저장: {DIR['table']/'folddisco_cys4_requery.csv'}")
-    print("\n원래 질의(A112/A114)의 29/21/30 과 비교할 것.")
-    print("  크게 늘면 → 원래 질의가 좁았던 것이고, 새 목록을 후보에 합쳐야 한다.")
-    print("  비슷하면 → 잔기 4개 질의는 원래 특이도가 높다. 지금 목록이 맞다.")
+    print("\n원래 질의(A112/A114, 2잔기)의 29/21/30 과 비교할 것.")
+    print("  cov4 가 part 와 비슷하면 → 재질의가 실제로 새 자리를 찾아낸 것이다.")
+    print("  cov4 가 29 근처로 떨어지면 → 늘어난 분의 대부분이 부분 일치였다.")
+    print("  어느 쪽이든 앞으로 후보 목록(FD_CYS4)은 cov4 쪽을 쓴다.")
+    if "cov4" in F and "part" in F:
+        _r = F.cov4.sum() / max(F.part.sum(), 1)
+        print(f"\n  전체 완전일치 비율: {F.cov4.sum()} / {F.part.sum()} = {_r:.1%}")
 else:
     print("\n재질의를 못 돌렸다. 구조 파일 경로(_roots)를 확인할 것:")
     for r in _roots: print(f"   {r}  {'있음' if Path(r).exists() else '없음'}")
@@ -6477,7 +6498,13 @@ if _p.exists():
     _m = pd.read_csv(_p)
     FD_METAL = set(_m.key.astype(str))
     print(f"Folddisco metal 모티프 : {len(FD_METAL)}개  {_m.strain.value_counts().to_dict()}")
-for f in (DIR["folddisco"]/"cys4").glob("cys4_*.tsv"):
+# --covered-node 4 로 다시 돌린 결과가 있으면 그쪽을 쓴다. 기본값(0)으로 돌린
+# 결과는 4잔기 질의에 2잔기만 맞은 구조까지 세므로 목록이 부풀려져 있다.
+_c4 = sorted((DIR["folddisco"]/"cys4").glob("cys4cov4_*.tsv"))
+_cys4_src = _c4 if _c4 else sorted((DIR["folddisco"]/"cys4").glob("cys4_*.tsv"))
+print(f"Cys4 재질의 파일: {'covered-node 4' if _c4 else '부분 일치 포함(구버전)'} "
+      f"{len(_cys4_src)}개")
+for f in _cys4_src:
     if not f.stat().st_size: continue
     d = pd.read_csv(f, sep="\t"); d.columns = [c.strip().lstrip("#") for c in d.columns]
     FD_CYS4 |= {XWM.get(Path(str(x)).stem) for x in d.tid}
