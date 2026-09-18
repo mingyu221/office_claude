@@ -797,6 +797,92 @@ else:
 
 ---
 
+## CELL Q6b — 백그라운드 실행 + 모니터
+
+```python
+# =============================================================================
+# CELL Q6b | boltz 를 백그라운드로 띄운다
+#   노트북 셀에서 직접 돌리면 커널이 묶이고, 커널이 죽으면 예측도 죽는다.
+#   setsid + nohup 으로 떼어 놓고 로그만 본다. 이 셀을 다시 돌리면
+#   띄우지 않고 **상태만** 보여준다 (중복 실행 방지).
+# =============================================================================
+import os, subprocess, shlex, time, glob
+from pathlib import Path
+
+BOLTZ_ROOT = BASE/"result"/"boltz"
+IN_DIR     = "inputs_seqmotif"          # 이량체는 "inputs_cooclike"
+OUT_DIR    = "out_seqmotif"             #           "out_cooclike"
+CONDA_ENV  = "boltz"                    # boltz 가 설치된 env 이름. 다르면 고칠 것
+LOG        = BOLTZ_ROOT/f"{OUT_DIR}.log"
+PIDF       = BOLTZ_ROOT/f"{OUT_DIR}.pid"
+
+# ---- GPU 선택: 여유 메모리가 가장 많은 것 ----
+def pick_gpu():
+    try:
+        o = subprocess.run("nvidia-smi --query-gpu=index,memory.free,memory.total "
+                           "--format=csv,noheader,nounits", shell=True, text=True,
+                           capture_output=True).stdout.strip().splitlines()
+        rows = [tuple(int(x) for x in l.split(",")) for l in o if l.strip()]
+        for i, f, tt in rows: print(f"  GPU {i}: 여유 {f:6d} / {tt} MiB")
+        return max(rows, key=lambda r: r[1])[0] if rows else 0
+    except Exception as e:
+        print(f"  nvidia-smi 실패 ({e}) — GPU 0 으로 간다"); return 0
+
+def running():
+    if not PIDF.exists(): return None
+    try: pid = int(PIDF.read_text().strip())
+    except Exception: return None
+    return pid if Path(f"/proc/{pid}").exists() else None
+
+n_in  = len(list((BOLTZ_ROOT/IN_DIR).glob("*.yaml")))
+n_out = len(glob.glob(str(BOLTZ_ROOT/OUT_DIR/"**"/"*_model_0.cif"), recursive=True))
+print("=" * 96); print("### 상태"); print("=" * 96)
+print(f"  입력  {BOLTZ_ROOT/IN_DIR}  {n_in}개")
+print(f"  출력  {BOLTZ_ROOT/OUT_DIR}  {n_out}개  ({n_out/max(n_in,1)*100:.1f}%)")
+
+pid = running()
+if pid:
+    print(f"\n  이미 돌고 있다 — PID {pid}")
+    print(f"  로그: {LOG}")
+    print("  중단하려면:  import os, signal; os.kill(%d, signal.SIGTERM)" % pid)
+elif n_out >= n_in and n_in:
+    print("\n  이미 다 끝났다. Q6 채점 부분을 돌릴 것.")
+else:
+    GPU = pick_gpu()
+    print(f"\n  GPU {GPU} 로 띄운다")
+    cmd = (f'boltz predict {IN_DIR} --out_dir {OUT_DIR} --use_msa_server '
+           f'--max_msa_seqs 2048 --recycling_steps 3 --diffusion_samples 1 '
+           f'--output_format mmcif --num_workers 2')
+    # conda run 으로 감싼다. env 가 없으면 현재 인터프리터의 boltz 를 쓴다
+    has_env = subprocess.run(f"conda env list | grep -qE '^{CONDA_ENV}\\s'",
+                             shell=True).returncode == 0
+    inner = f"conda run -n {CONDA_ENV} --no-capture-output {cmd}" if has_env else cmd
+    print(f"  conda env '{CONDA_ENV}': {'있음' if has_env else '없음 → 현재 환경으로'}")
+    script = (f'cd {shlex.quote(str(BOLTZ_ROOT))} && '
+              f'CUDA_VISIBLE_DEVICES={GPU} '
+              f'PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512 '   # 1.x/2.x 둘 다 먹는 옵션
+              f'{inner}')
+    LOG.parent.mkdir(parents=True, exist_ok=True)
+    with open(LOG, "ab") as lf:
+        proc = subprocess.Popen(["setsid", "bash", "-lc", script],
+                                stdout=lf, stderr=lf, start_new_session=True)
+    PIDF.write_text(str(proc.pid))
+    time.sleep(6)
+    print(f"  PID {proc.pid}  로그 {LOG}")
+    if not Path(f"/proc/{proc.pid}").exists():
+        print("\n  ★ 6초 만에 죽었다. 로그 끝부분:")
+        print("\n".join(LOG.read_text(errors='ignore').splitlines()[-25:]))
+
+print("\n" + "=" * 96); print("### 로그 끝 20줄"); print("=" * 96)
+print("\n".join(LOG.read_text(errors="ignore").splitlines()[-20:])
+      if LOG.exists() else "  아직 로그 없음")
+print("\n  ※ 이 셀을 다시 돌리면 진행률과 로그만 갱신된다 (중복 실행 안 함).")
+print("    MSA 서버에서 막히면 로그에 429 나 timeout 이 뜬다. 그때는 입력을")
+print("    100개씩 하위 폴더로 나눠 IN_DIR 을 바꿔가며 돌린다.")
+```
+
+---
+
 ## CELL Q7 — 단량체로 접었다는 것을 보정한다 (이량체 계면 자리)
 
 ```python
