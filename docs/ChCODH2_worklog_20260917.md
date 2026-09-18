@@ -824,3 +824,68 @@ L 상한 프로브는 **일부러 OOM 을 내는** 코드라, 같은 카드에 B
 상한이 낮게 조작된다. 프로브가 끝난 뒤에 띄우거나 카드를 나눠야 한다.
 `FORCE_GPU` 를 Q6b 에 추가한 이유가 이것이다 — 상대가 아직 메모리를 안 잡았으면
 여유 메모리로는 구분이 안 된다.
+
+---
+
+## 17. `QJZ13931.1` BcsQ — 내린 판정을 뒤집는다 (2026-09-19)
+
+### 사실
+
+UniProt **P37655** (`BCSQP_ECOLI`) 는 **PUTATIVE PSEUDOGENE** 으로 등록돼 있다.
+
+> premature stop codon **at position 6** of the intact protein.
+> The protein is missing **8 N-terminal amino acids**.
+> Cellulose production is **abolished in E. coli K-12 MG1655 and W3110** due to a
+> premature stop codon in this gene. When the reading frame is restored,
+> cellulose biosynthesis is also restored — 온전한 단백질은 **P0DP92**.
+> 종결코돈은 downstream bcsA·bcsB·bcsZ·bcsC 전사에 **polar effect** 도 준다.
+> — Serra, Richter & Hengge 2013, *J Bacteriol* 195:5540 (PMID 24097954)
+
+| 항목 | BL21 `QJZ13931.1` | MG1655 `P37655` |
+|---|---|---|
+| 길이 | **250 aa** | 242 aa (N말단 8잔기 결손) |
+| 상태 | 온전 | **pseudogene** |
+| ChCooC1 과 TM | **0.708 — BL21 최고** | 0.731 (단편이지만 폴드는 남음) |
+
+### 앞서 왜 놓쳤나
+
+`cys4_genome_check` 에서 게놈 fident **0.987** 을 보고
+**"게놈에 온전 → 어노테이션 누락"** 으로 내렸다. 두 가지를 안 봤다.
+
+1. **`--search-type 2` 는 번역 검색이라 내부 종결코돈에서 멈추지 않는다.**
+   종결코돈은 불일치 한 개로 지나간다. fident 0.987 은 pseudogene 과 모순되지 않는다
+2. **`qstart` 가 7 이었다.** 질의의 1–6번 잔기가 안 붙었다는 신호였는데
+   커버리지(0.976)만 보고 넘겼다
+
+직접 번역해 확인하려 했을 때도 정렬 좌표로 창을 잘라서 **종결코돈 위치(6번 코돈)가
+창 밖에 있었다.** frame 0 에 내부 종결 0개로 나온 것은 그래서다.
+
+> **교훈: 게놈에 서열이 있다 ≠ 단백질이 있다.** 프로테옴에서 빠진 이유를
+> 확인하지 않고 '어노테이션 누락' 으로 처리하면 pseudogene 을 놓친다.
+> `qstart > 1` 은 그 신호다.
+
+### 그래서 무엇이 달라지나
+
+이것은 **BL21 과 MG1655 의 검증된 기능적 차이**다. 문헌으로 확립돼 있고
+리딩프레임을 복구하면 표현형이 돌아온다 — 되돌릴 수 있는 변이다.
+
+그리고 BcsQ 는 **MinD/ParA 형 ATPase (SIMIBI clan)** 로 CooC 와 같은 초과이고,
+BL21 의 CooC-like 목록에서 **TM 0.708 로 1위**다.
+
+**관찰과 모양이 같다** — BL21 lysate 는 되고 MG1655 lysate 는 안 된다.
+
+### 그러나 아직 근거가 없는 것
+
+| | |
+|---|---|
+| 기능 | BcsQ 의 알려진 일은 **셀룰로스 합성효소의 극 국재화**다. 금속 삽입이 아니다 |
+| 금속 자리 | Cys 배치·Ni 배위 증거가 **아직 없다** |
+| TM 0.708 | 같은 **폴드**일 뿐이다. MinD·ParA·CooC·BcsQ·ApbC 가 전부 이 폴드를 공유한다. 0.5~0.7 이 깔린 목록에서 1위인 것은 약한 신호다 |
+| 산물 | UniProt 증거 수준이 `Uncertain` 이다. 6 nt 하류 GTG 에서 시작하는 **절단형 단백질이 만들어질 수도** 있다 — "단백질이 아예 없다" 가 아니다 |
+| polar effect | 종결코돈이 하류 bcs 유전자 전사를 함께 낮춘다. lysate 차이가 BcsQ 자체가 아니라 **오페론 전체** 때문일 수도 있다 |
+
+### 다음 한 가지
+
+`QJZ13931.1` 에 **금속을 잡을 자리가 있는가.** 없으면 폴드 우연이다.
+- 서열 모티프 스캔(`seqmotif_all_strains.csv`)에 들어 있나, Cys 배치는 어떤가
+- Boltz 로 도킹된 적이 있나 (`ni_site_grade.csv`), 등급은 무엇인가
