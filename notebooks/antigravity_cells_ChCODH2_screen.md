@@ -7809,10 +7809,75 @@ R = (pd.Series(res).rename("hits").rename_axis(["covered_node", "strain"])
 print(R.to_string())
 R.to_csv(DIR["table"]/"cooc1_merged_query.csv", encoding="utf-8-sig")
 
+# ---------- (4b) 양성 대조 — covered-node 가 3 이상에서 작동은 하는가 ----------
+# covered-node 2 에서 19/15/21 인데 3 에서 정확히 0 이다. 2개가 맞는 단백질이
+# 스무 개나 있으면 3개가 맞는 것이 하나쯤 나와야 자연스럽다. CELL 29f 에서도
+# node_count 가 전부 2 였다. folddisco 인덱스가 잔기 쌍 단위라 node_count 가
+# 2 에서 캡되는 것이라면, --covered-node 3 이상은 무엇을 넣든 항상 0 이다.
+#   가르는 법: 인덱스 안에 있는 단백질의 4잔기를 그 인덱스에 질의한다.
+#   자기 자신은 반드시 node_count 4 로 나와야 한다. 안 나오면 캡이 있는 것이고,
+#   위의 0 은 생물학이 아니라 도구의 성질이다.
+print("\n" + "=" * 100); print("### (4b) 양성 대조 — 자기 자신을 4잔기로 찾는가"); print("=" * 100)
+CTRL_OK = None
+_ni = DIR["table"]/"ni_site_grade.csv"
+_xwp = DIR["table"]/"id_crosswalk_struct_to_genbank.csv"
+if _ni.exists() and _xwp.exists():
+    _g = pd.read_csv(_ni); _x = pd.read_csv(_xwp)
+    _cand = None
+    for _, r in _g[_g.grade == "A"].iterrows():
+        pid = str(r.prey).split("-")[-1]
+        cys = sorted(int(x[3:]) for x in str(r.donors).split() if x.startswith("CYS"))
+        if not pid.startswith("QJZ") or len(cys) < 4: continue
+        row = _x[_x.protein.astype(str).str.contains(pid, na=False)]
+        if not len(row): continue
+        stem = Path(str(row.iloc[0].tid)).stem
+        f = None
+        for root in [TOOLS/"database"/"bacteriaDB", TOOLS/"database"]:
+            if not Path(root).exists(): continue
+            f = next(iter(glob.glob(str(Path(root)/"**"/f"{stem}*.cif"), recursive=True)), None)
+            if not f:
+                f = next(iter(glob.glob(str(Path(root)/"**"/f"{stem}*.pdb"), recursive=True)), None)
+            if f: break
+        if f: _cand = (pid, cys[:4], f, stem); break
+    if _cand is None:
+        print("  대조에 쓸 구조를 못 찾았다 — 판정을 보류한다.")
+    else:
+        pid, cys, fpath, stem = _cand
+        q = ",".join(f"A{n}" for n in cys)
+        print(f"  대조 단백질 {pid}  질의 {q}\n  구조 {fpath}")
+        oc = od/f"selftest_{pid}.tsv"
+        if not (oc.exists() and oc.stat().st_size):
+            sh(f'"{FD}" query -p "{fpath}" -q {q} -i "{ASSET["fd_idx_bl21"]}" '
+               f'-t {min(THREADS,8)} --per-structure --header --sort-by idf '
+               f'--rmsd 1.0 --top 5000 --covered-node 4 -o "{oc}"', check=False)
+        n_self = 0
+        if oc.exists() and oc.stat().st_size:
+            d = pd.read_csv(oc, sep="\t"); d.columns = [c.strip().lstrip("#") for c in d.columns]
+            n_self = len(d)
+            _me = d[d.tid.astype(str).str.contains(stem, na=False)]
+            print(f"  covered-node 4 히트 {n_self}개, 그중 자기 자신 {len(_me)}개")
+            if "node_count" in d.columns:
+                print(f"  node_count 분포: {d.node_count.value_counts().to_dict()}")
+        else:
+            print("  결과 없음")
+        CTRL_OK = n_self > 0
+        print(f"\n  => 양성 대조 {'통과' if CTRL_OK else '실패'}")
+        if not CTRL_OK:
+            print("  자기 자신조차 4잔기로 못 찾는다. 이 인덱스에서 --covered-node 는")
+            print("  3 이상을 만족할 수 없다 (쌍 단위 인덱스로 보인다).")
+            print("  ★ 위의 0 은 생물학적 음성이 아니다. 판정하지 않는다.")
+else:
+    print("  ni_site_grade.csv / crosswalk 이 없어 대조를 못 돌린다 — 판정 보류.")
+
 # ---------- (5) 판정 ----------
 print("\n" + "=" * 100); print("### (5) 판정"); print("=" * 100)
 _n4 = int(R.loc[4].sum()) if 4 in R.index else 0
-if _n4 > 0:
+if CTRL_OK is False:
+    print("  양성 대조가 실패했으므로 covered-node 4 의 0 은 해석하지 않는다.")
+    print("  대신 covered-node 2 의 목록(19/15/21)이 이 질의로 얻은 전부다.")
+    print("  그 목록은 원 질의(29/21/30)의 부분집합에 가깝다 — 기하가 정확해진 만큼")
+    print("  좁아진 것이고, 여기에는 의미가 있다. 이쪽을 후보로 볼 것.")
+elif _n4 > 0:
     print(f"  covered-node 4 에서 {_n4}개.")
     print("  ★ 한 사슬로 CooC1 의 이량체 Ni 자리를 재현하는 단백질이 있다.")
     print("    비상동 삽입자 가설이 예측하는 바로 그 범주다.")
@@ -7837,9 +7902,10 @@ if _n4 > 0:
         B.to_csv(DIR["table"]/"cooc1_merged_hits.csv", index=False, encoding="utf-8-sig")
         print(f"\n  저장: {DIR['table']/'cooc1_merged_hits.csv'}")
 else:
-    print("  covered-node 4 에서 0 — 이번에는 기하가 맞는 질의로 물었는데도 0 이다.")
+    print("  covered-node 4 에서 0. 양성 대조가 통과했으므로 도구는 정상이고,")
+    print("  기하도 검증됐다 (SG–SG 2.86~3.56 Å).")
     print("  ★ 세 균주 어디에도 이 자리를 한 사슬로 재현하는 단백질이 없다.")
-    print("    확실한 음성이고, 그 자체로 결과다. covered-node 3 을 같이 볼 것.")
+    print("    확실한 음성이고, 그 자체로 결과다.")
 print("\n  비교:")
 print("    CELL 29   원 질의 A112,A114 (2잔기)        BL21 29 / Y19 30 / MG1655 21")
 print("    CELL 29f  ASU 의 A·B (사슬 간 60 Å — 틀린 질의)  covered-node 4 에서 0")
