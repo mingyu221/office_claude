@@ -1277,23 +1277,42 @@ for st, p in FAA.items():
             txt = re.split(r"\s*\[(?:Escherichia|Citrobacter)", txt)[0]
             if txt and acc not in NAME: NAME[acc] = txt.strip()[:70]
 print(f"\n  FASTA 에서 이름 {len(NAME)} · 유전자명 {len(GENE)} · 로커스 {len(LOCUS)}")
+print("  (헤더가 NCBI 대괄호 형식이 아니라 gene/locus_tag 는 0 이다 — 설명문만 쓴다)")
+for s, d in STRUCT_ALL.items():
+    fs_ = [f for f in Path(d).iterdir() if f.suffix.lower() in (".cif", ".pdb")][:1]
+    print(f"  {s:8s} 구조 파일 예: {fs_[0].name if fs_ else '없음'}")
 
 # ---- (2) AlphaFold CIF 의 _struct.title ----
-def cif_title(path):
+def struct_title(path):
+    """AFDB 모델 파일에서 단백질 이름을 꺼낸다.
+         .cif  →  _struct.title 'Zinc-binding GTPase YeiR'
+         .pdb  →  TITLE  ALPHAFOLD MONOMER V2.0 PREDICTION FOR ... (P0AAN3)
+       앞서 .cif 만 찾아서 .pdb 로 받아 둔 프로테옴에서는 전부 빈칸이 나왔다."""
     try:
-        txt, out = open(path, errors="ignore").read(6000), None
-        m = re.search(r"_struct\.title\s+(?:'([^']*)'|\"([^\"]*)\"|(\S.*))", txt)
-        if m: out = (m.group(1) or m.group(2) or m.group(3)).strip().strip("'\"")
-        return out
+        txt = open(path, errors="ignore").read(8000)
     except Exception:
         return None
+    m = re.search(r"_struct\.title\s+(?:'([^']*)'|\"([^\"]*)\"|(\S.*))", txt)
+    if m:
+        return (m.group(1) or m.group(2) or m.group(3)).strip().strip("'\"")
+    ttl = " ".join(l[10:].strip() for l in txt.splitlines() if l.startswith("TITLE"))
+    if ttl:
+        m = re.search(r"PREDICTION FOR\s+(.*)", ttl, re.I)
+        s = (m.group(1) if m else ttl).strip()
+        s = re.sub(r"\s*\([A-Z0-9]+\)\s*$", "", s)          # 끝의 (P0AAN3) 제거
+        return s.strip() or None
+    return None
 
 UNI_TITLE = {}
 def uniprot_name(acc):
     if acc in UNI_TITLE: return UNI_TITLE[acc]
     for d in STRUCT_ALL.values():
-        for f in Path(d).glob(f"AF-{acc}-F1-model_v*.cif"):
-            UNI_TITLE[acc] = cif_title(f); return UNI_TITLE[acc]
+        for pat in (f"AF-{acc}-F1-model_v*.cif", f"AF-{acc}-F1-model_v*.pdb",
+                    f"AF-{acc}-*.cif", f"AF-{acc}-*.pdb", f"*{acc}*"):
+            for f in Path(d).glob(pat):
+                if f.suffix.lower() not in (".cif", ".pdb"): continue
+                n = struct_title(f)
+                if n: UNI_TITLE[acc] = n; return n
     UNI_TITLE[acc] = None; return None
 
 def label(acc):
