@@ -166,7 +166,11 @@ BASE/result/table/
 │     genome_MG1655  BL21 전용 후보의 게놈 확인 결과
 ├── ni_site_grade.csv              ★ Ni 배위 도너 등급 A~D
 ├── boltz_ni_placement.csv           411 구조의 Ni 좌표
-├── cys4_bl21_strain_specificity.csv 프로테옴 수준 균주 특이성
+├── cys4_bl21_strain_specificity.csv 프로테옴 수준 균주 특이성 (mmseqs — 유효)
+├── motif_strain_specificity.csv   folddisco 히트 목록 간 비교 (★ 균주 변별 불가)
+├── motif_strain_specific_verified.csv ★ 위를 mmseqs·게놈으로 검증한 결과
+├── motif_summary.csv · motif_summary_members.csv  요약표와 그 구성원
+├── folddisco_sensitivity_sweep.csv  -d/-a 스윕 (Y19 CooC 가 안 잡힌다)
 ├── cys4_genome_check.csv          ★ 게놈 수준 확인
 ├── coo_operon_homologs.csv          Y19 오페론 상동체
 ├── hypA_fold_sweep.csv              HypA 폴드 구성원
@@ -203,6 +207,8 @@ BASE/script/*.sh           생성된 실행 스크립트
 | BL21 금속모티프 중 MG1655 공유 | **27 / 29** | `motif_metal_3strain.csv` |
 | 검출 차이 4개 | **fident 1.000 인데 한쪽만** → 구조예측 인공물 | CELL 36c 출력 |
 | Cys4 × 균주특이 | 153 → **10** → 게놈 확인 후 **2** | `cys4_genome_check.csv` |
+| ★ Folddisco 히트 목록 간 균주 비교 | 14개 검증 → **진짜 부재 0** | `motif_strain_specific_verified.csv` |
+| 같은 단백질이 한쪽만 검출 | fident **1.000** 인 것이 6개 | 동상 |
 | G3E/SIMIBI 과 스윕 | 515행 중 핵심(tm≥0.90) BL21 9 / Y19 20 | `g3e_family_sweep.csv` |
 | G3E 과 × BL21 전용 | 프로테옴 3개 → **tier·게놈 둘 다 통과 1개** | 동상 |
 | Y19 CooC 의 과 소속 | ApbC 로 tm 0.603 — 과 구성원 맞고, BL21 에 대응 없음 | 동상 |
