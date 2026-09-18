@@ -439,7 +439,11 @@ print(f"  결정 질의 {CRY_A.name} / 예측 질의 {AF_PATH.name}")
 #   경로를 추측해 세 개만 찍어보고 포기하면, 있는 것도 '없다' 로 처리된다.
 #   database 트리를 훑어 구조 파일이 많이 든 디렉터리를 세어 보고 고른다.
 import os
-MG_STRUCT = globals().get("MG_STRUCT")      # 손으로 지정하고 싶으면 여기에
+# AlphaFold DB 에서 받아 둔 대장균 프로테옴을 쓴다.
+#   AF-{UniProt}-F1-model_v6 규칙이고 4,371개로 프로테옴 4,300 과 맞는다.
+#   /database/mg1655 (7,447개) 는 model_v1 사슬분할 파일이 섞여 있어 쓰면 안 된다.
+MG_STRUCT = globals().get("MG_STRUCT",
+                          TOOLS/"database"/"mg1655_uni")
 
 def find_struct_dirs(root, min_n=500, depth=3):
     out = []
@@ -466,17 +470,48 @@ else:
     for d, n in found[:12]:
         mine = "  ← 이미 씀" if str(d.resolve()) in known else ""
         print(f"    {n:6d}개  {d}{mine}")
-    # MG1655 프로테옴은 4,300개다. 이름 힌트 + 개수로 고른다
-    HINT = ("mg1655", "k12", "k-12", "ecoli", "e_coli", "coli", "up000000625")
+    # 파일 개수로 고르면 안 된다. 사슬별로 쪼개진 파일과 버전이 섞인
+    # 디렉터리가 개수만 많다. 이름 규칙과 **중복 제거 후 단백질 수**로 고른다.
+    from collections import Counter
+
+    def profile(d, cap=20000):
+        """(이름규칙 분포, 모델버전 분포, 고유 단백질 수)"""
+        pat, ver, prots = Counter(), Counter(), set()
+        for i, f in enumerate(Path(d).iterdir()):
+            if i > cap: break
+            if f.suffix.lower() not in (".cif", ".pdb"): continue
+            s = f.stem
+            m = re.match(r"AF-([A-Z][A-Z0-9]{4,9})-F1-model_v(\d+)$", s)
+            if m:
+                pat["AFDB(UniProt)"] += 1; ver[f"v{m.group(2)}"] += 1
+                prots.add(m.group(1)); continue
+            m = re.match(r"AF-(\d+)-model_v(\d+)(?:_([A-Za-z0-9]+))?$", s)
+            if m:
+                pat["AFDB(숫자ID)" + ("+사슬" if m.group(3) else "")] += 1
+                ver[f"v{m.group(2)}"] += 1; prots.add(m.group(1)); continue
+            m = re.match(r"cf_(\S+)", s)
+            if m:
+                pat["ColabFold"] += 1; prots.add(m.group(1)); continue
+            pat["기타"] += 1; prots.add(re.sub(r"_[A-Za-z0-9]$", "", s))
+        return pat, ver, len(prots)
+
+    MG_PROT = 4300          # MG1655 프로테옴 단백질 수
     cands = [(d, n) for d, n in found if str(d.resolve()) not in known]
-    pick = next((d for d, n in cands
-                 if any(h in d.name.lower() for h in HINT)), None)
-    if pick is None and cands:
-        pick = min(cands, key=lambda v: abs(v[1] - 4300))[0]
-    if pick:
+    print("\n  후보 디렉터리 진단 (프로테옴 4,300 과 비교):")
+    prof = []
+    for d, n in cands[:8]:
+        pat, ver, nprot = profile(d)
+        prof.append((d, n, nprot, pat, ver))
+        print(f"    {d.name:22s} 파일 {n:6d}  고유단백질 {nprot:6d}  "
+              f"Δ4300 {abs(nprot - MG_PROT):5d}")
+        print(f"      이름 {dict(pat)}   버전 {dict(ver)}")
+    if prof:
+        pick = min(prof, key=lambda v: abs(v[2] - MG_PROT))[0]
         STRUCT_ALL["MG1655"] = pick
         print(f"\n  ★ MG1655 구조로 고른 것: {pick}")
-        print("    틀렸으면 MG_STRUCT = '경로' 를 정의하고 이 셀을 다시 돌릴 것")
+        print("    ※ 파일 개수가 아니라 **중복 제거 후 단백질 수**로 골랐다.")
+        print("      이름 규칙이 한 가지이고 버전이 하나인 디렉터리가 맞다.")
+        print("      다르면 MG_STRUCT = '경로' 를 정의하고 이 셀을 다시 돌릴 것")
 print(f"\n  구조 DB: {', '.join(STRUCT_ALL)}"
       + ("" if "MG1655" in STRUCT_ALL else "   (MG1655 구조 못 찾음 → F7 에서 서열로)"))
 
@@ -489,13 +524,25 @@ def fs(tag, qpath, strain):
     if not (o.exists() and o.stat().st_size): return pd.DataFrame()
     d = pd.read_csv(o, sep="\t", names=FFMT.split(","))
     d["stem"] = d.target.apply(lambda x: Path(str(x)).stem)
-    return d.sort_values("alntmscore", ascending=False).drop_duplicates("stem")
+    # 사슬별로 쪼개진 파일(..._A, ..._B)은 같은 단백질이다. 접어서 센다.
+    # 안 접으면 MG1655 히트 수가 부풀어 BL21 과 비교가 안 된다.
+    d["prot"] = d.stem.str.replace(r"_[A-Za-z0-9]$", "", regex=True)
+    return d.sort_values("alntmscore", ascending=False).drop_duplicates("prot")
 
 xw = pd.read_csv(TBL/"id_crosswalk_struct_to_genbank.csv") \
      if (TBL/"id_crosswalk_struct_to_genbank.csv").exists() else pd.DataFrame()
 XW = ({Path(str(k)).stem: str(v).split(",")[0]
        for k, v in xw.set_index("tid")["protein"].to_dict().items()} if len(xw) else {})
-def pid(stem): return XW.get(stem, stem)
+def pid(stem):
+    """crosswalk 에 있으면 GenBank ID, 없으면 읽을 수 있는 형태로 줄인다.
+       MG1655 은 crosswalk 이 BL21/Y19 만 덮으므로 UniProt accession 이 나온다."""
+    s = str(stem)
+    if s in XW: return XW[s]
+    m = re.match(r"AF-([A-Z][A-Z0-9]{4,9})-F1-model_v\d+$", s)
+    if m: return m.group(1)
+    m = re.match(r"AF-(\d+)-model_v\d+$", s)
+    if m: return f"AF{m.group(1)}"
+    return s
 
 RES_FS, SETS = [], {}
 for tag, qp in [("cry", CRY_A), ("af", AF_PATH)]:
@@ -504,18 +551,18 @@ for tag, qp in [("cry", CRY_A), ("af", AF_PATH)]:
         if not len(d):
             print(f"  {tag:3s} → {s:8s} 결과 없음"); continue
         fold = d[d.alntmscore >= TM_FOLD]
-        SETS[(tag, s)] = {pid(x) for x in fold.stem}
+        SETS[(tag, s)] = {pid(x) for x in fold.prot}
         top = d.iloc[0]
         ctrl = ""
         if s == "Y19":
-            hit = d[d.stem.str.contains(Y19_UNI, na=False)]
+            hit = d[d.prot.str.contains(Y19_UNI, na=False)]
             ctrl = (f"   대조군 {Y19_GB} tm {hit.iloc[0].alntmscore:.3f}"
                     if len(hit) else "   ★ 대조군 없음")
         print(f"  {tag:3s} → {s:8s} 폴드(≥{TM_FOLD}) {len(fold):4d}개   "
-              f"최고 {pid(top.stem)} tm {top.alntmscore:.3f}{ctrl}")
+              f"최고 {pid(top.prot)} tm {top.alntmscore:.3f}{ctrl}")
         for _, r in fold.iterrows():
             RES_FS.append({"frame": "결정" if tag == "cry" else "예측", "strain": s,
-                           "protein": pid(r.stem), "tm": round(float(r.alntmscore), 3),
+                           "protein": pid(r.prot), "tm": round(float(r.alntmscore), 3),
                            "fident": round(float(r.fident), 3), "qcov": round(float(r.qcov), 3),
                            "tier": ("핵심" if r.alntmscore >= TM_CORE else
                                     "주변" if r.alntmscore >= TM_NEAR else "폴드만")})
@@ -624,11 +671,11 @@ if "MG1655" in STRUCT_ALL:
     if len(dmg):
         fold_mg = dmg[dmg.alntmscore >= TM_FOLD]
         print("\n" + "=" * 96); print("### MG1655 도 구조로 직접"); print("=" * 96)
-        print(f"  폴드(≥{TM_FOLD}) {len(fold_mg)}개   최고 {pid(fold_mg.iloc[0].stem)} "
+        print(f"  폴드(≥{TM_FOLD}) {len(fold_mg)}개   최고 {pid(fold_mg.iloc[0].prot)} "
               f"tm {fold_mg.iloc[0].alntmscore:.3f}")
         print(f"  BL21 {len(MEM)} / Y19 / MG1655 {len(fold_mg)} — 과 크기를 세 균주로 비교할 수 있다")
         fold_mg.assign(strain="MG1655", frame="예측")[
-            ["strain", "frame", "stem", "alntmscore", "fident", "qcov"]] \
+            ["strain", "frame", "prot", "alntmscore", "fident", "qcov"]] \
             .to_csv(TBL/"cooc_fold_MG1655.csv", index=False, encoding="utf-8-sig")
         print(f"저장: {TBL/'cooc_fold_MG1655.csv'}")
 
@@ -827,7 +874,7 @@ F = pd.read_csv(TBL/"cooc_fold_afframe.csv")
 _mgf = TBL/"cooc_fold_MG1655.csv"
 if _mgf.exists() and "MG1655" not in set(F.strain):
     m = pd.read_csv(_mgf)
-    m = m.rename(columns={"alntmscore": "tm", "stem": "protein"})
+    m = m.rename(columns={"alntmscore": "tm", "prot": "protein", "stem": "protein"})
     m["tier"] = ["핵심" if v >= 0.90 else "주변" if v >= 0.70 else "폴드만" for v in m.tm]
     F = pd.concat([F, m[["frame", "strain", "protein", "tm", "fident", "qcov", "tier"]]],
                   ignore_index=True)
