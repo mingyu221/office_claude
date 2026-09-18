@@ -360,9 +360,62 @@ _ntp_break = pd.crosstab(T3[T3.ntp != "해당 없음"].ntp, T3[T3.ntp != "해당
 print("\n  NTP 내역")
 print(_ntp_break.to_string())
 
+# ------------------------ 균주 특이성 ------------------------
+# 균주 간에 단백질 ID 를 직접 겹칠 수 없다 (QJZ* / P* / AKE* 는 다른 체계다).
+# 같은 자리를 같은 잔기 번호로 맞춘 히트를 직교체로 본다 — 길이는 키에서 뺀다
+# (직교체는 한두 잔기 길이가 다를 수 있다).
+#
+# ★ 이 표의 '없음' 은 '그 균주에 그 단백질이 없다' 가 아니라
+#   '그 균주의 히트 목록에 같은 시그니처가 없다' 이다. 셋이 섞여 있다.
+#     (1) 진짜 없음
+#     (2) 있는데 구조 버전 차이로 검출 안 됨 (BL21 v6 / MG1655 v4)
+#     (3) 있는데 질의 민감도 밖 (Ch CooC1 질의가 Y19 CooC 를 놓치는 것과 같은 이유)
+#   확정하려면 mmseqs 로 직접 묻고 게놈까지 봐야 한다.
+print("\n" + "=" * 96); print("### 균주 특이성 (잔기 시그니처 기준)"); print("=" * 96)
+sig = []
+for s in STRAINS:
+    d = DATA[("metal", s)]
+    for k in d.index:
+        pid, _ = name_of(k, d.loc[k, "acc"])
+        sig.append({"strain": s, "pid": pid,
+                    "sig": str(d.loc[k, "matching_residues"]).split(":")[0]})
+G = pd.DataFrame(sig)
+piv = G.pivot_table(index="sig", columns="strain", values="pid",
+                    aggfunc=lambda v: ",".join(sorted(v))).reindex(columns=STRAINS)
+piv["pattern"] = piv.notna().apply(
+    lambda r: "".join("BMY"[i] if r.iloc[i] else "." for i in range(3)), axis=1)
+
+def _n(pat, s):
+    sub = piv[piv.pattern.isin(pat)][s].dropna()
+    return int(sum(len(str(v).split(",")) for v in sub))
+rows = []
+for i, s in enumerate(STRAINS):
+    tag = "BMY"[i]
+    tot  = len(DATA[("metal", s)])
+    allp = _n(["BMY"], s)
+    uniq = _n(["".join(c if c == tag else "." for c in "BMY")], s)
+    rows.append({"균주": s, "metal": tot, "세 균주 공통": allp,
+                 "BL21+Y19 (MG없음)": _n(["B.Y"], s) if s in ("BL21", "Y19") else None,
+                 "BL21+MG (Y19없음)": _n(["BM."], s) if s in ("BL21", "MG1655") else None,
+                 "MG+Y19 (BL21없음)": _n([".MY"], s) if s in ("MG1655", "Y19") else None,
+                 "단독": uniq})
+SP = pd.DataFrame(rows)
+print(SP.to_string(index=False))
+SP.to_csv(TBL/"motif_strain_specificity.csv", index=False, encoding="utf-8-sig")
+
+print("\n  ★ BL21+Y19 에 있고 MG1655 에 없는 자리 — 가설이 예측하는 칸")
+hot = piv[piv.pattern == "B.Y"]
+print(hot[STRAINS].to_string() if len(hot) else "    없음")
+print("\n  BL21 단독")
+b_only = piv[piv.pattern == "B.."]
+print(b_only[["BL21"]].to_string() if len(b_only) else "    없음")
+print("\n  ※ 위 두 목록의 '없음' 은 미검출이지 부재가 아니다. 확정하려면")
+print("    mmseqs 로 MG1655 에 직접 묻고(프로테옴), 그다음 게놈까지 봐야 한다.")
+print("    cys4_genome_check.csv 가 하던 일을 이 목록에 적용하면 된다.")
+
 print("\n### 저장")
-for f in ["motif_counts_by_strain.csv", "motif_metal_and_atp.csv",
-          "motif_metal_ntp.csv", "motif_summary.csv"]:
+for f in ["motif_counts_by_strain.csv", "motif_metal_and_atp.csv", "motif_metal_ntp.csv",
+          "motif_summary.csv", "motif_strain_specificity.csv"]:
     print(f"  {TBL/f}")
 print("\n### 읽는 법")
 print("  표3 의 분류는 주석 문자열에서 나온 것이지 측정이 아니다.")
