@@ -7598,107 +7598,203 @@ print("  이량체 점수가 없다는 사실을 표에 남길 것.")
 
 ```python
 # =============================================================================
-# CELL 55 | 질의를 CooC1 의 진짜 Ni 자리로 되돌린다 — 단, 단일 사슬로 합쳐서
+# CELL 55 | 질의를 CooC1 의 진짜 Ni 자리로 되돌린다 — 생물학적 조립체에서
 #
-#   지금까지의 Cys4 질의는 Boltz 예측 구조에서 뽑은 것이었다. 실측이 아니다.
-#   실측 기하는 3kji(CooC1)에 있는데, 거기서는 Cys112/Cys114 가 두 단량체에서
-#   하나씩 나와 이량체 계면에 자리를 만든다. 한 사슬에는 Cys 가 2개뿐이다.
+#   [1차 시도가 틀렸다] 3kji 파일의 A·B 사슬을 이량체로 가정하고 A112,A114,
+#   B112,B114 를 질의로 썼는데, 실제로 재 보니 사슬 간 SG–SG 거리가 57~61 A 였다.
+#   Ni 배위 자리라면 3.5~6 A 여야 한다. 파일 안의 A·B 는 생물학적 이량체가 아니라
+#   결정학 비대칭 단위(ASU)에 들어 있는 이웃이고, 진짜 짝은 대칭 연산으로 생긴다.
 #
-#   CELL 29f 에서 A112,A114,B112,B114 로 물었더니 --covered-node 4 에서 0 이었고,
-#   그때 나는 "AlphaFold DB 가 단량체라 계면 질의가 원리상 불가능하다"고 적었다.
-#   그건 과한 단정이었다. folddisco 가 맞추는 것은 잔기 쌍의 기하지 사슬 이름이
-#   아니다. 0 이 나온 이유가
-#     (a) folddisco 가 사슬 간 쌍을 아예 안 쓴다        — 도구의 한계
-#     (b) 그 기하를 가진 단량체가 실제로 없다           — 생물학적 음성
-#   둘 중 무엇인지 나는 구분하지 않았다.
+#   이것으로 CELL 29f 의 0 이 설명된다. 나는 그때 (a) 도구가 사슬 간 쌍을 안 쓴다
+#   (b) 그 기하를 가진 단량체가 없다 — 둘만 놓고 갈랐는데, 세 번째가 있었다.
+#     (c) 질의 기하 자체가 틀렸다.
+#   60 A 떨어진 두 쌍을 4잔기 질의로 넣었으니 지름 40~50 A 인 단량체에서 맞을 수
+#   없다. covered-node 2 에서 29/19/30 이 나온 것도 사슬 안 쌍만 맞아서 원래
+#   2잔기 질의(29/21/30)를 그대로 재현한 것이다.
 #
-#   가르는 방법: 좌표는 그대로 두고 B 사슬의 두 잔기를 A 사슬로 개명한다
-#   (잔기번호 +1000). 그러면 질의는 "한 사슬 안의 네 잔기"가 되고, 기하는
-#   CooC1 이량체의 실측 Ni 자리 그대로다.
-#     히트가 나오면 -> (a) 였고, 그 목록이 비상동 삽입자 후보다
-#     그래도 0 이면 -> (b) 다. 확실한 음성이 된다.
-#
-#   ★ 이게 이 프로젝트의 핵심 질문과 정확히 겹친다.
-#     BL21 의 삽입자가 CooC 와 비상동이라면 이량체일 필요가 없다.
-#     한 사슬 안에서 CooC1 의 이량체 Ni 자리를 흉내 내면 된다.
-#     이 셀은 바로 그런 단백질이 있는지를 묻는다.
+#   [고치는 법] REMARK 350 의 BIOMT 행렬로 조립체를 만들고, Cys112/114 쌍이
+#   실제로 가까워지는 사슬 조합을 찾아 그것으로 템플릿을 만든다. 로컬 파일에
+#   BIOMT 가 없으면 RCSB 에서 조립체 파일(3KJI.pdb1)을 받는다.
+#   가까워지지 않으면 이 구조로는 자리를 못 만드는 것이고, 그 사실을 먼저 안다.
 # =============================================================================
 need((ASSET["cooc1_pdb"].exists(), f"3kji.pdb 가 필요하다: {ASSET['cooc1_pdb']}"))
+import itertools, math, gzip, urllib.request
 SRC_PDB = ASSET["cooc1_pdb"]
-PAIR    = [("A", 112), ("A", 114), ("B", 112), ("B", 114)]   # 실측 Ni 배위 4잔기
-OFFSET  = 1000                                                # B -> A 개명 시 번호 이동
+RES     = (112, 114)          # CooC1 의 Ni 배위 Cys 쌍 (사슬당 2개)
+SITE_MAX = 12.0               # 두 쌍의 중심이 이보다 가까워야 '한 자리' 로 본다
 
-# ---------- (1) 원본에서 네 잔기를 확인한다 ----------
-print("=" * 100); print("### (1) 3kji 에서 Ni 배위 4잔기 확인"); print("=" * 100)
-atoms, resname = [], {}
-for l in open(SRC_PDB, errors="ignore"):
-    if not l.startswith(("ATOM", "HETATM")): continue
-    ch, rs, rn = l[21], l[22:26].strip(), l[17:20].strip()
-    if not rs.lstrip("-").isdigit(): continue
-    atoms.append((ch, int(rs), rn, l.rstrip("\n")))
-    resname[(ch, int(rs))] = rn
+def load_atoms(path_or_text):
+    """ATOM/HETATM 을 (chain, resseq, resname, line) 로 읽는다."""
+    lines = (path_or_text.splitlines() if isinstance(path_or_text, str)
+             else open(path_or_text, errors="ignore").read().splitlines())
+    out = []
+    for l in lines:
+        if not l.startswith(("ATOM", "HETATM")): continue
+        rs = l[22:26].strip()
+        if not rs.lstrip("-").isdigit(): continue
+        out.append((l[21], int(rs), l[17:20].strip(), l))
+    return out
 
-ok = True
-for ch, rs in PAIR:
-    rn = resname.get((ch, rs), "없음")
-    print(f"  {ch}{rs:<5d} {rn}")
-    if rn != "CYS": ok = False
-if not ok:
-    print("\n⚠ 네 잔기 중 CYS 가 아닌 것이 있다. 잔기 번호를 확인할 것.")
-    print("   (3kji 의 사슬/번호 체계가 다르면 PAIR 를 직접 고쳐야 한다)")
-
-def sg(ch, rs):
-    for c, r, _n, line in atoms:
-        if c == ch and r == rs and line[12:16].strip() == "SG":
-            return (float(line[30:38]), float(line[38:46]), float(line[46:54]))
+def sg_of(atoms, ch, rs):
+    for c, r, _n, l in atoms:
+        if c == ch and r == rs and l[12:16].strip() == "SG":
+            return (float(l[30:38]), float(l[38:46]), float(l[46:54]))
     return None
-import itertools, math
-print("\n  SG–SG 거리 (Å) — 이 값이 질의 기하의 실체다")
-_pts = {f"{c}{r}": sg(c, r) for c, r in PAIR}
-for a, b in itertools.combinations(_pts, 2):
-    if _pts[a] and _pts[b]:
-        d = math.dist(_pts[a], _pts[b])
-        tag = "  ← 사슬 간" if a[0] != b[0] else ""
-        print(f"    {a:6s} {b:6s} {d:6.2f}{tag}")
 
-# ---------- (2) 단일 사슬 템플릿을 만든다 ----------
-print("\n" + "=" * 100); print("### (2) B 사슬을 A 로 개명해 단일 사슬 템플릿 생성"); print("=" * 100)
+def site_center(atoms, ch):
+    """한 사슬의 Cys112/114 SG 중점. 둘 다 있어야 한다."""
+    p = [sg_of(atoms, ch, r) for r in RES]
+    if any(x is None for x in p): return None
+    return tuple(sum(v[i] for v in p)/len(p) for i in range(3))
+
+# ---------- (1) 원본 ASU 에서 무엇이 보이는가 ----------
+print("=" * 100); print("### (1) 원본 파일(ASU)의 사슬별 Cys112/114"); print("=" * 100)
+A0 = load_atoms(SRC_PDB)
+chains0 = sorted({c for c, _r, _n, _l in A0})
+cen0 = {}
+for ch in chains0:
+    names = [dict(((c, r), n) for c, r, n, _l in A0).get((ch, r), "-") for r in RES]
+    cc = site_center(A0, ch)
+    if cc: cen0[ch] = cc
+    print(f"  체인 {ch}  {RES[0]}={names[0]}  {RES[1]}={names[1]}  "
+          f"{'중심 있음' if cc else '중심 없음'}")
+print("\n  사슬 간 자리 중심 거리 (Å)")
+for a, b in itertools.combinations(sorted(cen0), 2):
+    print(f"    {a} – {b}  {math.dist(cen0[a], cen0[b]):7.2f}")
+print(f"  ※ Ni 배위 자리라면 두 쌍의 중심이 {SITE_MAX} Å 안이어야 한다.")
+
+# ---------- (2) 생물학적 조립체를 만든다 ----------
+print("\n" + "=" * 100); print("### (2) 생물학적 조립체 (REMARK 350 BIOMT)"); print("=" * 100)
+def read_biomt(path):
+    """REMARK 350 BIOMT 행렬을 (R, t) 목록으로. 없으면 빈 목록."""
+    rows, cur = [], {}
+    for l in open(path, errors="ignore"):
+        if not l.startswith("REMARK 350   BIOMT"): continue
+        k = int(l[18:19]); idx = l[19:23].strip()
+        vals = [float(x) for x in l[23:].split()[:4]]
+        cur.setdefault(idx, {})[k] = vals
+    for idx in sorted(cur, key=lambda s: int(s)):
+        m = cur[idx]
+        if len(m) == 3:
+            R = [m[i][:3] for i in (1, 2, 3)]
+            t = [m[i][3] for i in (1, 2, 3)]
+            rows.append((idx, R, t))
+    return rows
+
+def apply_op(atoms, R, t, tag):
+    out = []
+    for c, r, n, l in atoms:
+        x, y, z = float(l[30:38]), float(l[38:46]), float(l[46:54])
+        nx = R[0][0]*x + R[0][1]*y + R[0][2]*z + t[0]
+        ny = R[1][0]*x + R[1][1]*y + R[1][2]*z + t[1]
+        nz = R[2][0]*x + R[2][1]*y + R[2][2]*z + t[2]
+        nl = l[:30] + f"{nx:8.3f}{ny:8.3f}{nz:8.3f}" + l[54:]
+        out.append((f"{c}{tag}", r, n, nl))
+    return out
+
+OPS = read_biomt(SRC_PDB)
+print(f"  로컬 파일의 BIOMT 연산: {len(OPS)}개")
+ASM = []
+for idx, R, t in OPS:
+    is_id = all(abs(R[i][j] - (1 if i == j else 0)) < 1e-6 for i in range(3)
+                for j in range(3)) and all(abs(v) < 1e-6 for v in t)
+    ASM += apply_op(A0, R, t, "" if is_id else idx)
+if not ASM:
+    ASM = [(c, r, n, l) for c, r, n, l in A0]
+
+# 그래도 자리가 안 만들어지면 RCSB 의 조립체 파일을 받는다
+def best_pair(atoms):
+    cen = {}
+    for ch in sorted({c for c, _r, _n, _l in atoms}):
+        cc = site_center(atoms, ch)
+        if cc: cen[ch] = cc
+    best = None
+    for a, b in itertools.combinations(sorted(cen), 2):
+        d = math.dist(cen[a], cen[b])
+        if best is None or d < best[2]: best = (a, b, d)
+    return cen, best
+
+cen, best = best_pair(ASM)
+print(f"  조립체 사슬 {len(cen)}개, 가장 가까운 두 자리: "
+      f"{best[0]}–{best[1]} {best[2]:.2f} Å" if best else "  자리를 가진 사슬이 1개 이하")
+
+if (best is None) or (best[2] > SITE_MAX):
+    print(f"\n  BIOMT 로는 자리가 안 만들어진다. RCSB 조립체 파일을 받는다.")
+    dst = DIR["external"]/"3KJI_assembly1.pdb"
+    if not (dst.exists() and dst.stat().st_size > 10_000):
+        url = "https://files.rcsb.org/download/3KJI.pdb1.gz"
+        try:
+            with urllib.request.urlopen(url, timeout=120) as r:
+                dst.write_bytes(gzip.decompress(r.read()))
+            print(f"  받음: {dst} ({dst.stat().st_size/1e3:.0f} KB)")
+        except Exception as e:
+            print(f"  ⚠ 내려받기 실패: {e}")
+            print(f"     수동: curl -sL {url} | gunzip > '{dst}'")
+    if dst.exists() and dst.stat().st_size > 10_000:
+        # 조립체 파일은 MODEL 별로 같은 체인 ID 를 재사용한다 — 모델 번호를 붙여 구분한다
+        ASM, mdl = [], "1"
+        for l in dst.read_text(errors="ignore").splitlines():
+            if l.startswith("MODEL"):
+                mdl = l.split()[-1]
+            elif l.startswith(("ATOM", "HETATM")):
+                rs = l[22:26].strip()
+                if rs.lstrip("-").isdigit():
+                    ch = l[21] + ("" if mdl == "1" else mdl)
+                    ASM.append((ch, int(rs), l[17:20].strip(), l))
+        cen, best = best_pair(ASM)
+        print(f"  조립체 파일 사슬 {len(cen)}개, 가장 가까운 두 자리: "
+              f"{best[0]}–{best[1]} {best[2]:.2f} Å" if best else "  자리 없음")
+
+if best is None or best[2] > SITE_MAX:
+    print("\n" + "!" * 100)
+    print("  이 구조에서는 Cys112/114 두 쌍이 한 자리를 이루지 않는다.")
+    print(f"  최단 거리 {best[2]:.1f} Å (기준 {SITE_MAX} Å).")
+    print("  가능성 셋 — 어느 것인지 먼저 확인해야 질의를 만들 수 있다.")
+    print("   1) 잔기 번호가 다르다 (구성체/어노테이션 차이) -> 서열로 CXC 위치 재확인")
+    print("   2) 이 PDB 가 열린(apo) 형태다 -> ADP 결합 구조를 써야 한다")
+    print("   3) Ni 자리가 애초에 한 단량체 안에 있다 -> 사슬 간 질의 자체가 불필요")
+    print("  ★ 확인 전에는 4잔기 질의를 만들지 않는다. 틀린 기하로 물으면")
+    print("    0 이 나오고, 그 0 을 생물학적 음성으로 오독하게 된다 (이미 한 번 겪었다).")
+    print("!" * 100)
+    raise SystemExit
+
+# ---------- (3) 단일 사슬 템플릿 ----------
+CA_, CB_, DIST = best
+print("\n" + "=" * 100); print(f"### (3) 단일 사슬 템플릿 — {CA_} + {CB_} ({DIST:.2f} Å)"); print("=" * 100)
+OFFSET = 1000
 MRG = DIR["external"]/"cooc1_ni_site_merged.pdb"
 out = []
-for c, r, _n, line in atoms:
-    if c == "A":                                  # A 사슬은 통째로 유지
-        out.append(line)
-    elif (c, r) in PAIR:                          # B 의 질의 잔기만 개명해 덧붙인다
-        out.append(line[:21] + "A" + f"{r + OFFSET:>4d}" + line[26:])
+for c, r, _n, l in ASM:
+    if c == CA_:
+        out.append(l[:21] + "A" + l[22:])
+    elif c == CB_ and r in RES:
+        out.append(l[:21] + "A" + f"{r + OFFSET:>4d}" + l[26:])
 MRG.write_text("\n".join(out) + "\nEND\n")
-QRES = ",".join(f"A{r if c == 'A' else r + OFFSET}" for c, r in PAIR)
-print(f"  {MRG}")
-print(f"  ATOM {len(out)}줄, 질의 = {QRES}")
-print("  좌표는 건드리지 않았다 — 개명만 했으므로 기하는 실측 그대로다.")
+QRES = ",".join([f"A{RES[0]}", f"A{RES[1]}",
+                 f"A{RES[0]+OFFSET}", f"A{RES[1]+OFFSET}"])
+print(f"  {MRG}\n  ATOM {len(out)}줄, 질의 = {QRES}")
+M = load_atoms(MRG)
+print("\n  병합 후 SG–SG 거리 (Å) — 전부 10 Å 안이어야 진짜 자리다")
+pts = {f"A{r}": sg_of(M, "A", r) for r in (RES[0], RES[1], RES[0]+OFFSET, RES[1]+OFFSET)}
+_far = 0
+for a, b in itertools.combinations(sorted(pts), 2):
+    if pts[a] and pts[b]:
+        d = math.dist(pts[a], pts[b]); _far += (d > 10)
+        print(f"    {a:7s} {b:7s} {d:6.2f}")
+print(f"  10 Å 초과 {_far}건")
+if _far:
+    print("  ⚠ 아직 멀다. 이 템플릿으로 질의하면 안 된다.")
+    raise SystemExit
 
-# 개명 후에도 거리가 같은지 되짚는다 (좌표 훼손 여부 확인)
-_chk = {}
-for l in open(MRG):
-    if l.startswith("ATOM") and l[12:16].strip() == "SG":
-        r = int(l[22:26])
-        if r in (112, 114, 112 + OFFSET, 114 + OFFSET):
-            _chk[f"A{r}"] = (float(l[30:38]), float(l[38:46]), float(l[46:54]))
-_bad = 0
-for a, b in itertools.combinations(sorted(_chk), 2):
-    d = math.dist(_chk[a], _chk[b])
-    o = [math.dist(_pts[x], _pts[y]) for x, y in itertools.combinations(_pts, 2)]
-    if not any(abs(d - v) < 1e-3 for v in o): _bad += 1
-print(f"  좌표 검증: 거리 불일치 {_bad}건 (0 이어야 한다)")
-
-# ---------- (3) covered-node 기울기로 세 균주 질의 ----------
-print("\n" + "=" * 100); print("### (3) 질의 — covered-node 4/3/2"); print("=" * 100)
+# ---------- (4) covered-node 기울기로 세 균주 질의 ----------
+print("\n" + "=" * 100); print("### (4) 질의 — covered-node 4/3/2"); print("=" * 100)
 FD  = ASSET["folddisco"]
 IDX = {"BL21": ASSET["fd_idx_bl21"], "Y19": ASSET["fd_idx_y19"], "MG1655": ASSET["fd_idx_mg"]}
 od  = DIR["folddisco"]/"cooc1_merged"; od.mkdir(parents=True, exist_ok=True)
 res = {}
 for cov in (4, 3, 2):
     for strain, idx in IDX.items():
-        o = od/f"merged_cov{cov}_{strain}.tsv"
+        o = od/f"asm_cov{cov}_{strain}.tsv"
         if not (o.exists() and o.stat().st_size):
             sh(f'"{FD}" query -p "{MRG}" -q {QRES} -i "{idx}" -t {min(THREADS,8)} '
                f'--per-structure --header --sort-by idf --rmsd 1.0 --top 5000 '
@@ -7713,47 +7809,41 @@ R = (pd.Series(res).rename("hits").rename_axis(["covered_node", "strain"])
 print(R.to_string())
 R.to_csv(DIR["table"]/"cooc1_merged_query.csv", encoding="utf-8-sig")
 
-# ---------- (4) 판정 ----------
-print("\n" + "=" * 100); print("### (4) 판정"); print("=" * 100)
+# ---------- (5) 판정 ----------
+print("\n" + "=" * 100); print("### (5) 판정"); print("=" * 100)
 _n4 = int(R.loc[4].sum()) if 4 in R.index else 0
 if _n4 > 0:
-    print(f"  covered-node 4 에서 {_n4}개. CELL 29f 의 0 은 사슬 이름 때문이었다 —")
-    print("  folddisco 가 사슬 간 쌍을 쓰지 않았던 것이고, 기하 자체는 단량체에 있다.")
-    print("  ★ 이 목록이 '한 사슬로 CooC1 의 이량체 Ni 자리를 흉내 내는' 단백질이다.")
-    print("    비상동 삽입자 가설이 예측하는 바로 그 범주다. 균주별 분포를 볼 것.")
+    print(f"  covered-node 4 에서 {_n4}개.")
+    print("  ★ 한 사슬로 CooC1 의 이량체 Ni 자리를 재현하는 단백질이 있다.")
+    print("    비상동 삽입자 가설이 예측하는 바로 그 범주다.")
     BEST = []
     for strain in IDX:
-        o = od/f"merged_cov4_{strain}.tsv"
+        o = od/f"asm_cov4_{strain}.tsv"
         if not (o.exists() and o.stat().st_size): continue
         d = pd.read_csv(o, sep="\t"); d.columns = [c.strip().lstrip("#") for c in d.columns]
-        d["strain"] = strain
-        BEST.append(d)
+        d["strain"] = strain; BEST.append(d)
     if BEST:
         B = pd.concat(BEST, ignore_index=True)
         _xw = DIR["table"]/"id_crosswalk_struct_to_genbank.csv"
         if _xw.exists():
             x = pd.read_csv(_xw)
-            XW = {Path(str(k)).stem: str(v).split(",")[0]
-                  for k, v in x.dropna(subset=["protein"]).set_index("tid")["protein"].to_dict().items()}
+            XW = {Path(str(k)).stem: str(v).split(",")[0] for k, v in
+                  x.dropna(subset=["protein"]).set_index("tid")["protein"].to_dict().items()}
             B["protein"] = B.tid.map(lambda t: XW.get(Path(str(t)).stem))
         keep = [c for c in ["protein", "strain", "min_rmsd", "plddt", "node_count",
                             "idf", "matching_residues"] if c in B.columns]
-        B = B.sort_values([c for c in ["min_rmsd"] if c in B.columns]).head(40)
-        print("\n  상위 40개 (min_rmsd 낮은 순):")
-        print(B[keep].to_string(index=False))
+        if "min_rmsd" in B: B = B.sort_values("min_rmsd")
+        print("\n  상위 40개:"); print(B[keep].head(40).to_string(index=False))
         B.to_csv(DIR["table"]/"cooc1_merged_hits.csv", index=False, encoding="utf-8-sig")
         print(f"\n  저장: {DIR['table']/'cooc1_merged_hits.csv'}")
 else:
-    print("  covered-node 4 에서 0. CELL 29f 와 같다.")
-    print("  사슬 이름을 없앤 뒤에도 0 이므로, 이제는 도구의 한계가 아니라")
-    print("  ★ 세 균주 어디에도 CooC1 의 Ni 자리 기하를 한 사슬로 재현하는 단백질이")
-    print("    없다는 뜻이다. 확실한 음성이고, 그 자체로 결과다.")
-    print("  covered-node 3 / 2 의 수를 보면 네 잔기 중 몇 개까지 맞는지 알 수 있다.")
-    print("  3 에서 소수만 나온다면 '부분적으로 닮은 자리'로 따로 볼 값이 있다.")
-print(f"\n  기존 결과와 비교할 것:")
-print(f"    CELL 29  원 질의 A112,A114 (2잔기)     BL21 29 / Y19 30 / MG1655 21")
-print(f"    CELL 29f 이량체 질의 A·B (4잔기)       covered-node 4 에서 0")
-print(f"    이 셀    단일사슬 합침 (4잔기)          위 표")
+    print("  covered-node 4 에서 0 — 이번에는 기하가 맞는 질의로 물었는데도 0 이다.")
+    print("  ★ 세 균주 어디에도 이 자리를 한 사슬로 재현하는 단백질이 없다.")
+    print("    확실한 음성이고, 그 자체로 결과다. covered-node 3 을 같이 볼 것.")
+print("\n  비교:")
+print("    CELL 29   원 질의 A112,A114 (2잔기)        BL21 29 / Y19 30 / MG1655 21")
+print("    CELL 29f  ASU 의 A·B (사슬 간 60 Å — 틀린 질의)  covered-node 4 에서 0")
+print("    이 셀     조립체에서 만든 진짜 자리          위 표")
 ```
 
 ---
