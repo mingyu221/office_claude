@@ -846,6 +846,10 @@ BOLTZ_ROOT = BASE/"result"/"boltz"
 IN_DIR     = "inputs_seqmotif"          # 이량체는 "inputs_cooclike"
 OUT_DIR    = "out_seqmotif"             #           "out_cooclike"
 CONDA_ENV  = "boltz"                    # boltz 가 설치된 env 이름. 다르면 고칠 것
+FORCE_GPU  = None                       # 숫자를 주면 그 GPU 로 고정한다.
+                                        # 다른 작업(CELL 54 등)이 쓸 카드를 피할 때 쓴다.
+                                        # 그쪽이 아직 예측을 시작 안 했으면 여유 메모리로는
+                                        # 구분이 안 되므로 여기서 직접 정하는 편이 안전하다.
 LOG        = BOLTZ_ROOT/f"{OUT_DIR}.log"
 PIDF       = BOLTZ_ROOT/f"{OUT_DIR}.pid"
 
@@ -926,7 +930,17 @@ else:
         print("      import os, signal; os.kill(<PID>, signal.SIGTERM)")
         GPU = None
     else:
-        GPU = pick_gpu()
+        if FORCE_GPU is not None:
+            rows = {i: (f, tt) for i, f, tt, _u in gpu_rows()}
+            f, tt = rows.get(FORCE_GPU, (None, None))
+            print(f"  GPU {FORCE_GPU} 로 고정 (여유 {f} / {tt} MiB)" if f is not None
+                  else f"  GPU {FORCE_GPU} 로 고정 (상태 못 읽음)")
+            if f is not None and f < MIN_FREE:
+                print(f"  ★ 그런데 여유가 {MIN_FREE} MiB 미만이다. 그래도 진행한다 —")
+                print("    직접 지정한 것이므로 판단은 사용자 몫이다.")
+            GPU = FORCE_GPU
+        else:
+            GPU = pick_gpu()
         if GPU is None:
             print(f"\n  ★ 여유 {MIN_FREE} MiB 이상인 GPU 가 없다. 띄우지 않는다.")
             print("    다른 작업이 끝난 뒤 이 셀을 다시 돌릴 것.")
