@@ -442,8 +442,9 @@ import os
 # AlphaFold DB 에서 받아 둔 대장균 프로테옴을 쓴다.
 #   AF-{UniProt}-F1-model_v6 규칙이고 4,371개로 프로테옴 4,300 과 맞는다.
 #   /database/mg1655 (7,447개) 는 model_v1 사슬분할 파일이 섞여 있어 쓰면 안 된다.
-MG_STRUCT = globals().get("MG_STRUCT",
-                          TOOLS/"database"/"mg1655_uni")
+#   ※ globals().get(k, default) 는 k 가 None 으로 이미 있으면 default 가 아니라
+#     그 None 을 준다. 앞 실행에서 MG_STRUCT=None 이 남아 있으면 기본값이 안 먹는다.
+MG_STRUCT = globals().get("MG_STRUCT") or (TOOLS/"database"/"mg1655_uni")
 
 def find_struct_dirs(root, min_n=500, depth=3):
     out = []
@@ -516,7 +517,9 @@ print(f"\n  구조 DB: {', '.join(STRUCT_ALL)}"
       + ("" if "MG1655" in STRUCT_ALL else "   (MG1655 구조 못 찾음 → F7 에서 서열로)"))
 
 def fs(tag, qpath, strain):
-    o = FSD/f"{tag}_vs_{strain}.m8"
+    # 캐시 파일명에 구조 DB 이름을 넣는다. 안 넣으면 DB 를 바꿔도
+    # 옛 결과를 그대로 재사용한다 (실제로 그래서 MG1655 이 안 바뀌었다).
+    o = FSD/f"{tag}_vs_{strain}_{Path(STRUCT_ALL[strain]).name}.m8"
     if not (o.exists() and o.stat().st_size):
         sh(f'"{FS}" easy-search "{qpath}" "{STRUCT_ALL[strain]}" "{o}" "{FSD}/tmp_{strain}" '
            f'--format-output "{FFMT}" -e 10 --max-seqs 2000 --exact-tmscore 1 '

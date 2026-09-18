@@ -411,14 +411,23 @@ TOPN = 400
 D = CAND.merge(V[["protein", "mg_status", "bl21_only"]], on="protein", how="left") \
         .merge(Q, on="protein", how="left")
 
+def _pos(v):
+    """NaN 안전. float('nan') 은 파이썬에서 참이라 `x or 0` 로 쓰면
+       값이 없을 때도 점수가 붙는다."""
+    return pd.notna(v) and float(v) > 0
+
 def score(r):
     p, why = 0, []
-    if r.cys4_cand == 1:                       p += 3; why.append("+3 Cys4후보")
+    if r.cys4_cand == 1:
+        p += 3; why.append("+3 Cys4후보")
+    elif _pos(r.n_CXC) or _pos(r.n_CXXC):
+        # Cys4 후보와 배타로 둔다. 둘 다 주면 같은 증거를 두 번 세는 것이고,
+        # 그 결과 CooC 형(단량체당 CXC 하나)이 3점 뒤처져 상위에서 밀린다.
+        p += 2; why.append("+2 CXC/CXXC")
     if r.bl21_only == 1:                       p += 3; why.append("+3 MG없음")
     elif r.mg_status == "모티프 달라짐":        p += 1; why.append("+1 모티프차이")
     if pd.notna(r.fold):                       p += 2; why.append(f"+2 {r.fold}폴드")
-    if (r.n_CXC or 0) or (r.n_CXXC or 0):      p += 2; why.append("+2 CXC/CXXC")
-    if r.len <= 250:                           p += 1; why.append("+1 소형")
+    if pd.notna(r.len) and r.len <= 250:       p += 1; why.append("+1 소형")
     if pd.notna(r.plddt_motif):
         if r.plddt_motif >= 70:                p += 1; why.append("+1 pLDDT")
         elif r.plddt_motif < 50:               p -= 2; why.append("-2 pLDDT낮음")
@@ -435,24 +444,154 @@ print(D.head(25)[["protein", "len", "score", "cys4_win", "n_CXC", "n_CXXC",
                   "fold", "fold_tm", "plddt_motif", "mg_status", "desc"]].to_string(index=False))
 print(f"\n저장: {TBL/'seqmotif_ranked.csv'}")
 
+# ---- 눈금 맞추기: 기존 채점의 grade A/B 를 반드시 포함시킨다 ----
+#   이번 예측은 ChCODH2 를 빼고 후보 단독으로 접는다. 조건이 바뀌었으므로
+#   등급이 그대로 재현되는지 확인할 기준점이 필요하다. 기존 grade A/B 를
+#   점수와 무관하게 넣어 두고, 같은 등급이 다시 나오는지 본다.
+CAL = []
+_old = TBL/"ni_site_grade.csv"
+if _old.exists():
+    _o = pd.read_csv(_old)
+    _o["key"] = _o.prey.astype(str).str.split("-").str[-1]
+    CAL = sorted({k for k, g in zip(_o.key, _o.grade)
+                  if g in ("A", "B") and k in SEQ["BL21"]})
+    print(f"\n  눈금용(기존 grade A/B) {len(CAL)}개를 강제 포함: {', '.join(CAL[:8])}"
+          + (" …" if len(CAL) > 8 else ""))
+else:
+    print(f"\n  ⚠ {_old.name} 없음 — 눈금 비교 없이 간다")
+
 # ---- Boltz 입력: 후보 단독 + Ni ----
 import yaml as _y
 BIN = BASE/"result"/"boltz"/"inputs_seqmotif"; BIN.mkdir(parents=True, exist_ok=True)
 MAXLEN = 1200
-SEL = D.head(TOPN)
-n, skip = 0, 0
-for _, r in SEL.iterrows():
-    s = SEQ["BL21"].get(r.protein)
+sel_ids = list(dict.fromkeys(list(D.head(TOPN).protein) + CAL))
+LEN = dict(zip(D.protein, D.len))
+n, skip, wrote = 0, 0, []
+for pidv in sel_ids:
+    s = SEQ["BL21"].get(pidv)
     if not s: continue
     if len(s) > MAXLEN: skip += 1; continue
     # 사슬 A = 후보 단백질, 리간드 B = Ni. ChCODH2 는 넣지 않는다
     doc = {"version": 1, "sequences": [
         {"protein": {"id": "A", "sequence": s}},
         {"ligand":  {"id": "B", "ccd": "NI"}}]}
-    (BIN/f"{r.protein.replace('|','_')}.yaml").write_text(_y.safe_dump(doc, sort_keys=False))
+    (BIN/f"{pidv.replace('|','_')}.yaml").write_text(_y.safe_dump(doc, sort_keys=False))
+    wrote.append(pidv); n += 1
+TOTRES = sum(len(SEQ["BL21"][k]) for k in wrote)
+print(f"\n  Boltz 입력 {n}개 생성 (상위 {TOPN} + 눈금 {len(CAL)}, 길이 초과 제외 {skip})")
+print(f"  → {BIN}")
+print(f"  총 잔기 {TOTRES:,} — 기존 방식이면 여기에 630×{n} = {630*n:,} 이 더 붙는다")
+print(f"\n  ※ --use_msa_server 로 {n}건의 MSA 를 원격에서 받는다. 속도 제한이 걸리면")
+print("    나눠 돌리거나 로컬 MSA 로 바꿀 것. 예측 자체보다 여기서 막히는 일이 흔하다.")
+```
+
+---
+
+## CELL Q5b — CooC 형 전용 트랙 (CXC 하나짜리를 곧바로 이량체로)
+
+```python
+# =============================================================================
+# CELL Q5b | Cys 2개짜리를 버리지 않는다
+#
+#   CooC1 은 단량체당 CXC **하나**뿐이다 (Cys112-x-Cys114).
+#   Cys4 는 이량체 계면에서 두 CXC 가 만나야 생긴다. 그러니
+#     - 진짜 CooC 형은 Cys 2개로 충분하고,
+#     - Q2 의 `+3 Cys4후보` 를 못 받아 상위 400 밖으로 밀리고,
+#     - 단량체로 접으면 어차피 grade C 로 나온다.
+#   세 번 불리하다. 그래서 별도 트랙으로 빼서 **처음부터 이량체로** 접는다.
+#
+#   선정 기준 — CooC1 의 서열 특징을 그대로 쓴다
+#     · CXC 또는 CXXC 를 가짐
+#     · Cys4 창이 4 미만 (혼자서는 Cys4 를 못 만든다) ← 여기가 핵심
+#     · 2 × 길이가 토큰 상한 안
+#   여기에 폴드·균주·길이를 가중치로 얹어 정렬한다.
+# =============================================================================
+import yaml as _y
+DIN  = BASE/"result"/"boltz"/"inputs_cooclike"; DIN.mkdir(parents=True, exist_ok=True)
+MAXTOK, TOPD = 1200, 200
+
+CL = D[( (D.n_CXC.fillna(0) > 0) | (D.n_CXXC.fillna(0) > 0) ) &
+       (D.cys4_win < 4)].copy()
+print("=" * 96); print("### CooC 형 후보 (혼자서는 Cys4 를 못 만드는 것)"); print("=" * 96)
+print(f"  CXC/CXXC 보유 + Cys4 창 < 4 : {len(CL)}개")
+print(f"    그중 폴드 정보 있음 {int(CL.fold.notna().sum())}, "
+      f"MG1655 에 없음 {int((CL.mg_status == '프로테옴 없음').sum())}")
+
+def dscore(r):
+    p, why = 0, []
+    if pd.notna(r.fold):                        p += 3; why.append(f"+3 {r.fold}폴드")
+    if r.mg_status == "프로테옴 없음":            p += 3; why.append("+3 MG없음")
+    elif r.mg_status == "모티프 달라짐":          p += 1; why.append("+1 모티프차이")
+    if (r.n_CXC or 0) > 0:                      p += 2; why.append("+2 CXC")   # CooC1 과 동일 배치
+    elif (r.n_CXXC or 0) > 0:                   p += 1; why.append("+1 CXXC")
+    if r.len <= 350:                            p += 1; why.append("+1 소형")  # CooC1 은 ~256
+    if pd.notna(r.plddt_motif):
+        if r.plddt_motif >= 70:                 p += 1; why.append("+1 pLDDT")
+        elif r.plddt_motif < 50:                p -= 2; why.append("-2 pLDDT낮음")
+    return p, " ".join(why)
+
+CL[["dscore", "dwhy"]] = CL.apply(lambda r: pd.Series(dscore(r)), axis=1)
+CL = CL.sort_values(["dscore", "len"], ascending=[False, True])
+CL.to_csv(TBL/"cooclike_ranked.csv", index=False, encoding="utf-8-sig")
+print("\n  상위 20")
+print(CL.head(20)[["protein", "len", "dscore", "n_CXC", "n_CXXC", "fold",
+                   "mg_status", "desc"]].to_string(index=False))
+
+n, skip = 0, 0
+for _, r in CL.head(TOPD).iterrows():
+    s = SEQ["BL21"].get(r.protein)
+    if not s: continue
+    if 2 * len(s) > MAXTOK: skip += 1; continue
+    doc = {"version": 1, "sequences": [
+        {"protein": {"id": "A", "sequence": s}},
+        {"protein": {"id": "B", "sequence": s}},      # 동형이량체
+        {"ligand":  {"id": "L", "ccd": "NI"}}]}
+    (DIN/f"{r.protein.replace('|','_')}_dimer.yaml").write_text(_y.safe_dump(doc, sort_keys=False))
     n += 1
-print(f"\n  Boltz 입력 {n}개 생성 (길이 초과 제외 {skip})  → {BIN}")
-print(f"  총 잔기 {int(SEL.head(n).len.sum()):,} — 기존 방식이면 여기에 630×{n} 이 더 붙는다")
+
+# 양성대조군 — Ch CooC1. 이게 A-계면으로 안 나오면 아래 전부 못 믿는다
+CRY = TOOLS/"workspace"/"seek_ni_insertase"/"input"/"3kji.pdb"
+AA3 = {"ALA":"A","ARG":"R","ASN":"N","ASP":"D","CYS":"C","GLN":"Q","GLU":"E",
+       "GLY":"G","HIS":"H","ILE":"I","LEU":"L","LYS":"K","MET":"M","PHE":"F",
+       "PRO":"P","SER":"S","THR":"T","TRP":"W","TYR":"Y","VAL":"V","MSE":"M"}
+if CRY.exists():
+    seq, seen = [], set()
+    for l in open(CRY, errors="ignore"):
+        if l.startswith("ATOM") and l[12:16].strip() == "CA" and l[21] == "A":
+            rs = l[22:26].strip()
+            if rs not in seen: seen.add(rs); seq.append(AA3.get(l[17:20].strip(), "X"))
+    cs = "".join(seq)
+    (DIN/"CTRL-CooC1_dimer.yaml").write_text(_y.safe_dump(
+        {"version": 1, "sequences": [
+            {"protein": {"id": "A", "sequence": cs}},
+            {"protein": {"id": "B", "sequence": cs}},
+            {"ligand":  {"id": "L", "ccd": "NI"}}]}, sort_keys=False))
+    print(f"\n  ★ 양성대조군 CTRL-CooC1_dimer.yaml ({len(cs)} 잔기 ×2)")
+    # 음성대조군 — CXC 가 아예 없는 비슷한 길이의 단백질
+    neg = D[(D.n_CXC.fillna(0) == 0) & (D.n_CXXC.fillna(0) == 0) &
+            (D.len.between(len(cs) - 40, len(cs) + 40))].head(1)
+    if len(neg):
+        ns = SEQ["BL21"][neg.iloc[0].protein]
+        (DIN/f"NEG-{neg.iloc[0].protein}_dimer.yaml").write_text(_y.safe_dump(
+            {"version": 1, "sequences": [
+                {"protein": {"id": "A", "sequence": ns}},
+                {"protein": {"id": "B", "sequence": ns}},
+                {"ligand":  {"id": "L", "ccd": "NI"}}]}, sort_keys=False))
+        print(f"  ★ 음성대조군 NEG-{neg.iloc[0].protein}_dimer.yaml "
+              f"(CXC 없음, {len(ns)} 잔기 ×2)")
+        print("    이게 A 로 나오면 Boltz 가 Ni 을 아무 데나 넣는다는 뜻이다.")
+
+print(f"\n  이량체 입력 {n}개 (2×길이 > {MAXTOK} 제외 {skip}) + 대조군  → {DIN}")
+print(f"""
+cd "{BASE/'result'/'boltz'}"
+CUDA_VISIBLE_DEVICES=0 boltz predict inputs_cooclike \\
+  --out_dir out_cooclike \\
+  --use_msa_server --max_msa_seqs 2048 \\
+  --recycling_steps 3 --diffusion_samples 1 \\
+  --output_format mmcif --num_workers 2
+echo DONE_cooclike
+""")
+print("  채점은 Q8 의 DOUT 을 out_cooclike 로 바꿔 돌리면 된다 (A-계면 등급).")
 ```
 
 ---
@@ -757,113 +896,4 @@ if rows:
         print("    이것이 단량체 예측이 놓치고 있던 것이다.")
 else:
     print("  아직 결과가 없다. 위 명령을 먼저 돌릴 것.")
-```
-
----
-
-## CELL Q5b — CooC 형 전용 트랙 (CXC 하나짜리를 곧바로 이량체로)
-
-```python
-# =============================================================================
-# CELL Q5b | Cys 2개짜리를 버리지 않는다
-#
-#   CooC1 은 단량체당 CXC **하나**뿐이다 (Cys112-x-Cys114).
-#   Cys4 는 이량체 계면에서 두 CXC 가 만나야 생긴다. 그러니
-#     - 진짜 CooC 형은 Cys 2개로 충분하고,
-#     - Q2 의 `+3 Cys4후보` 를 못 받아 상위 400 밖으로 밀리고,
-#     - 단량체로 접으면 어차피 grade C 로 나온다.
-#   세 번 불리하다. 그래서 별도 트랙으로 빼서 **처음부터 이량체로** 접는다.
-#
-#   선정 기준 — CooC1 의 서열 특징을 그대로 쓴다
-#     · CXC 또는 CXXC 를 가짐
-#     · Cys4 창이 4 미만 (혼자서는 Cys4 를 못 만든다) ← 여기가 핵심
-#     · 2 × 길이가 토큰 상한 안
-#   여기에 폴드·균주·길이를 가중치로 얹어 정렬한다.
-# =============================================================================
-import yaml as _y
-DIN  = BASE/"result"/"boltz"/"inputs_cooclike"; DIN.mkdir(parents=True, exist_ok=True)
-MAXTOK, TOPD = 1200, 200
-
-CL = D[( (D.n_CXC.fillna(0) > 0) | (D.n_CXXC.fillna(0) > 0) ) &
-       (D.cys4_win < 4)].copy()
-print("=" * 96); print("### CooC 형 후보 (혼자서는 Cys4 를 못 만드는 것)"); print("=" * 96)
-print(f"  CXC/CXXC 보유 + Cys4 창 < 4 : {len(CL)}개")
-print(f"    그중 폴드 정보 있음 {int(CL.fold.notna().sum())}, "
-      f"MG1655 에 없음 {int((CL.mg_status == '프로테옴 없음').sum())}")
-
-def dscore(r):
-    p, why = 0, []
-    if pd.notna(r.fold):                        p += 3; why.append(f"+3 {r.fold}폴드")
-    if r.mg_status == "프로테옴 없음":            p += 3; why.append("+3 MG없음")
-    elif r.mg_status == "모티프 달라짐":          p += 1; why.append("+1 모티프차이")
-    if (r.n_CXC or 0) > 0:                      p += 2; why.append("+2 CXC")   # CooC1 과 동일 배치
-    elif (r.n_CXXC or 0) > 0:                   p += 1; why.append("+1 CXXC")
-    if r.len <= 350:                            p += 1; why.append("+1 소형")  # CooC1 은 ~256
-    if pd.notna(r.plddt_motif):
-        if r.plddt_motif >= 70:                 p += 1; why.append("+1 pLDDT")
-        elif r.plddt_motif < 50:                p -= 2; why.append("-2 pLDDT낮음")
-    return p, " ".join(why)
-
-CL[["dscore", "dwhy"]] = CL.apply(lambda r: pd.Series(dscore(r)), axis=1)
-CL = CL.sort_values(["dscore", "len"], ascending=[False, True])
-CL.to_csv(TBL/"cooclike_ranked.csv", index=False, encoding="utf-8-sig")
-print("\n  상위 20")
-print(CL.head(20)[["protein", "len", "dscore", "n_CXC", "n_CXXC", "fold",
-                   "mg_status", "desc"]].to_string(index=False))
-
-n, skip = 0, 0
-for _, r in CL.head(TOPD).iterrows():
-    s = SEQ["BL21"].get(r.protein)
-    if not s: continue
-    if 2 * len(s) > MAXTOK: skip += 1; continue
-    doc = {"version": 1, "sequences": [
-        {"protein": {"id": "A", "sequence": s}},
-        {"protein": {"id": "B", "sequence": s}},      # 동형이량체
-        {"ligand":  {"id": "L", "ccd": "NI"}}]}
-    (DIN/f"{r.protein.replace('|','_')}_dimer.yaml").write_text(_y.safe_dump(doc, sort_keys=False))
-    n += 1
-
-# 양성대조군 — Ch CooC1. 이게 A-계면으로 안 나오면 아래 전부 못 믿는다
-CRY = TOOLS/"workspace"/"seek_ni_insertase"/"input"/"3kji.pdb"
-AA3 = {"ALA":"A","ARG":"R","ASN":"N","ASP":"D","CYS":"C","GLN":"Q","GLU":"E",
-       "GLY":"G","HIS":"H","ILE":"I","LEU":"L","LYS":"K","MET":"M","PHE":"F",
-       "PRO":"P","SER":"S","THR":"T","TRP":"W","TYR":"Y","VAL":"V","MSE":"M"}
-if CRY.exists():
-    seq, seen = [], set()
-    for l in open(CRY, errors="ignore"):
-        if l.startswith("ATOM") and l[12:16].strip() == "CA" and l[21] == "A":
-            rs = l[22:26].strip()
-            if rs not in seen: seen.add(rs); seq.append(AA3.get(l[17:20].strip(), "X"))
-    cs = "".join(seq)
-    (DIN/"CTRL-CooC1_dimer.yaml").write_text(_y.safe_dump(
-        {"version": 1, "sequences": [
-            {"protein": {"id": "A", "sequence": cs}},
-            {"protein": {"id": "B", "sequence": cs}},
-            {"ligand":  {"id": "L", "ccd": "NI"}}]}, sort_keys=False))
-    print(f"\n  ★ 양성대조군 CTRL-CooC1_dimer.yaml ({len(cs)} 잔기 ×2)")
-    # 음성대조군 — CXC 가 아예 없는 비슷한 길이의 단백질
-    neg = D[(D.n_CXC.fillna(0) == 0) & (D.n_CXXC.fillna(0) == 0) &
-            (D.len.between(len(cs) - 40, len(cs) + 40))].head(1)
-    if len(neg):
-        ns = SEQ["BL21"][neg.iloc[0].protein]
-        (DIN/f"NEG-{neg.iloc[0].protein}_dimer.yaml").write_text(_y.safe_dump(
-            {"version": 1, "sequences": [
-                {"protein": {"id": "A", "sequence": ns}},
-                {"protein": {"id": "B", "sequence": ns}},
-                {"ligand":  {"id": "L", "ccd": "NI"}}]}, sort_keys=False))
-        print(f"  ★ 음성대조군 NEG-{neg.iloc[0].protein}_dimer.yaml "
-              f"(CXC 없음, {len(ns)} 잔기 ×2)")
-        print("    이게 A 로 나오면 Boltz 가 Ni 을 아무 데나 넣는다는 뜻이다.")
-
-print(f"\n  이량체 입력 {n}개 (2×길이 > {MAXTOK} 제외 {skip}) + 대조군  → {DIN}")
-print(f"""
-cd "{BASE/'result'/'boltz'}"
-CUDA_VISIBLE_DEVICES=0 boltz predict inputs_cooclike \\
-  --out_dir out_cooclike \\
-  --use_msa_server --max_msa_seqs 2048 \\
-  --recycling_steps 3 --diffusion_samples 1 \\
-  --output_format mmcif --num_workers 2
-echo DONE_cooclike
-""")
-print("  채점은 Q8 의 DOUT 을 out_cooclike 로 바꿔 돌리면 된다 (A-계면 등급).")
 ```
