@@ -547,13 +547,25 @@ def pid(stem):
     if m: return f"AF{m.group(1)}"
     return s
 
-RES_FS, SETS = [], {}
+RES_FS, SETS, RES_ALL = [], {}, []
+PROTN = {"BL21": 4110, "MG1655": 4300, "Y19": 5325}   # 프로테옴 단백질 수
 for tag, qp in [("cry", CRY_A), ("af", AF_PATH)]:
     for s in STRUCT_ALL:
         d = fs(tag, qp, s)
         if not len(d):
             print(f"  {tag:3s} → {s:8s} 결과 없음"); continue
         fold = d[d.alntmscore >= TM_FOLD]
+        # 전체 정렬 수와 컷 전후를 같이 찍는다. ≥0.5 만 보고하면
+        # '8개' 가 몇 개 중 8개인지 알 수 없다 (7페이지 folddisco 표는 전체 수였다)
+        n_all = len(d)
+        bands = {f"≥{c}": int((d.alntmscore >= c).sum()) for c in (0.3, 0.4, 0.5, 0.7, 0.9)}
+        print(f"  {tag:3s} → {s:8s} 정렬 {n_all:5d}개 중  " +
+              "  ".join(f"{k} {v}" for k, v in bands.items()))
+        RES_ALL.append({"frame": "결정" if tag == "cry" else "예측", "strain": s,
+                        "정렬총수": n_all, **bands,
+                        "프로테옴": PROTN.get(s), 
+                        "비율(≥0.5)": round(bands["≥0.5"] / PROTN[s] * 100, 3)
+                                      if PROTN.get(s) else None})
         SETS[(tag, s)] = {pid(x) for x in fold.prot}
         top = d.iloc[0]
         ctrl = ""
@@ -572,7 +584,14 @@ for tag, qp in [("cry", CRY_A), ("af", AF_PATH)]:
 
 F = pd.DataFrame(RES_FS)
 F.to_csv(TBL/"cooc_fold_afframe.csv", index=False, encoding="utf-8-sig")
-print(f"\n저장: {TBL/'cooc_fold_afframe.csv'}")
+A = pd.DataFrame(RES_ALL)
+A.to_csv(TBL/"cooc_fold_counts.csv", index=False, encoding="utf-8-sig")
+print("\n" + "=" * 96); print("### 전체 매치 수 (컷 전후)"); print("=" * 96)
+print(A.to_string(index=False))
+print("\n  '정렬총수' 는 -e 10 --max-seqs 2000 으로 되돌아온 전부다. 구조 정렬은")
+print("  아무 단백질이나 어느 정도는 겹치므로 이 수 자체에 의미는 없다.")
+print("  의미는 **TM 분포**에 있다 — 0.5 위로 얼마나 남는가, 0.9 위에 뭐가 있는가.")
+print(f"\n저장: {TBL/'cooc_fold_afframe.csv'}, {TBL/'cooc_fold_counts.csv'}")
 
 print("\n" + "=" * 96); print("### (1) 두 프레임이 Foldseek 에서 갈리는가"); print("=" * 96)
 for s in STRUCT_ALL:
