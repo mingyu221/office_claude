@@ -435,13 +435,50 @@ if not CRY_A.exists():
         o.write("END\n")
 print(f"  결정 질의 {CRY_A.name} / 예측 질의 {AF_PATH.name}")
 
+# ---- MG1655 구조 디렉터리를 실제로 찾는다 --------------------------------
+#   경로를 추측해 세 개만 찍어보고 포기하면, 있는 것도 '없다' 로 처리된다.
+#   database 트리를 훑어 구조 파일이 많이 든 디렉터리를 세어 보고 고른다.
+import os
+MG_STRUCT = globals().get("MG_STRUCT")      # 손으로 지정하고 싶으면 여기에
+
+def find_struct_dirs(root, min_n=500, depth=3):
+    out = []
+    root = Path(root)
+    def walk(d, lv):
+        if lv > depth: return
+        try: entries = list(os.scandir(d))
+        except Exception: return
+        n = sum(1 for e in entries
+                if e.is_file() and e.name.endswith((".cif", ".pdb", ".cif.gz", ".pdb.gz")))
+        if n >= min_n: out.append((Path(d), n))
+        for e in entries:
+            if e.is_dir() and not e.name.startswith("."): walk(e.path, lv + 1)
+    walk(root, 0)
+    return sorted(out, key=lambda v: -v[1])
+
 STRUCT_ALL = dict(STRUCT)
-_mg = TOOLS/"database"/"protein_list"/"structures_MG1655"
-for cand in [_mg, TOOLS/"database"/"structures_mg1655",
-             TOOLS/"database"/"bacteriaDB"/"structures_MG1655"]:
-    if cand.is_dir(): STRUCT_ALL["MG1655"] = cand; break
-print(f"  구조 DB: {', '.join(STRUCT_ALL)}"
-      + ("" if "MG1655" in STRUCT_ALL else "   (MG1655 구조 없음 → F7 에서 서열로)"))
+if MG_STRUCT and Path(MG_STRUCT).is_dir():
+    STRUCT_ALL["MG1655"] = Path(MG_STRUCT)
+else:
+    known = {str(Path(v).resolve()) for v in STRUCT.values()}
+    found = find_struct_dirs(TOOLS/"database")
+    print("  구조 파일이 든 디렉터리:")
+    for d, n in found[:12]:
+        mine = "  ← 이미 씀" if str(d.resolve()) in known else ""
+        print(f"    {n:6d}개  {d}{mine}")
+    # MG1655 프로테옴은 4,300개다. 이름 힌트 + 개수로 고른다
+    HINT = ("mg1655", "k12", "k-12", "ecoli", "e_coli", "coli", "up000000625")
+    cands = [(d, n) for d, n in found if str(d.resolve()) not in known]
+    pick = next((d for d, n in cands
+                 if any(h in d.name.lower() for h in HINT)), None)
+    if pick is None and cands:
+        pick = min(cands, key=lambda v: abs(v[1] - 4300))[0]
+    if pick:
+        STRUCT_ALL["MG1655"] = pick
+        print(f"\n  ★ MG1655 구조로 고른 것: {pick}")
+        print("    틀렸으면 MG_STRUCT = '경로' 를 정의하고 이 셀을 다시 돌릴 것")
+print(f"\n  구조 DB: {', '.join(STRUCT_ALL)}"
+      + ("" if "MG1655" in STRUCT_ALL else "   (MG1655 구조 못 찾음 → F7 에서 서열로)"))
 
 def fs(tag, qpath, strain):
     o = FSD/f"{tag}_vs_{strain}.m8"
@@ -581,6 +618,20 @@ C.to_csv(TBL/"cooc_fold_mg1655.csv", index=False, encoding="utf-8-sig")
 print("\n" + "=" * 96); print("### CooC 폴드 × MG1655 부재"); print("=" * 96)
 print(C.to_string(index=False))
 print(f"\n저장: {TBL/'cooc_fold_mg1655.csv'}")
+# MG1655 구조가 있으면 Foldseek 으로도 직접 물어 서열 판정과 대조한다
+if "MG1655" in STRUCT_ALL:
+    dmg = fs("af", AF_PATH, "MG1655")
+    if len(dmg):
+        fold_mg = dmg[dmg.alntmscore >= TM_FOLD]
+        print("\n" + "=" * 96); print("### MG1655 도 구조로 직접"); print("=" * 96)
+        print(f"  폴드(≥{TM_FOLD}) {len(fold_mg)}개   최고 {pid(fold_mg.iloc[0].stem)} "
+              f"tm {fold_mg.iloc[0].alntmscore:.3f}")
+        print(f"  BL21 {len(MEM)} / Y19 / MG1655 {len(fold_mg)} — 과 크기를 세 균주로 비교할 수 있다")
+        fold_mg.assign(strain="MG1655", frame="예측")[
+            ["strain", "frame", "stem", "alntmscore", "fident", "qcov"]] \
+            .to_csv(TBL/"cooc_fold_MG1655.csv", index=False, encoding="utf-8-sig")
+        print(f"저장: {TBL/'cooc_fold_MG1655.csv'}")
+
 print("\n  O   폴드는 CooC 인데 MG1655 에 없다  ← 가장 강한 조합")
 print("  ~   어노테이션 누락")
 print("  .   MG1655 에도 있다")
@@ -772,6 +823,15 @@ print("        F6 에서 두 프레임의 자카드가 높게 나온 것이 그 
 #     그래서 균주 비교는 표2 로 분리한다. 표1 에 빈칸으로 두지 말 것.
 # =============================================================================
 F = pd.read_csv(TBL/"cooc_fold_afframe.csv")
+# MG1655 를 따로 돌렸으면 합친다 (F7 이 구조 DB 를 찾았을 때 생긴다)
+_mgf = TBL/"cooc_fold_MG1655.csv"
+if _mgf.exists() and "MG1655" not in set(F.strain):
+    m = pd.read_csv(_mgf)
+    m = m.rename(columns={"alntmscore": "tm", "stem": "protein"})
+    m["tier"] = ["핵심" if v >= 0.90 else "주변" if v >= 0.70 else "폴드만" for v in m.tm]
+    F = pd.concat([F, m[["frame", "strain", "protein", "tm", "fident", "qcov", "tier"]]],
+                  ignore_index=True)
+    print(f"  MG1655 {len(m)}행 합침")
 SLIDE = TBL/"slide_foldseek"; SLIDE.mkdir(parents=True, exist_ok=True)
 LABEL = {"BL21": "E. coli BL21(DE3)", "MG1655": "E. coli K-12 MG1655",
          "Y19": "C. amalonaticus Y19"}
