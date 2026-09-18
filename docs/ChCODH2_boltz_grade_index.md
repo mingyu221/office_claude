@@ -60,41 +60,78 @@
 ## 3. 결과
 
 **411 구조 중 Ni 을 후보 쪽 사슬로 가져간 것 = 22개.** 그 22개를 채점했다.
+아래는 `ni_site_grade_named.csv` 실측값이다 (이름은 `ChCODH2_name_grade.ipynb` 가 붙였다).
 
-| 등급 | 수 | 단백질 | 최단 배위 |
+| 등급 | 행 | 거리 | folddisco 검출 |
 |---|---|---|---|
-| **A** | **4** | `QJZ13803.1` **HslO** | 2.18 Å |
-| | | `Y19-AKE60400.1` HslO 직교체 | 2.17 Å |
-| | | **`QJZ12568.1`** hypothetical HO396_09830 | **2.23 Å** |
-| | | `QJZ13396.1` **GspE** | 2.29 Å |
-| **B** | 9 | HisB · GmhB · Tgt (세 균주 직교체 포함) | 1.86–2.14 Å |
-| **C** | 1 | HpaA | — |
-| **D** | 8 | **YeiR** · PhnP · NagA · Ser/Thr 포스파타제 · phage tail | — |
+| **A** | 4 | 2.17–2.29 Å | **1 / 4** |
+| B | 9 | 1.86–2.19 Å | 3 / 9 |
+| C | 1 | 1.96 Å | 0 / 1 |
+| D | 8 | 1.90–2.09 Å | 2 / 8 |
 
-> grade A 4개 중 **둘은 같은 단백질의 직교체**(BL21 HslO · Y19 HslO)다.
-> 서로 다른 단백질로 세면 **3종**이다.
+### grade A — 4행, 그러나 **3종**
 
-### grade A 의 배위 잔기
+| 균주 | 접근번호 | 이름 | 거리 | 배위 잔기 | fd |
+|---|---|---|---|---|---|
+| Y19 | `AKE60400.1` | Hsp33-like chaperonin | 2.17 | CYS230/232/263/266 | ✗ |
+| BL21 | `QJZ13803.1` | Hsp33 family molecular chaperone **HslO** | 2.18 | 〃 (동일) | **O** |
+| BL21 | **`QJZ12568.1`** | **hypothetical protein HO396_09830** | **2.23** | CYS99/102/112/115 | ✗ |
+| BL21 | `QJZ13396.1` | type II secretion system ATPase **GspE** | 2.29 | CYS391/394/424/427 | ✗ |
 
-```
-QJZ12568.1      CYS99  CYS102 CYS112 CYS115
-QJZ13396.1      CYS391 CYS394 CYS424 CYS427     GspE
-Y19-AKE60400.1  CYS230 CYS232 CYS263 CYS266     HslO 직교체
-QJZ13803.1      CYS230 CYS232 CYS263 CYS266     HslO (BL21)
-```
+위 두 줄은 **같은 단백질의 직교체**(배위 잔기 서명이 동일). 서로 다른 자리로 세면 **3종**.
 
-### YeiR 가 D 로 내려간 이유
+> **★ 셋 중 둘은 이미 알려진 아연 자리다.**
+> HslO(Hsp33)는 산화환원 조절 **아연** 중심이고, GspE 는 사연구조 **아연** 결합
+> 모티프를 갖는다. B 에 `SWIM zinc finger`, D 에 `zinc-binding GTPase YeiR` 도 있다.
+>
+> **이 등급 체계는 아연 자리를 찾는다.** Cys4 티올레이트는 Zn 과 Ni 이 공유하는
+> 자리라 당연한 결과다 — CooC1 결정구조에 Zn 이 들어가 있던 것도 같은 이유다.
+> **자리의 종류만으로는 Zn 과 Ni 을 가르지 못한다.**
+>
+> 그래서 `QJZ12568.1` 을 고른 근거는 Cys4 자체가 아니라 **다른 축**이다
+> (MG1655 프로테옴·게놈 부재 + HypA 폴드). 동시에 이것이 강점이기도 하다 —
+> **grade A 3종 중 유일하게 기능이 알려지지 않은 것**이다. 나머지 둘은 자기
+> 아연 자리를 쓰는 확립된 효소라 머츄레이즈일 사전확률이 낮다.
 
-```
-n_donor = 1        2.6 Å 안에 든 것이 HIS209 하나뿐
-CYS65  = 2.69 Å    잘림 (Ni–S 는 2.2 Å 근처여야 한다)
-```
+### grade B — 9행, **5종**
 
-앞선 후보 목록의 1번이었다. **계통으로 고른 후보를 기하가 내렸다.**
-단, `TIGHT` 를 3.0 으로 올리면 D 가 C 로 올라오기 시작한다 — 경계는 우리가 정한 것이다.
-그리고 YeiR 는 이량체라 **단량체로 접은 것이 불리했을 수 있다**(Q7 에서 재검토 중).
+| 배위 잔기 서명 | 행 | 누구 |
+|---|---|---|
+| CYS93/101/103 HIS95 | 3 | HisB (BL21 `QJZ12582.1` · MG1655 `P06987` · Y19 `AKE59056.1`) |
+| CYS302/304/307 HIS333 | 3 | Tgt (BL21 `QJZ11161.1` · MG1655 `P0A847` · Y19 `AKE57956.1`) |
+| HIS94 CYS92/107/109 | 1 | BL21 `QJZ11021.1` **GmhB** |
+| CYS166/168/174 HIS176 | 1 | MG1655 `P33353` **YehQ** |
+| CYS511/513/526 HIS528 | 1 | Y19 `AKE59601.1` **SWIM zinc finger** |
 
----
+앞의 둘이 세 균주 직교체 3쌍이다 — **이 축이 균주를 못 가른다는 직접 증거.**
+
+### grade C — 1행
+
+BL21 `QJZ14701.1` **HpaA** (4-hydroxyphenylacetate 대사 조절), GLN50 HIS43/45/84, 1.96 Å
+
+### grade D — 8행
+
+| 균주 | 접근번호 | 이름 | 거리 | 배위 |
+|---|---|---|---|---|
+| BL21 | `QJZ11514.1` | phage tail protein | 1.90 | HIS68/70 ASP81 |
+| BL21 | **`QJZ12719.1`** | **zinc-binding GTPase YeiR** | 1.91 | **HIS209 하나뿐** |
+| BL21 | `QJZ11489.1` | serine/threonine protein phosphatase | 1.93 | ASN121 ASP95 HIS185/232 |
+| BL21 | `QJZ13557.1` | **NagA** N-acetylglucosamine-6-P deacetylase | 1.94 | GLU125 HIS55/57 ASP269 |
+| Y19 | `AKE61193.1` | carbon-phosphorus lyase 보조단백질 | 2.00 | ASP164 HIS78 |
+| BL21 | `QJZ14465.1` | **PhnP** phosphonate 대사 | 2.05 | ASP164 HIS78/143 |
+| MG1655 | `P16692` | phosphoribosyl cyclic phosphate phosphodiesterase | 2.08 | ASP164 HIS78/76 |
+| BL21 | `QJZ11612.1` | hypothetical HO396_04415 | 2.09 | HIS170/177 |
+
+PhnP 계열 3행도 세 균주 직교체다.
+
+### folddisco 사각지대가 이 표 한 열로 보인다
+
+`folddisco_metal = True` 는 **22개 중 6개**뿐이다:
+`QJZ13803.1`(A) · `QJZ12582.1`(B) · `QJZ11021.1`(B) · `QJZ11161.1`(B) ·
+`QJZ12719.1`(D) · `QJZ14465.1`(D)
+
+**grade A 4개 중 folddisco 가 잡은 것은 `QJZ13803.1` 하나다.**
+`QJZ12568.1` · `QJZ13396.1` · `Y19-AKE60400.1` 셋 다 `False`.
 
 ## 4. 재현성 — 이 축을 믿는 근거
 
@@ -152,8 +189,12 @@ ipTM 이 같은 입력끼리 0.28 씩 벌어지는 것과 정반대다.
 | `Cys` / `His` / `Asp/Glu` | 종류별 개수 |
 | `min_dist` | 가장 가까운 배위 거리 |
 | `donors` | 배위 잔기 목록 (`CYS112 CYS114` 형태) |
-| `strain` | BL21 / MG1655 / Y19 |
 | `folddisco_metal` | folddisco 금속 모티프 목록에도 있나 |
+
+> **`desc` 열은 비어 있다.** `strain` 열도 **없다** — 균주는 `prey` 의 접두사
+> (`Y19-` `MG1655-`, 없으면 BL21)로만 구분된다.
+> 이름을 붙인 판이 **`ni_site_grade_named.csv`** 다
+> (`ChCODH2_name_grade.ipynb` 셀 하나로 만든다. `strain` `acc` `name` 열이 붙는다).
 | `why` | 등급 사유 |
 | `desc` | 어노테이션 |
 
