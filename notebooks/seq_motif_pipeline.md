@@ -894,10 +894,25 @@ def pick_gpu():
     return max(ok, key=lambda r: r[1])[0]
 
 def running():
+    """기록된 PID 가 살아 있는 것만으로는 부족하다.
+       setsid 로 띄우면 PIDF 에 들어가는 것은 **셸의 PID** 이고 실제 예측은
+       그 자식이다. 자식이 죽어도 셸이 남아 있으면 '돌고 있다' 로 잘못 읽힌다
+       (실제로 그래서 죽은 작업을 살아 있다고 보고했다).
+       예측 프로세스가 실재하는지 따로 확인한다."""
     if not PIDF.exists(): return None
     try: pid = int(PIDF.read_text().strip())
     except Exception: return None
-    return pid if Path(f"/proc/{pid}").exists() else None
+    if not Path(f"/proc/{pid}").exists():
+        PIDF.unlink(missing_ok=True); return None
+    alive = subprocess.run("pgrep -f '[b]oltz predict'", shell=True,
+                           capture_output=True, text=True).stdout.split()
+    if not alive:
+        print(f"  기록된 PID {pid} 의 셸은 살아 있으나 boltz predict 가 없다 "
+              f"— 죽은 작업이다. PID 파일을 지우고 다시 띄울 수 있게 한다.")
+        print(f"    남은 셸도 정리할 것:  kill {pid}")
+        PIDF.unlink(missing_ok=True)
+        return None
+    return pid
 
 n_in  = len([f for f in (BOLTZ_ROOT/IN_DIR).glob("*.yaml")])
 _man = BOLTZ_ROOT/IN_DIR/"_manifest.json"
@@ -969,6 +984,15 @@ if 'GPU' in dir() and GPU is not None and not pid and not (n_out >= n_in and n_i
     if not Path(f"/proc/{proc.pid}").exists():
         print("\n  ★ 6초 만에 죽었다. 로그 끝부분:")
         print("\n".join(LOG.read_text(errors='ignore').splitlines()[-25:]))
+
+if LOG.exists():
+    _txt = LOG.read_text(errors="ignore")
+    for pat, msg in [("Missing folder", "출력 폴더가 실행 중에 사라졌다 (rm -rf 를 돌면서 했을 때 난다)"),
+                     ("out of memory", "OOM — 같은 카드에 다른 작업이 있었는지 볼 것"),
+                     ("429", "MSA 서버 속도 제한"),
+                     ("CUDA error", "CUDA 초기화/실행 실패")]:
+        if pat in _txt:
+            print(f"\n  ★ 로그에 '{pat}' 가 있다 — {msg}")
 
 print("\n" + "=" * 96); print("### 로그 끝 20줄"); print("=" * 96)
 print("\n".join(LOG.read_text(errors="ignore").splitlines()[-20:])
