@@ -1531,9 +1531,23 @@ if T2 is not None and T3 is not None and "BL21" in T3.columns:
     T4 = T4.rename(columns={"MG1655_hit": "구조_상대",
                             "MG1655_hit_name": "구조_상대_이름",
                             "MG1655_TM": "구조_TM"})
-    T4["일치"] = [{True: "O", False: ".", None: "?"}[same_protein(a, b)]
-                 for a, b in zip(T4.get("서열_상대_이름", ""),
-                                 T4.get("구조_상대_이름", ""))]
+    # 세 이름을 다 본다. BL21 쪽 이름을 빼놓으면 같은 단백질을 다르다고 한다 —
+    #   ApbC(BL21) = Mrp(MG1655 어노테이션) = iron-sulfur cluster carrier(UniProt)
+    # 어느 쌍이든 겹치면 같은 단백질로 본다.
+    def verdict(bl, sq, stq):
+        """구조가 집은 것이 맞는 단백질인가.
+             1순위  서열_상대 vs 구조_상대
+             2순위  BL21 vs 구조_상대   — 같은 단백질을 두 DB 가 다르게 부를 때
+                    (ApbC / Mrp / iron-sulfur cluster carrier 가 그 경우)
+           BL21 vs 서열_상대 은 보지 않는다. 둘은 직교체라 늘 일치하고,
+           그것이 참이어도 '구조가 맞는 것을 집었나' 에는 답이 안 된다."""
+        a, b = same_protein(sq, stq), same_protein(bl, stq)
+        if a is True or b is True:      return "O"
+        if a is None and b is None:     return "?"
+        return "."
+    T4["일치"] = [verdict(b, s, x) for b, s, x in
+                 zip(T4.get("BL21_name", ""), T4.get("서열_상대_이름", ""),
+                     T4.get("구조_상대_이름", ""))]
     COLS4 = ["BL21", "BL21_name", "TM_to_CooC1",
              "서열_상대", "서열_상대_이름", "fident",
              "구조_상대", "구조_상대_이름", "구조_TM", "일치"]
