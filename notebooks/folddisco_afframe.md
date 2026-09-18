@@ -939,3 +939,83 @@ print(f"  All {n_in}/{len(C)} also present in MG1655"
       f"  -> no strain difference at family level")
 print(f"\n저장: {SLIDE}")
 ```
+
+---
+
+## CELL F10 — 세 균주의 과 구성원이 같은 것인가 (구조로 직접 대조)
+
+```python
+# =============================================================================
+# CELL F10 | "BL21 8개가 MG1655 에도 있다" 를 구조로 확인한다
+#
+#   F7 은 서열로 물었다 (fident 0.97~1.000). 강한 근거지만 ID 체계가
+#   BL21=GenBank / MG1655=UniProt 이라 표에서 같은 단백질인지 눈으로 못 맞춘다.
+#   여기서는 **BL21 구성원 하나하나를 MG1655 구조 DB 에 직접 Foldseek** 해서
+#   MG1655 쪽 과 구성원 중 누구에게 떨어지는지 본다. ID 매핑이 필요 없다.
+#
+#   그리고 Y19 도 같이 해서 세 균주 대응표를 만든다.
+#   과가 같은 구성원으로 채워져 있으면 '균주 차이 없음' 이 구조 수준에서도 성립한다.
+# =============================================================================
+BLM = sorted(F[(F.frame == "예측") & (F.strain == "BL21")].protein)
+print(f"  BL21 과 구성원 {len(BLM)}개를 다른 두 균주 구조에 직접 건다")
+
+# 구조 파일 경로 찾기 (crosswalk 역방향)
+_xw = pd.read_csv(TBL/"id_crosswalk_struct_to_genbank.csv") \
+      if (TBL/"id_crosswalk_struct_to_genbank.csv").exists() else pd.DataFrame()
+P2T = {}
+if len(_xw):
+    for a, b in zip(_xw.tid, _xw.protein):
+        if pd.isna(a) or pd.isna(b): continue
+        for one in str(b).split(","): P2T.setdefault(one.strip(), Path(str(a)))
+
+def find_struct(pid, strain):
+    p = P2T.get(pid)
+    if p and p.exists(): return p
+    d = Path(STRUCT_ALL[strain])
+    if p:
+        c = d/p.name
+        if c.exists(): return c
+        for f in d.glob(f"{p.stem}*"):
+            return f
+    return None
+
+MEMSET = {s: set(F[(F.frame == "예측") & (F.strain == s)].protein)
+          for s in STRUCT_ALL}
+rows = []
+for pidv in BLM:
+    q = find_struct(pidv, "BL21")
+    if q is None:
+        rows.append({"BL21": pidv, "비고": "구조 파일 못 찾음"}); continue
+    rec = {"BL21": pidv,
+           "TM_CooC": float(F[(F.frame == "예측") & (F.strain == "BL21") &
+                              (F.protein == pidv)].tm.iloc[0])}
+    for s in ["MG1655", "Y19"]:
+        o = FSD/f"x_{pidv}_vs_{s}_{Path(STRUCT_ALL[s]).name}.m8"
+        if not (o.exists() and o.stat().st_size):
+            sh(f'"{FS}" easy-search "{q}" "{STRUCT_ALL[s]}" "{o}" "{FSD}/tx_{s}" '
+               f'--format-output "{FFMT}" -e 10 --max-seqs 50 --exact-tmscore 1 '
+               f'--threads {THREADS}', quiet=True)
+        if not (o.exists() and o.stat().st_size):
+            rec[s] = None; rec[f"{s}_TM"] = None; continue
+        d = pd.read_csv(o, sep="\t", names=FFMT.split(","))
+        d["prot"] = d.target.apply(lambda x: Path(str(x)).stem) \
+                     .str.replace(r"_[A-Za-z0-9]$", "", regex=True)
+        d = d.sort_values("alntmscore", ascending=False).drop_duplicates("prot")
+        top = d.iloc[0]
+        rec[s] = pid(top.prot); rec[f"{s}_TM"] = round(float(top.alntmscore), 3)
+        rec[f"{s}_과원"] = "O" if pid(top.prot) in MEMSET.get(s, set()) else "."
+    rows.append(rec)
+
+X = pd.DataFrame(rows)
+X.to_csv(TBL/"slide_foldseek"/"table3_family_correspondence.csv",
+         index=False, encoding="utf-8-sig")
+print("\n" + "=" * 100); print("### 세 균주 과 구성원 대응"); print("=" * 100)
+print(X.to_string(index=False))
+print("\n  MG1655_과원 / Y19_과원 열 — 그 최고 히트가 해당 균주의 CooC 과 목록에")
+print("  들어 있는가. O 가 많으면 세 균주가 **같은 구성원으로 채워진 같은 과**다.")
+if "MG1655_TM" in X:
+    hi = X[X.MG1655_TM >= 0.9]
+    print(f"\n  MG1655 에 TM ≥ 0.9 대응이 있는 BL21 구성원: {len(hi)}/{len(X)}")
+    print("  → 구조 수준에서도 BL21 고유 구성원이 없다는 뜻이다.")
+print(f"\n저장: {TBL/'slide_foldseek'/'table3_family_correspondence.csv'}")
+```
