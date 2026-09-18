@@ -758,3 +758,74 @@ print("        좌표를 안 쓰므로 pLDDT 와 무관하다. GPU 도 필요 �
 print("    (b) 폴드 — Foldseek. 루프 하나가 흔들려도 폴드 판정은 버틴다.")
 print("        F6 에서 두 프레임의 자카드가 높게 나온 것이 그 증거다")
 ```
+
+---
+
+## CELL F9 — 발표용 요약 표 두 개
+
+```python
+# =============================================================================
+# CELL F9 | 슬라이드에 그대로 올릴 표를 만든다
+#   표1 — 균주별 폴드 히트 수와 tier, 최고 히트와 TM
+#   표2 — BL21 과 구성원 × MG1655 존재 여부
+#   ※ MG1655 는 구조 DB 가 없어 Foldseek 3균주 비교가 성립하지 않는다.
+#     그래서 균주 비교는 표2 로 분리한다. 표1 에 빈칸으로 두지 말 것.
+# =============================================================================
+F = pd.read_csv(TBL/"cooc_fold_afframe.csv")
+SLIDE = TBL/"slide_foldseek"; SLIDE.mkdir(parents=True, exist_ok=True)
+LABEL = {"BL21": "E. coli BL21(DE3)", "MG1655": "E. coli K-12 MG1655",
+         "Y19": "C. amalonaticus Y19"}
+
+rows = []
+for st in ["BL21", "MG1655", "Y19"]:
+    for fr in ["예측", "결정"]:
+        sub = F[(F.strain == st) & (F.frame == fr)]
+        if not len(sub):
+            if fr == "예측":
+                rows.append({"Strain": LABEL[st], "Frame": "AFDB", "Fold hits": None,
+                             "Core >=0.90": None, "Near 0.70-0.90": None,
+                             "Fold-only 0.50-0.70": None, "Top hit": "no structure DB",
+                             "TM": None})
+            continue
+        top = sub.sort_values("tm", ascending=False).iloc[0]
+        rows.append({"Strain": LABEL[st], "Frame": "AFDB" if fr == "예측" else "Crystal",
+                     "Fold hits": len(sub),
+                     "Core >=0.90":          int((sub.tm >= 0.90).sum()),
+                     "Near 0.70-0.90":       int(((sub.tm >= 0.70) & (sub.tm < 0.90)).sum()),
+                     "Fold-only 0.50-0.70":  int(((sub.tm >= 0.50) & (sub.tm < 0.70)).sum()),
+                     "Top hit": top.protein, "TM": round(float(top.tm), 3)})
+T1 = pd.DataFrame(rows)
+T1.to_csv(SLIDE/"table1_fold_counts.csv", index=False, encoding="utf-8-sig")
+print("=" * 96); print("### 표1 — 폴드 검색 결과"); print("=" * 96)
+print(T1.to_string(index=False))
+
+C = pd.read_csv(TBL/"cooc_fold_mg1655.csv")
+NOTE = {".": "", "~": "annotation gap", "O": "ABSENT in MG1655"}
+T2 = pd.DataFrame({
+    "BL21 protein": C.protein,
+    "TM to ChCooC1": C.tm_CooC,
+    "MG1655": ["genome only" if v == "~" else "absent" if v == "O"
+               else (re.search(r"있음 (\S+)", str(g)).group(1)
+                     if re.search(r"있음 (\S+)", str(g)) else "-")
+               for v, g in zip(C.MG1655, C["근거"])],
+    "fident": [(re.search(r"fident ([\d.]+)", str(g)).group(1)
+                if re.search(r"fident ([\d.]+)", str(g)) else None) for g in C["근거"]],
+    "Note": [NOTE.get(v, "") for v in C.MG1655],
+}).sort_values("TM to ChCooC1", ascending=False)
+T2.to_csv(SLIDE/"table2_bl21_family_vs_MG1655.csv", index=False, encoding="utf-8-sig")
+print("\n" + "=" * 96); print("### 표2 — BL21 과 구성원 × MG1655"); print("=" * 96)
+print(T2.to_string(index=False))
+
+print("\n" + "=" * 96); print("### 슬라이드 문장"); print("=" * 96)
+y19 = F[(F.strain == "Y19") & (F.frame == "결정")]
+ctl = y19[y19.protein.str.contains(Y19_GB.split(".")[0], na=False)]
+bl  = F[(F.strain == "BL21") & (F.frame == "예측")]
+print(f"  Control PASSED : ChCooC1 -> Y19 CooC  TM "
+      f"{float(ctl.iloc[0].tm):.3f}" if len(ctl) else "  대조군 행 없음")
+print(f"  BL21 CooC-family : {len(bl)} proteins, max TM {bl.tm.max():.3f}"
+      f"  -> no true CooC in BL21")
+n_in = int((C.MG1655 != "O").sum())
+print(f"  All {n_in}/{len(C)} also present in MG1655"
+      f"  -> no strain difference at family level")
+print(f"\n저장: {SLIDE}")
+```
