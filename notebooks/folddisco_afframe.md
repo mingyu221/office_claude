@@ -1122,31 +1122,6 @@ if "MG1655_TM" in X:
     print("  → 구조 수준에서도 BL21 고유 구성원이 없다는 뜻이다.")
 print(f"\n저장: {TBL/'slide_foldseek'/'table3_family_correspondence.csv'}")
 
-# ---- 표2(서열) 와 표3(구조) 가 같은 상대를 가리키는가 ----
-_t2 = SLIDE/"table2_bl21_family_vs_MG1655.csv" if 'SLIDE' in dir() \
-      else TBL/"slide_foldseek"/"table2_bl21_family_vs_MG1655.csv"
-if Path(_t2).exists():
-    B = pd.read_csv(_t2)
-    kc = "BL21_acc" if "BL21_acc" in B.columns else "protein"
-    CMP2 = X.merge(B[[kc, "MG1655_acc"]].rename(columns={kc: "BL21",
-                                                        "MG1655_acc": "서열_상대"}),
-                   on="BL21", how="left")
-    CMP2 = CMP2.rename(columns={"MG1655_hit": "구조_상대", "MG1655_TM": "구조_TM"})
-    print("\n" + "=" * 100); print("### 서열(mmseqs) 과 구조(Foldseek) 가 같은 상대를 가리키는가")
-    print("=" * 100)
-    print(CMP2[["BL21", "TM_to_CooC1", "서열_상대", "구조_상대", "구조_TM"]]
-          .to_string(index=False))
-    print("\n  ID 체계가 달라(GenBank vs UniProt) 직접 대조는 안 된다.")
-    print("  F12 가 붙인 이름 열로 비교할 것 — 이름이 다르면 두 방법이 서로 다른")
-    print("  단백질을 고른 것이고, 그 행은 구조가 '도메인만 닮은 다른 단백질' 을")
-    print("  집었을 가능성이 있다. 구조_TM 이 0.9 미만인 행부터 확인한다.")
-    low = CMP2[pd.to_numeric(CMP2["구조_TM"], errors="coerce") < 0.9]
-    if len(low):
-        print(f"\n  ★ 구조_TM < 0.9 인 행 {len(low)}개 — 여기가 갈릴 수 있다:")
-        print(low[["BL21", "서열_상대", "구조_상대", "구조_TM"]].to_string(index=False))
-    CMP2.to_csv(TBL/"slide_foldseek"/"table4_seq_vs_struct.csv",
-                index=False, encoding="utf-8-sig")
-    print(f"\n저장: {TBL/'slide_foldseek'/'table4_seq_vs_struct.csv'}")
 ```
 
 ---
@@ -1374,4 +1349,50 @@ if miss:
     for a in miss[:5]:
         print(f"     https://www.ncbi.nlm.nih.gov/protein/{a}")
 print(f"\n저장: {SLIDE/'table2_bl21_family_vs_MG1655.csv'}")
+
+# ---- 표4: 서열(mmseqs) 과 구조(Foldseek) 가 같은 상대를 가리키는가 ----
+#   표3 은 F10 이 만든다. 이 블록은 F12 에 둔다 — 표2 의 이름·접근번호 열이
+#   여기서 만들어지기 때문이다 (F10 에 두면 아직 없어서 KeyError 가 난다).
+_t3 = SLIDE/"table3_family_correspondence.csv"
+if not _t3.exists():
+    print(f"\n  표4 건너뜀 — {_t3.name} 이 없다. CELL F10 을 먼저 돌릴 것")
+else:
+    X3 = pd.read_csv(_t3)
+    need = {"BL21", "MG1655_hit", "MG1655_TM"} - set(X3.columns)
+    if need:
+        print(f"\n  표4 건너뜀 — 표3 에 {need} 열이 없다. F10 을 최신 코드로 다시 돌릴 것")
+    else:
+        CMP2 = X3.merge(T2[["BL21_acc", "MG1655_acc", "MG1655_name", "fident"]]
+                          .rename(columns={"BL21_acc": "BL21",
+                                           "MG1655_acc": "서열_상대",
+                                           "MG1655_name": "서열_상대_이름"}),
+                        on="BL21", how="left")
+        CMP2["구조_상대_이름"] = [label(a) for a in CMP2.MG1655_hit]
+        CMP2 = CMP2.rename(columns={"MG1655_hit": "구조_상대", "MG1655_TM": "구조_TM"})
+        COLS = ["BL21", "TM_to_CooC1", "서열_상대", "서열_상대_이름", "fident",
+                "구조_상대", "구조_상대_이름", "구조_TM"]
+        CMP2 = CMP2[[c for c in COLS if c in CMP2.columns]]
+        print("\n" + "=" * 110)
+        print("### 표4 — 서열(mmseqs) 과 구조(Foldseek) 가 같은 상대를 가리키는가")
+        print("=" * 110)
+        print(CMP2.to_string(index=False))
+        # ID 체계가 달라(GenBank vs UniProt) 접근번호로는 대조가 안 된다. 이름으로 본다.
+        def _same(a, b):
+            a, b = str(a).lower(), str(b).lower()
+            if not a.strip() or not b.strip(): return None
+            ta = {w for w in re.findall(r"[a-z]{3,}", a)} - {"protein", "family", "putative"}
+            tb = {w for w in re.findall(r"[a-z]{3,}", b)} - {"protein", "family", "putative"}
+            return bool(ta & tb)
+        CMP2["일치"] = [("O" if _same(a, b) else "." if _same(a, b) is False else "?")
+                       for a, b in zip(CMP2.get("서열_상대_이름", []),
+                                       CMP2.get("구조_상대_이름", []))]
+        diff = CMP2[CMP2["일치"] == "."]
+        print(f"\n  이름이 겹치는 행 {int((CMP2['일치']=='O').sum())} / {len(CMP2)}")
+        if len(diff):
+            print(f"\n  ★ 서열과 구조가 다른 단백질을 가리키는 행 {len(diff)}개 —")
+            print("    구조 검색이 도메인만 닮은 다른 단백질을 집었을 수 있다.")
+            print(diff[[c for c in ["BL21", "서열_상대_이름", "구조_상대_이름",
+                                    "구조_TM"] if c in diff.columns]].to_string(index=False))
+        CMP2.to_csv(SLIDE/"table4_seq_vs_struct.csv", index=False, encoding="utf-8-sig")
+        print(f"\n저장: {SLIDE/'table4_seq_vs_struct.csv'}")
 ```
