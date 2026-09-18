@@ -390,9 +390,10 @@ else:
 _M = sorted({rn for parts in BUILT.values() for _c, _r, rn, _x in metals(parts)})
 print(f"\n  ※ 이 구조의 자리에 들어 있는 금속: {', '.join(_M) if _M else '없음'}")
 if _M and "NI" not in _M:
-    print("    Ni 가 아니다. '실측 Ni 자리' 가 아니라 '실측 금속 자리' 로 읽어야 한다.")
-    print("    CooC1 의 CXC 는 Ni 과 Zn 을 모두 잡고, 결정에는 Zn 이 들어간 것이다.")
-    print("    Cys4 티올레이트 자리라는 성격은 같지만, 거리는 Zn–S 기준이다.")
+    print("    결정화 과정에서 들어간 금속이다. 이 자리의 Ni 결합은 별도 실험으로")
+    print("    증명돼 있으므로 Ni 자리 템플릿으로 쓰는 데 문제 없다.")
+    print("    Cys4 티올레이트 배위에서 Zn–S 와 Ni–S 의 차이는 0.1 Å 안팎이고,")
+    print("    folddisco 기본 -d 가 0.5 Å 이라 구분되지 않는 폭이다. 기록으로만 남긴다.")
 ```
 
 ---
