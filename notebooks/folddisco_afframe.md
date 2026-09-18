@@ -1038,3 +1038,109 @@ if "MG1655_TM" in X:
     print("  → 구조 수준에서도 BL21 고유 구성원이 없다는 뜻이다.")
 print(f"\n저장: {TBL/'slide_foldseek'/'table3_family_correspondence.csv'}")
 ```
+
+---
+
+## CELL F11 — 과 스윕을 `--exact-tmscore 1` 로 다시 돌린다
+
+```python
+# =============================================================================
+# CELL F11 | tm 이 1.0 을 넘는 값은 발표에 못 쓴다
+#
+#   hypA_fold_sweep.csv 와 g3e_family_sweep.csv 의 tm 이 1.008, 1.009 로 나온다.
+#   Foldseek 이 --exact-tmscore 1 없이 주는 근사값이다. 순위를 매기는 데는
+#   문제없지만 tier 경계(0.90 / 0.70 / 0.50) 근처의 개수가 바뀔 수 있고,
+#   슬라이드에 'tm 0.680' 같은 숫자를 올리려면 정확값이어야 한다.
+#
+#   질의를 새로 정의하지 않는다 — **기존 .m8 의 query 열에서 그대로 읽어**
+#   같은 질의로 다시 돌린다. seed 목록을 기억에 의존해 재구성하면 다른 스윕이 된다.
+# =============================================================================
+FSOLD = BASE/"result"/"foldseek"
+EX    = FSOLD/"exact"; EX.mkdir(parents=True, exist_ok=True)
+
+TARGETS = {}
+for s, d in STRUCT_ALL.items(): TARGETS[s] = Path(d)
+print("  대상 구조 DB:", {k: v.name for k, v in TARGETS.items()})
+
+def queries_in(pattern):
+    """기존 .m8 들에서 질의 파일 경로를 모은다."""
+    qs = {}
+    for f in sorted(FSOLD.glob(pattern)):
+        if not f.stat().st_size: continue
+        try:
+            d = pd.read_csv(f, sep="\t", names=FFMT.split(","), nrows=5000)
+        except Exception:
+            continue
+        for q in d["query"].astype(str).unique():
+            p = Path(q)
+            if not p.exists():
+                for sd in TARGETS.values():
+                    if (sd/p.name).exists(): p = sd/p.name; break
+            if p.exists(): qs[p.stem] = p
+    return qs
+
+SWEEPS = [("hypa", "hypa_*_vs_*.m8", "hypA_fold_sweep"),
+          ("g3e",  "g3e_vs_*.m8",     "g3e_family_sweep")]
+
+for tag, pat, outname in SWEEPS:
+    Q = queries_in(pat)
+    print("\n" + "=" * 96); print(f"### {tag} — 질의 {len(Q)}개"); print("=" * 96)
+    if not Q:
+        print(f"  {pat} 에서 질의를 못 찾았다. 파일명을 확인할 것:")
+        for f in sorted(FSOLD.glob("*.m8"))[:12]: print("   ", f.name)
+        continue
+    rows = []
+    for qname, qp in Q.items():
+        for s, td in TARGETS.items():
+            o = EX/f"{tag}_{qname}_vs_{td.name}.m8"
+            if not (o.exists() and o.stat().st_size):
+                sh(f'"{FS}" easy-search "{qp}" "{td}" "{o}" "{EX}/tmp_{s}" '
+                   f'--format-output "{FFMT}" -e 10 --max-seqs 2000 '
+                   f'--exact-tmscore 1 --threads {THREADS}', quiet=True)
+            if not (o.exists() and o.stat().st_size): continue
+            d = pd.read_csv(o, sep="\t", names=FFMT.split(","))
+            d["prot"] = d.target.apply(lambda x: Path(str(x)).stem) \
+                         .str.replace(r"_[A-Za-z0-9]$", "", regex=True)
+            d = d.sort_values("alntmscore", ascending=False).drop_duplicates("prot")
+            for _, r in d[d.alntmscore >= 0.50].iterrows():
+                rows.append({"seed": qname, "strain": s, "protein": pid(r.prot),
+                             "tm": round(float(r.alntmscore), 3),
+                             "fident": round(float(r.fident), 3),
+                             "qcov": round(float(r.qcov), 3)})
+    if not rows:
+        print("  tm ≥ 0.50 인 것이 없다"); continue
+    S = pd.DataFrame(rows).sort_values("tm", ascending=False) \
+          .drop_duplicates(["strain", "protein"])       # 단백질당 최고 seed 1건
+    S["tier"] = ["핵심" if v >= 0.90 else "주변" if v >= 0.70 else "폴드만" for v in S.tm]
+    out = TBL/f"{outname}_exact.csv"
+    S.to_csv(out, index=False, encoding="utf-8-sig")
+    print(f"  tm 최대 {S.tm.max():.3f}  (1.0 초과 {int((S.tm > 1.0).sum())}개 — 0 이어야 정상)")
+    print("\n  균주 × tier")
+    print(pd.crosstab(S.strain, S.tier).to_string())
+    print(f"\n저장: {out}")
+
+    # 옛 값과 나란히
+    old = TBL/f"{outname}.csv"
+    if old.exists():
+        O = pd.read_csv(old)
+        kc = next((c for c in ["protein", "member", "target"] if c in O.columns), None)
+        tc = next((c for c in ["tm", "alntmscore", "top_tm"] if c in O.columns), None)
+        if kc and tc:
+            O["key"] = O[kc].astype(str).str.split("-").str[-1]
+            M = S.merge(O[["key", tc]].rename(columns={"key": "protein", tc: "tm_old"}),
+                        on="protein", how="left").dropna(subset=["tm_old"])
+            if len(M):
+                M["Δ"] = (M.tm - M.tm_old).round(3)
+                print(f"\n  옛 값과 비교 가능한 것 {len(M)}개   "
+                      f"Δ 평균 {M['Δ'].mean():+.3f}  최대 {M['Δ'].abs().max():.3f}")
+                big = M[M["Δ"].abs() >= 0.05]
+                if len(big):
+                    print(f"  0.05 이상 바뀐 것 {len(big)}개:")
+                    print(big[["protein", "strain", "tm_old", "tm", "Δ"]]
+                          .sort_values("Δ").to_string(index=False))
+                else:
+                    print("  0.05 이상 바뀐 것 없음 — tier 경계도 안 흔들린다")
+
+print("\n  ※ 앞으로 Foldseek 은 항상 --exact-tmscore 1 을 붙인다.")
+print("    안 붙이면 근사값이라 1.0 을 넘고, tier 경계 근처 개수가 달라진다.")
+```
