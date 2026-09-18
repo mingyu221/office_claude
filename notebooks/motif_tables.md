@@ -360,6 +360,39 @@ _ntp_break = pd.crosstab(T3[T3.ntp != "해당 없음"].ntp, T3[T3.ntp != "해당
 print("\n  NTP 내역")
 print(_ntp_break.to_string())
 
+# ------------------------ 요약표의 구성원 ------------------------
+# 요약표의 각 칸이 어느 단백질들인지 한 파일에 담는다.
+# metal 히트 한 줄마다 어느 칸에 드는지를 O/. 로 표시한다 — ATP 열만
+# 예외다 (그쪽은 metal 에 안 걸린 3,000여 개가 따로 있다).
+print("\n" + "=" * 96); print("### 요약표 구성원"); print("=" * 96)
+MEM = T3.copy()
+MEM["metal"] = "O"
+MEM["metal+ATP"] = MEM.ATP모티프.map(lambda v: "O" if v == "O" else ".")
+MEM["metal+NTP"] = MEM.ntp.map(lambda v: "." if v == "해당 없음" else "O")
+MEM["셋다"] = [("O" if a == "O" and n == "O" else ".")
+               for a, n in zip(MEM["metal+ATP"], MEM["metal+NTP"])]
+COLS = ["strain", "struct", "protein", "metal", "metal+ATP", "metal+NTP", "셋다",
+        "ntp", "evidence", "nres", "plddt", "metal_rmsd", "desc"]
+MEM = MEM[[c for c in COLS if c in MEM.columns]]
+MEM = MEM.sort_values(["셋다", "metal+NTP", "metal+ATP", "strain"],
+                      ascending=[False, False, False, True])
+MEM.to_csv(TBL/"motif_summary_members.csv", index=False, encoding="utf-8-sig")
+print(f"  {len(MEM)}행 -> {TBL/'motif_summary_members.csv'}")
+print("\n  칸별 확인 (요약표와 맞아야 한다)")
+chk = pd.DataFrame([{"균주": s,
+                     "metal": int((MEM.strain == s).sum()),
+                     "metal+ATP": int(((MEM.strain == s) & (MEM["metal+ATP"] == "O")).sum()),
+                     "metal+NTP": int(((MEM.strain == s) & (MEM["metal+NTP"] == "O")).sum()),
+                     "셋다": int(((MEM.strain == s) & (MEM["셋다"] == "O")).sum())}
+                    for s in STRAINS])
+print(chk.to_string(index=False))
+print("\n  ★ '셋 다' 에 드는 것")
+top = MEM[MEM["셋다"] == "O"]
+print(top[["strain", "protein", "ntp", "evidence", "nres", "desc"]].to_string(index=False)
+      if len(top) else "    없음")
+print("\n  ATP 열의 전체 목록은 이 파일에 없다 — metal 에 안 걸린 3,000여 개가")
+print("  따로 있기 때문이다. 그쪽은 folddisco/atp_run02_{균주}.tsv 원본을 볼 것.")
+
 # ------------------------ 균주 특이성 ------------------------
 # 균주 간에 단백질 ID 를 직접 겹칠 수 없다 (QJZ* / P* / AKE* 는 다른 체계다).
 # 같은 자리를 같은 잔기 번호로 맞춘 히트를 직교체로 본다 — 길이는 키에서 뺀다
@@ -415,7 +448,7 @@ print("    cys4_genome_check.csv 가 하던 일을 이 목록에 적용하면 �
 
 print("\n### 저장")
 for f in ["motif_counts_by_strain.csv", "motif_metal_and_atp.csv", "motif_metal_ntp.csv",
-          "motif_summary.csv", "motif_strain_specificity.csv"]:
+          "motif_summary.csv", "motif_summary_members.csv", "motif_strain_specificity.csv"]:
     print(f"  {TBL/f}")
 print("\n### 읽는 법")
 print("  표3 의 분류는 주석 문자열에서 나온 것이지 측정이 아니다.")
