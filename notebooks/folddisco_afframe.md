@@ -698,8 +698,8 @@ if "MG1655" in STRUCT_ALL:
         print(f"  BL21 {len(MEM)} / Y19 / MG1655 {len(fold_mg)} — 과 크기를 세 균주로 비교할 수 있다")
         fold_mg.assign(strain="MG1655", frame="예측")[
             ["strain", "frame", "prot", "alntmscore", "fident", "qcov"]] \
-            .to_csv(TBL/"cooc_fold_MG1655.csv", index=False, encoding="utf-8-sig")
-        print(f"저장: {TBL/'cooc_fold_MG1655.csv'}")
+            .to_csv(TBL/"cooc_fold_mg1655_hits.csv", index=False, encoding="utf-8-sig")
+        print(f"저장: {TBL/'cooc_fold_mg1655_hits.csv'}")
 
 print("\n  O   폴드는 CooC 인데 MG1655 에 없다  ← 가장 강한 조합")
 print("  ~   어노테이션 누락")
@@ -893,7 +893,9 @@ print("        F6 에서 두 프레임의 자카드가 높게 나온 것이 그 
 # =============================================================================
 F = pd.read_csv(TBL/"cooc_fold_afframe.csv")
 # MG1655 를 따로 돌렸으면 합친다 (F7 이 구조 DB 를 찾았을 때 생긴다)
-_mgf = TBL/"cooc_fold_MG1655.csv"
+_mgf = TBL/"cooc_fold_mg1655_hits.csv"
+if not _mgf.exists() and (TBL/"cooc_fold_MG1655.csv").exists():
+    _mgf = TBL/"cooc_fold_MG1655.csv"     # 옛 이름 (대소문자만 달라 위험했다)
 if _mgf.exists() and "MG1655" not in set(F.strain):
     m = pd.read_csv(_mgf)
     m = m.rename(columns={"alntmscore": "tm", "prot": "protein", "stem": "protein"})
