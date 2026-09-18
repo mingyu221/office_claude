@@ -6838,7 +6838,9 @@ if "bl21_only" in G:
             for k, g in d.groupby("query"):
                 g = g.sort_values("bits", ascending=False)
                 top = g.iloc[0]
-                cov = float(top.alnlen) / float(top.qlen)
+                # --search-type 2 는 alnlen 이 염기 단위라 qlen(아미노산)으로 나누면
+                # 3배로 부풀려진다. 질의 좌표(qstart/qend, 아미노산)로 계산한다.
+                cov = (float(top.qend) - float(top.qstart) + 1) / float(top.qlen)
                 if float(top.fident) >= 0.80 and cov >= 0.70:
                     verdict[k] = f"게놈에 온전 (fid {top.fident:.2f} cov {cov:.2f}) — 어노테이션 누락"
                 elif float(top.fident) >= 0.80:
@@ -7588,6 +7590,170 @@ print("    both 기준선 0.408 / 디코이 0.316 ± 0.033")
 print("    bait 기준선 0.438 / 디코이 0.276 ± 0.024")
 print("  미채점 쌍은 단량체 점수와 Folddisco/Foldseek 축으로만 등급을 매기고,")
 print("  이량체 점수가 없다는 사실을 표에 남길 것.")
+```
+
+---
+
+## CELL 55 — CooC1 이량체의 Ni 자리를 단일 사슬로 합쳐 질의한다
+
+```python
+# =============================================================================
+# CELL 55 | 질의를 CooC1 의 진짜 Ni 자리로 되돌린다 — 단, 단일 사슬로 합쳐서
+#
+#   지금까지의 Cys4 질의는 Boltz 예측 구조에서 뽑은 것이었다. 실측이 아니다.
+#   실측 기하는 3kji(CooC1)에 있는데, 거기서는 Cys112/Cys114 가 두 단량체에서
+#   하나씩 나와 이량체 계면에 자리를 만든다. 한 사슬에는 Cys 가 2개뿐이다.
+#
+#   CELL 29f 에서 A112,A114,B112,B114 로 물었더니 --covered-node 4 에서 0 이었고,
+#   그때 나는 "AlphaFold DB 가 단량체라 계면 질의가 원리상 불가능하다"고 적었다.
+#   그건 과한 단정이었다. folddisco 가 맞추는 것은 잔기 쌍의 기하지 사슬 이름이
+#   아니다. 0 이 나온 이유가
+#     (a) folddisco 가 사슬 간 쌍을 아예 안 쓴다        — 도구의 한계
+#     (b) 그 기하를 가진 단량체가 실제로 없다           — 생물학적 음성
+#   둘 중 무엇인지 나는 구분하지 않았다.
+#
+#   가르는 방법: 좌표는 그대로 두고 B 사슬의 두 잔기를 A 사슬로 개명한다
+#   (잔기번호 +1000). 그러면 질의는 "한 사슬 안의 네 잔기"가 되고, 기하는
+#   CooC1 이량체의 실측 Ni 자리 그대로다.
+#     히트가 나오면 -> (a) 였고, 그 목록이 비상동 삽입자 후보다
+#     그래도 0 이면 -> (b) 다. 확실한 음성이 된다.
+#
+#   ★ 이게 이 프로젝트의 핵심 질문과 정확히 겹친다.
+#     BL21 의 삽입자가 CooC 와 비상동이라면 이량체일 필요가 없다.
+#     한 사슬 안에서 CooC1 의 이량체 Ni 자리를 흉내 내면 된다.
+#     이 셀은 바로 그런 단백질이 있는지를 묻는다.
+# =============================================================================
+need((ASSET["cooc1_pdb"].exists(), f"3kji.pdb 가 필요하다: {ASSET['cooc1_pdb']}"))
+SRC_PDB = ASSET["cooc1_pdb"]
+PAIR    = [("A", 112), ("A", 114), ("B", 112), ("B", 114)]   # 실측 Ni 배위 4잔기
+OFFSET  = 1000                                                # B -> A 개명 시 번호 이동
+
+# ---------- (1) 원본에서 네 잔기를 확인한다 ----------
+print("=" * 100); print("### (1) 3kji 에서 Ni 배위 4잔기 확인"); print("=" * 100)
+atoms, resname = [], {}
+for l in open(SRC_PDB, errors="ignore"):
+    if not l.startswith(("ATOM", "HETATM")): continue
+    ch, rs, rn = l[21], l[22:26].strip(), l[17:20].strip()
+    if not rs.lstrip("-").isdigit(): continue
+    atoms.append((ch, int(rs), rn, l.rstrip("\n")))
+    resname[(ch, int(rs))] = rn
+
+ok = True
+for ch, rs in PAIR:
+    rn = resname.get((ch, rs), "없음")
+    print(f"  {ch}{rs:<5d} {rn}")
+    if rn != "CYS": ok = False
+if not ok:
+    print("\n⚠ 네 잔기 중 CYS 가 아닌 것이 있다. 잔기 번호를 확인할 것.")
+    print("   (3kji 의 사슬/번호 체계가 다르면 PAIR 를 직접 고쳐야 한다)")
+
+def sg(ch, rs):
+    for c, r, _n, line in atoms:
+        if c == ch and r == rs and line[12:16].strip() == "SG":
+            return (float(line[30:38]), float(line[38:46]), float(line[46:54]))
+    return None
+import itertools, math
+print("\n  SG–SG 거리 (Å) — 이 값이 질의 기하의 실체다")
+_pts = {f"{c}{r}": sg(c, r) for c, r in PAIR}
+for a, b in itertools.combinations(_pts, 2):
+    if _pts[a] and _pts[b]:
+        d = math.dist(_pts[a], _pts[b])
+        tag = "  ← 사슬 간" if a[0] != b[0] else ""
+        print(f"    {a:6s} {b:6s} {d:6.2f}{tag}")
+
+# ---------- (2) 단일 사슬 템플릿을 만든다 ----------
+print("\n" + "=" * 100); print("### (2) B 사슬을 A 로 개명해 단일 사슬 템플릿 생성"); print("=" * 100)
+MRG = DIR["external"]/"cooc1_ni_site_merged.pdb"
+out = []
+for c, r, _n, line in atoms:
+    if c == "A":                                  # A 사슬은 통째로 유지
+        out.append(line)
+    elif (c, r) in PAIR:                          # B 의 질의 잔기만 개명해 덧붙인다
+        out.append(line[:21] + "A" + f"{r + OFFSET:>4d}" + line[26:])
+MRG.write_text("\n".join(out) + "\nEND\n")
+QRES = ",".join(f"A{r if c == 'A' else r + OFFSET}" for c, r in PAIR)
+print(f"  {MRG}")
+print(f"  ATOM {len(out)}줄, 질의 = {QRES}")
+print("  좌표는 건드리지 않았다 — 개명만 했으므로 기하는 실측 그대로다.")
+
+# 개명 후에도 거리가 같은지 되짚는다 (좌표 훼손 여부 확인)
+_chk = {}
+for l in open(MRG):
+    if l.startswith("ATOM") and l[12:16].strip() == "SG":
+        r = int(l[22:26])
+        if r in (112, 114, 112 + OFFSET, 114 + OFFSET):
+            _chk[f"A{r}"] = (float(l[30:38]), float(l[38:46]), float(l[46:54]))
+_bad = 0
+for a, b in itertools.combinations(sorted(_chk), 2):
+    d = math.dist(_chk[a], _chk[b])
+    o = [math.dist(_pts[x], _pts[y]) for x, y in itertools.combinations(_pts, 2)]
+    if not any(abs(d - v) < 1e-3 for v in o): _bad += 1
+print(f"  좌표 검증: 거리 불일치 {_bad}건 (0 이어야 한다)")
+
+# ---------- (3) covered-node 기울기로 세 균주 질의 ----------
+print("\n" + "=" * 100); print("### (3) 질의 — covered-node 4/3/2"); print("=" * 100)
+FD  = ASSET["folddisco"]
+IDX = {"BL21": ASSET["fd_idx_bl21"], "Y19": ASSET["fd_idx_y19"], "MG1655": ASSET["fd_idx_mg"]}
+od  = DIR["folddisco"]/"cooc1_merged"; od.mkdir(parents=True, exist_ok=True)
+res = {}
+for cov in (4, 3, 2):
+    for strain, idx in IDX.items():
+        o = od/f"merged_cov{cov}_{strain}.tsv"
+        if not (o.exists() and o.stat().st_size):
+            sh(f'"{FD}" query -p "{MRG}" -q {QRES} -i "{idx}" -t {min(THREADS,8)} '
+               f'--per-structure --header --sort-by idf --rmsd 1.0 --top 5000 '
+               f'--covered-node {cov} -o "{o}"', check=False)
+        n = 0
+        if o.exists() and o.stat().st_size:
+            d = pd.read_csv(o, sep="\t"); d.columns = [c.strip().lstrip("#") for c in d.columns]
+            n = len(d)
+        res[(cov, strain)] = n
+R = (pd.Series(res).rename("hits").rename_axis(["covered_node", "strain"])
+       .reset_index().pivot(index="covered_node", columns="strain", values="hits"))
+print(R.to_string())
+R.to_csv(DIR["table"]/"cooc1_merged_query.csv", encoding="utf-8-sig")
+
+# ---------- (4) 판정 ----------
+print("\n" + "=" * 100); print("### (4) 판정"); print("=" * 100)
+_n4 = int(R.loc[4].sum()) if 4 in R.index else 0
+if _n4 > 0:
+    print(f"  covered-node 4 에서 {_n4}개. CELL 29f 의 0 은 사슬 이름 때문이었다 —")
+    print("  folddisco 가 사슬 간 쌍을 쓰지 않았던 것이고, 기하 자체는 단량체에 있다.")
+    print("  ★ 이 목록이 '한 사슬로 CooC1 의 이량체 Ni 자리를 흉내 내는' 단백질이다.")
+    print("    비상동 삽입자 가설이 예측하는 바로 그 범주다. 균주별 분포를 볼 것.")
+    BEST = []
+    for strain in IDX:
+        o = od/f"merged_cov4_{strain}.tsv"
+        if not (o.exists() and o.stat().st_size): continue
+        d = pd.read_csv(o, sep="\t"); d.columns = [c.strip().lstrip("#") for c in d.columns]
+        d["strain"] = strain
+        BEST.append(d)
+    if BEST:
+        B = pd.concat(BEST, ignore_index=True)
+        _xw = DIR["table"]/"id_crosswalk_struct_to_genbank.csv"
+        if _xw.exists():
+            x = pd.read_csv(_xw)
+            XW = {Path(str(k)).stem: str(v).split(",")[0]
+                  for k, v in x.dropna(subset=["protein"]).set_index("tid")["protein"].to_dict().items()}
+            B["protein"] = B.tid.map(lambda t: XW.get(Path(str(t)).stem))
+        keep = [c for c in ["protein", "strain", "min_rmsd", "plddt", "node_count",
+                            "idf", "matching_residues"] if c in B.columns]
+        B = B.sort_values([c for c in ["min_rmsd"] if c in B.columns]).head(40)
+        print("\n  상위 40개 (min_rmsd 낮은 순):")
+        print(B[keep].to_string(index=False))
+        B.to_csv(DIR["table"]/"cooc1_merged_hits.csv", index=False, encoding="utf-8-sig")
+        print(f"\n  저장: {DIR['table']/'cooc1_merged_hits.csv'}")
+else:
+    print("  covered-node 4 에서 0. CELL 29f 와 같다.")
+    print("  사슬 이름을 없앤 뒤에도 0 이므로, 이제는 도구의 한계가 아니라")
+    print("  ★ 세 균주 어디에도 CooC1 의 Ni 자리 기하를 한 사슬로 재현하는 단백질이")
+    print("    없다는 뜻이다. 확실한 음성이고, 그 자체로 결과다.")
+    print("  covered-node 3 / 2 의 수를 보면 네 잔기 중 몇 개까지 맞는지 알 수 있다.")
+    print("  3 에서 소수만 나온다면 '부분적으로 닮은 자리'로 따로 볼 값이 있다.")
+print(f"\n  기존 결과와 비교할 것:")
+print(f"    CELL 29  원 질의 A112,A114 (2잔기)     BL21 29 / Y19 30 / MG1655 21")
+print(f"    CELL 29f 이량체 질의 A·B (4잔기)       covered-node 4 에서 0")
+print(f"    이 셀    단일사슬 합침 (4잔기)          위 표")
 ```
 
 ---
