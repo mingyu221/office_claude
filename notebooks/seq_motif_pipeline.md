@@ -816,17 +816,45 @@ CONDA_ENV  = "boltz"                    # boltz 가 설치된 env 이름. 다르
 LOG        = BOLTZ_ROOT/f"{OUT_DIR}.log"
 PIDF       = BOLTZ_ROOT/f"{OUT_DIR}.pid"
 
-# ---- GPU 선택: 여유 메모리가 가장 많은 것 ----
-def pick_gpu():
+MIN_FREE = 12000    # MiB. 이만큼 안 비어 있으면 안 띄운다
+
+# ---- 남의 boltz 가 이미 돌고 있는지부터 본다 ----
+def other_boltz():
+    """이 셀이 띄운 것이 아닌 boltz 프로세스 목록."""
+    mine = None
+    if PIDF.exists():
+        try: mine = int(PIDF.read_text().strip())
+        except Exception: pass
+    out = subprocess.run("ps -eo pid,etime,args", shell=True, text=True,
+                         capture_output=True).stdout.splitlines()
+    hits = []
+    for l in out:
+        if "boltz" not in l or "ps -eo" in l: continue
+        try: pid = int(l.split()[0])
+        except Exception: continue
+        if pid == mine or pid == os.getpid(): continue
+        if "predict" in l or "envs/boltz" in l: hits.append((pid, l.strip()[:150]))
+    return hits
+
+# ---- GPU 선택: 여유 메모리 ----
+def gpu_rows():
     try:
-        o = subprocess.run("nvidia-smi --query-gpu=index,memory.free,memory.total "
-                           "--format=csv,noheader,nounits", shell=True, text=True,
-                           capture_output=True).stdout.strip().splitlines()
-        rows = [tuple(int(x) for x in l.split(",")) for l in o if l.strip()]
-        for i, f, tt in rows: print(f"  GPU {i}: 여유 {f:6d} / {tt} MiB")
-        return max(rows, key=lambda r: r[1])[0] if rows else 0
+        o = subprocess.run("nvidia-smi --query-gpu=index,memory.free,memory.total,"
+                           "utilization.gpu --format=csv,noheader,nounits",
+                           shell=True, text=True, capture_output=True).stdout
+        return [tuple(int(x) for x in l.split(",")) for l in o.strip().splitlines() if l.strip()]
     except Exception as e:
-        print(f"  nvidia-smi 실패 ({e}) — GPU 0 으로 간다"); return 0
+        print(f"  nvidia-smi 실패 ({e})"); return []
+
+def pick_gpu():
+    rows = gpu_rows()
+    for i, f, tt, u in rows:
+        mark = "" if f >= MIN_FREE else f"   ← {MIN_FREE} MiB 미만"
+        print(f"  GPU {i}: 여유 {f:6d} / {tt} MiB   사용률 {u:3d}%{mark}")
+    ok = [r for r in rows if r[1] >= MIN_FREE]
+    if not ok:
+        return None
+    return max(ok, key=lambda r: r[1])[0]
 
 def running():
     if not PIDF.exists(): return None
@@ -848,7 +876,21 @@ if pid:
 elif n_out >= n_in and n_in:
     print("\n  이미 다 끝났다. Q6 채점 부분을 돌릴 것.")
 else:
-    GPU = pick_gpu()
+    busy = other_boltz()
+    if busy:
+        print("\n  ★ 이미 다른 boltz 가 돌고 있다. 띄우지 않는다.")
+        for pid_, line in busy: print(f"    PID {pid_}  {line}")
+        print("\n    같은 작업이면 그대로 두고 이 셀로 진행률만 본다.")
+        print("    다른 작업이면 끝나기를 기다리거나, 확인 후 아래로 종료:")
+        print("      import os, signal; os.kill(<PID>, signal.SIGTERM)")
+        GPU = None
+    else:
+        GPU = pick_gpu()
+        if GPU is None:
+            print(f"\n  ★ 여유 {MIN_FREE} MiB 이상인 GPU 가 없다. 띄우지 않는다.")
+            print("    다른 작업이 끝난 뒤 이 셀을 다시 돌릴 것.")
+            print("    무리해서 띄우면 이쪽도 상대쪽도 OOM 으로 같이 죽는다.")
+if 'GPU' in dir() and GPU is not None and not pid and not (n_out >= n_in and n_in):
     print(f"\n  GPU {GPU} 로 띄운다")
     cmd = (f'boltz predict {IN_DIR} --out_dir {OUT_DIR} --use_msa_server '
            f'--max_msa_seqs 2048 --recycling_steps 3 --diffusion_samples 1 '
