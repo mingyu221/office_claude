@@ -7914,6 +7914,239 @@ print("    이 셀     조립체에서 만든 진짜 자리          위 표")
 
 ---
 
+## CELL 56 — 모티프 매칭 3표 (균주별 계수 · metal∩ATP · metal 중 NTP 소모)
+
+```python
+# =============================================================================
+# CELL 56 | folddisco 원본 TSV 에서 표 세 개를 만든다
+#   표1  균주별 매칭 수 (metal / ATP) + 프로테옴 대비 비율
+#   표2  metal 과 ATP 를 동시에 맞춘 것
+#   표3  metal 을 맞춘 것 중 NTP 를 소모하는 것 (주석 기반, 근거 열 포함)
+#
+#   주의 두 가지
+#   (1) ATP TSV 는 한 단백질이 여러 행으로 나온다 (매치가 여럿). 집합 연산은
+#       단백질 단위로 해야 한다 — 행 수와 단백질 수를 둘 다 찍는다.
+#   (2) '이름에 ATPase 가 있다'는 것은 주석이지 측정이 아니다. 판정 근거가 된
+#       단어를 evidence 열에 그대로 남겨 직접 걸러낼 수 있게 한다.
+# =============================================================================
+need((have("ASSET", "DIR"), "CELL 01 을 먼저 돌릴 것"))
+FDD = DIR["folddisco"]
+SETS = {"metal": "metal_run01_{s}.tsv", "atp": "atp_run02_{s}.tsv"}
+STRAINS = ["BL21", "MG1655", "Y19"]
+ACC_RE = re.compile(r"AF-([A-Za-z0-9]+)-F1")
+
+# ---------- 원본 읽기 ----------
+def read_set(kind, strain):
+    """(단백질 accession -> 대표 행) 과 원본 행 수. 같은 단백질이 여럿이면 idf 최대."""
+    p = FDD/SETS[kind].format(s=strain)
+    if not p.exists(): return None, 0, p
+    d = pd.read_csv(p, sep="\t")
+    d.columns = [c.strip().lstrip("#") for c in d.columns]
+    n_rows = len(d)
+    d["acc"] = d.tid.astype(str).map(lambda t: (ACC_RE.search(t).group(1)
+                                                if ACC_RE.search(t) else None))
+    d = d.dropna(subset=["acc"])
+    if "idf" in d: d = d.sort_values("idf", ascending=False)
+    return d.drop_duplicates("acc").set_index("acc"), n_rows, p
+
+DATA, NROW = {}, {}
+print("=" * 100); print("### 원본 파일"); print("=" * 100)
+for kind in SETS:
+    for s in STRAINS:
+        t, n, p = read_set(kind, s)
+        DATA[(kind, s)] = t; NROW[(kind, s)] = n
+        print(f"  {kind:6s} {s:8s} {'없음 — ' + str(p) if t is None else f'{n:5d}행 / {len(t):5d}단백질'}")
+need((all(DATA[(k, s)] is not None for k in SETS for s in STRAINS),
+      "TSV 가 빠져 있다. 위 경로를 확인할 것"))
+
+# ---------- 프로테옴 크기 ----------
+NPROT = {}
+for s in STRAINS:
+    d = {"BL21": "structures_UP000503272", "Y19": "structures_UP000034085"}.get(s)
+    hit = None
+    if d:
+        for r in [TOOLS/"database"/"bacteriaDB", TOOLS/"database"]:
+            if (Path(r)/d).is_dir(): hit = len(list((Path(r)/d).glob("AF-*"))); break
+    if hit is None:      # 구조 디렉터리가 없으면 FASTA 로 센다
+        f = {"BL21": ASSET["faa_bl21"], "MG1655": ASSET["faa_mg1655"],
+             "Y19": ASSET["faa_y19"]}[s]
+        hit = sum(1 for l in open(f, errors="ignore") if l.startswith(">"))
+    NPROT[s] = hit
+
+# ---------- 이름 붙이기: crosswalk -> FASTA -> (없으면) UniProt ----------
+HDR = {}
+for s, f in [("BL21", ASSET["faa_bl21"]), ("MG1655", ASSET["faa_mg1655"]),
+             ("Y19", ASSET["faa_y19"])]:
+    for l in open(f, errors="ignore"):
+        if l.startswith(">"):
+            h = l[1:].rstrip(); k = h.split()[0]
+            HDR[k] = (s, h[len(k):].strip())
+
+XW = {}
+_x = DIR["table"]/"id_crosswalk_struct_to_genbank.csv"
+if _x.exists():
+    d = pd.read_csv(_x).dropna(subset=["protein"])
+    for k, v in d.set_index("tid")["protein"].to_dict().items():
+        m = ACC_RE.search(str(k))
+        if m: XW[m.group(1)] = str(v).split(",")[0]
+
+UNI = {}
+_mu = DIR["table"]/"mg1655_metal_uniprot.tsv"
+if _mu.exists():
+    d = pd.read_csv(_mu, sep="\t")
+    _a = next((c for c in d.columns if "ntry" in c or c.lower() == "accession"), d.columns[0])
+    _n = next((c for c in d.columns if "rotein name" in c or "escription" in c), None)
+    if _n: UNI.update({str(r[_a]): str(r[_n]) for _, r in d.iterrows()})
+
+# 아직 이름이 없는 accession 은 UniProt 에 한 번만 물어 캐시에 저장한다
+NEED = sorted({a for k in SETS for s in STRAINS for a in DATA[(k, s)].index
+               if a not in XW and a not in UNI and k == "metal"})
+CACHE = DIR["table"]/"uniprot_name_cache.tsv"
+if CACHE.exists():
+    d = pd.read_csv(CACHE, sep="\t")
+    UNI.update(dict(zip(d.acc.astype(str), d.name.astype(str))))
+    NEED = [a for a in NEED if a not in UNI]
+if NEED:
+    import urllib.request, urllib.parse, time
+    print(f"\nUniProt 조회 필요 {len(NEED)}개 (캐시: {CACHE})")
+    got = {}
+    for i in range(0, len(NEED), 40):
+        q = " OR ".join(f"accession:{a}" for a in NEED[i:i+40])
+        url = ("https://rest.uniprot.org/uniprotkb/search?format=tsv&size=500"
+               "&fields=accession,protein_name,gene_primary,keyword"
+               f"&query={urllib.parse.quote(q)}")
+        try:
+            with urllib.request.urlopen(url, timeout=120) as r:
+                ls = r.read().decode().splitlines()
+            h = ls[0].split("\t")
+            for l in ls[1:]:
+                r_ = dict(zip(h, l.split("\t")))
+                nm = " | ".join(x for x in [r_.get("Protein names", ""),
+                                            r_.get("Gene Names (primary)", ""),
+                                            r_.get("Keywords", "")] if x)
+                got[r_.get("Entry", "")] = nm
+            print(f"  batch {i//40+1}: 누적 {len(got)}")
+        except Exception as e:
+            print(f"  ⚠ 조회 실패 {e} — 이름 없이 진행한다")
+            break
+        time.sleep(0.4)
+    if got:
+        UNI.update(got)
+        pd.DataFrame({"acc": list(UNI), "name": [UNI[a] for a in UNI]}).to_csv(
+            CACHE, sep="\t", index=False)
+
+def name_of(acc):
+    pid = XW.get(acc)
+    if pid and pid in HDR: return pid, HDR[pid][1]
+    if acc in UNI:         return pid or acc, UNI[acc]
+    return pid or acc, ""
+
+# ================================ 표 1 ================================
+print("\n" + "=" * 100); print("### 표 1 — 균주별 모티프 매칭"); print("=" * 100)
+T1 = pd.DataFrame([{
+    "균주": s,
+    "metal 행": NROW[("metal", s)], "metal 단백질": len(DATA[("metal", s)]),
+    "ATP 행": NROW[("atp", s)],     "ATP 단백질": len(DATA[("atp", s)]),
+    "프로테옴": NPROT[s],
+    "metal %": round(100*len(DATA[("metal", s)])/NPROT[s], 2),
+    "ATP %":   round(100*len(DATA[("atp", s)])/NPROT[s], 2),
+} for s in STRAINS])
+print(T1.to_string(index=False))
+T1.to_csv(DIR["table"]/"motif_counts_by_strain.csv", index=False, encoding="utf-8-sig")
+print("\n  ATP 는 행 수와 단백질 수가 다르다 — 한 단백질에 매치가 여럿이다.")
+print("  집합 연산은 단백질 수를 쓴다. ATP 보유율이 20%대면 선별력이 없는 축이다.")
+
+# ================================ 표 2 ================================
+print("\n" + "=" * 100); print("### 표 2 — metal ∩ ATP"); print("=" * 100)
+rows = []
+for s in STRAINS:
+    M_, A_ = DATA[("metal", s)], DATA[("atp", s)]
+    for a in sorted(set(M_.index) & set(A_.index),
+                    key=lambda x: -float(M_.loc[x, "idf"])):
+        pid, desc = name_of(a)
+        rows.append({"strain": s, "acc": a, "protein": pid,
+                     "nres": M_.loc[a, "nres"], "plddt": M_.loc[a, "plddt"],
+                     "metal_rmsd": M_.loc[a, "min_rmsd"],
+                     "metal_res": M_.loc[a, "matching_residues"],
+                     "atp_rmsd": A_.loc[a, "min_rmsd"],
+                     "atp_res": A_.loc[a, "matching_residues"],
+                     "desc": desc[:70]})
+T2 = pd.DataFrame(rows)
+pd.set_option("display.max_rows", None); pd.set_option("display.width", 250)
+pd.set_option("display.max_colwidth", 46)
+print(T2.to_string(index=False))
+T2.to_csv(DIR["table"]/"motif_metal_and_atp.csv", index=False, encoding="utf-8-sig")
+print(f"\n  균주별: " + " / ".join(f"{s} {int((T2.strain==s).sum())}" for s in STRAINS))
+
+# 같은 잔기·같은 길이로 세 균주에 반복되면 직교체다 — 균주를 가르지 못한다
+if len(T2):
+    T2["_key"] = T2.nres.astype(str) + "|" + T2.metal_res.astype(str).str.split(":").str[0]
+    g = T2.groupby("_key").strain.nunique()
+    shared = set(g[g >= 3].index)
+    print(f"\n  세 균주 공통(길이·잔기 동일) 묶음 {len(shared)}개 — 균주 구분에 못 쓴다")
+    for k in sorted(shared):
+        sub = T2[T2._key == k]
+        print("    " + " · ".join(f"{r.strain}:{r.protein}" for r in sub.itertuples()))
+    only = T2[~T2._key.isin(shared) & (T2.strain == "BL21")]
+    print(f"\n  BL21 쪽에만 있는 묶음 {len(only)}개 (MG1655 에 짝이 안 잡힌 것):")
+    if len(only):
+        print(only[["acc", "protein", "nres", "plddt", "desc"]].to_string(index=False))
+    T2.drop(columns=["_key"]).to_csv(DIR["table"]/"motif_metal_and_atp.csv",
+                                     index=False, encoding="utf-8-sig")
+
+# ================================ 표 3 ================================
+print("\n" + "=" * 100); print("### 표 3 — metal 매칭 중 NTP 소모"); print("=" * 100)
+# 주석 기반 판정이다. 근거가 된 단어를 그대로 남긴다.
+NTP_RULES = [
+    ("가수분해 확실", r"\bATPase\b|\bGTPase\b|ATP-dependent|GTP-dependent|"
+                      r"\bhelicase\b|\btopoisomerase\b|\bgyrase\b|\bAAA\b"),
+    ("전이·리가제",   r"\bkinase\b|\bligase\b|\bsynthetase\b|\bpolymerase\b|"
+                      r"adenylyltransferase|nucleotidyltransferase|carboxylase"),
+    ("결합만 표기",   r"ATP-binding|GTP-binding|Nucleotide-binding|P-loop|Walker"),
+]
+rows = []
+for s in STRAINS:
+    M_ = DATA[("metal", s)]
+    atp_hit = set(DATA[("atp", s)].index)
+    for a in M_.index:
+        pid, desc = name_of(a)
+        cat, ev = "", ""
+        for label, pat in NTP_RULES:
+            m = re.search(pat, desc, re.I)
+            if m: cat, ev = label, m.group(0); break
+        rows.append({"strain": s, "acc": a, "protein": pid,
+                     "ntp": cat or "해당 없음", "evidence": ev,
+                     "ATP모티프": "O" if a in atp_hit else ".",
+                     "nres": M_.loc[a, "nres"], "plddt": M_.loc[a, "plddt"],
+                     "metal_rmsd": M_.loc[a, "min_rmsd"],
+                     "desc": desc[:70]})
+T3 = pd.DataFrame(rows)
+_named = int((T3.desc.astype(str).str.len() > 0).sum())
+print(f"  이름을 붙인 것 {_named} / {len(T3)}")
+if _named < len(T3):
+    print("  ⚠ 이름이 빈 것은 crosswalk·FASTA·UniProt 어디에도 없다. 판정에서 빠진다.")
+ORD = {"가수분해 확실": 0, "전이·리가제": 1, "결합만 표기": 2, "해당 없음": 3}
+T3["_o"] = T3.ntp.map(ORD)
+T3 = T3.sort_values(["_o", "strain", "metal_rmsd"]).drop(columns=["_o"])
+print("\n  분류 x 균주")
+print(pd.crosstab(T3.ntp, T3.strain).reindex(list(ORD)).fillna(0).astype(int).to_string())
+print("\n  NTP 소모로 분류된 것만:")
+hot = T3[T3.ntp != "해당 없음"]
+print(hot[["strain", "acc", "protein", "ntp", "evidence", "ATP모티프",
+           "nres", "plddt", "desc"]].to_string(index=False) if len(hot) else "  없음")
+T3.to_csv(DIR["table"]/"motif_metal_ntp.csv", index=False, encoding="utf-8-sig")
+
+print("\n### 저장")
+for f in ["motif_counts_by_strain.csv", "motif_metal_and_atp.csv", "motif_metal_ntp.csv"]:
+    print(f"  {DIR['table']/f}")
+print("\n### 읽는 법")
+print("  표3 의 분류는 주석 문자열에서 나온 것이지 측정이 아니다. evidence 열의")
+print("  단어를 보고 직접 걸러낼 것 — 'carboxylase' 처럼 NTP 를 쓰지 않는 것도")
+print("  규칙에 걸릴 수 있다. ATP모티프 열이 O 이면 구조 쪽 근거가 하나 더 있는 것이다.")
+```
+
+---
+
 ## CELL 37 — 최종 리포트 + 남은 TODO
 
 ```python
