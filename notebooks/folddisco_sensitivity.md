@@ -61,6 +61,133 @@ if not Y19_COOC_FILE.exists():
 
 ---
 
+## CELL S0 — 3kji 의 조립체를 제대로 읽는다
+
+```python
+# =============================================================================
+# CELL S0 | REMARK 350 을 조립체 단위로 읽는다
+#   앞서 쓴 파서는 BIOMT 행을 연산자 번호로만 모았다. 조립체가 둘이면
+#   BIOMOLECULE 1 의 BIOMT1 과 BIOMOLECULE 2 의 BIOMT1 이 같은 키로 덮어써지고,
+#   APPLY THE FOLLOWING TO CHAINS 도 무시했다. 그래서 B–B2 가 2.13 Å 으로 나온
+#   것이 정당한 조립체인지, 다른 조립체의 연산자를 B 에 잘못 건 결과인지
+#   구분할 수 없었다.
+#
+#   여기서는 조립체마다 따로 만들고, 사슬 적용 범위를 지키고, 각각에서
+#   Cys 쌍 거리를 재서 '어느 조립체가 Ni 자리를 만드는가' 를 직접 본다.
+# =============================================================================
+import itertools, math
+RES = (112, 114)
+SITE_MAX = 12.0
+
+def parse_remark350(path):
+    """[{id, chains:[...], ops:[(R,t)...]}] 로 조립체를 읽는다."""
+    asm, cur, ops = [], None, {}
+    def flush():
+        nonlocal cur, ops
+        if cur is not None:
+            o = []
+            for k in sorted(ops, key=lambda s: int(s)):
+                m = ops[k]
+                if len(m) == 3:
+                    o.append(([m[i][:3] for i in (1, 2, 3)], [m[i][3] for i in (1, 2, 3)]))
+            cur["ops"] = o
+            asm.append(cur)
+        cur, ops = None, {}
+    for l in open(path, errors="ignore"):
+        if not l.startswith("REMARK 350"): continue
+        s = l[10:].strip()
+        if s.startswith("BIOMOLECULE:"):
+            flush(); cur = {"id": s.split(":")[1].strip(), "chains": [], "ops": []}
+        elif "APPLY THE FOLLOWING TO CHAINS" in s and cur is not None:
+            cur["chains"] += [c.strip() for c in s.split(":")[1].split(",") if c.strip()]
+        elif "AND CHAINS:" in s and cur is not None:
+            cur["chains"] += [c.strip() for c in s.split(":")[1].split(",") if c.strip()]
+        elif s.startswith("BIOMT"):
+            k = int(s[5:6]); idx = s[6:10].strip()
+            ops.setdefault(idx, {})[k] = [float(x) for x in s[10:].split()[:4]]
+    flush()
+    return asm
+
+def load_atoms(path):
+    out = []
+    for l in open(path, errors="ignore"):
+        if not l.startswith(("ATOM", "HETATM")): continue
+        rs = l[22:26].strip()
+        if rs.lstrip("-").isdigit():
+            out.append((l[21], int(rs), l[17:20].strip(), l.rstrip("\n")))
+    return out
+
+def xform(atoms, chains, R, t, tag):
+    out = []
+    for c, r, n, l in atoms:
+        if chains and c not in chains: continue
+        x, y, z = float(l[30:38]), float(l[38:46]), float(l[46:54])
+        nx = R[0][0]*x+R[0][1]*y+R[0][2]*z+t[0]
+        ny = R[1][0]*x+R[1][1]*y+R[1][2]*z+t[1]
+        nz = R[2][0]*x+R[2][1]*y+R[2][2]*z+t[2]
+        out.append((f"{c}{tag}", r, n, l[:30] + f"{nx:8.3f}{ny:8.3f}{nz:8.3f}" + l[54:]))
+    return out
+
+def sg(atoms, ch, rs):
+    for c, r, _n, l in atoms:
+        if c == ch and r == rs and l[12:16].strip() == "SG":
+            return (float(l[30:38]), float(l[38:46]), float(l[46:54]))
+    return None
+
+def center(atoms, ch):
+    p = [sg(atoms, ch, r) for r in RES]
+    if any(x is None for x in p): return None
+    return tuple(sum(v[i] for v in p)/2 for i in range(3))
+
+A0  = load_atoms(COOC1_PDB)
+ASM = parse_remark350(COOC1_PDB)
+print("=" * 96); print(f"### {COOC1_PDB.name} 의 조립체 {len(ASM)}개"); print("=" * 96)
+
+BUILT = {}
+for a in ASM:
+    parts = []
+    for i, (R, t) in enumerate(a["ops"], 1):
+        ident = (all(abs(R[x][y]-(1 if x == y else 0)) < 1e-6 for x in range(3) for y in range(3))
+                 and all(abs(v) < 1e-6 for v in t))
+        parts += xform(A0, a["chains"], R, t, "" if ident else str(i))
+    BUILT[a["id"]] = parts
+    chs = sorted({c for c, _r, _n, _l in parts})
+    print(f"\n  조립체 {a['id']}  적용 사슬 {a['chains']}  연산 {len(a['ops'])}개")
+    print(f"    생성 사슬: {chs}")
+    cen = {c: center(parts, c) for c in chs}
+    cen = {k: v for k, v in cen.items() if v}
+    if len(cen) < 2:
+        print(f"    Cys{RES[0]}/{RES[1]} 자리를 가진 사슬이 {len(cen)}개 — 자리를 못 만든다")
+        continue
+    for x, y in itertools.combinations(sorted(cen), 2):
+        d = math.dist(cen[x], cen[y])
+        print(f"    {x}–{y}  자리 중심 {d:6.2f} Å" + ("   ← 한 자리" if d <= SITE_MAX else ""))
+
+print("\n" + "=" * 96); print("### 판정"); print("=" * 96)
+GOOD = []
+for aid, parts in BUILT.items():
+    chs = sorted({c for c, _r, _n, _l in parts})
+    cen = {c: center(parts, c) for c in chs}
+    cen = {k: v for k, v in cen.items() if v}
+    for x, y in itertools.combinations(sorted(cen), 2):
+        d = math.dist(cen[x], cen[y])
+        if d <= SITE_MAX: GOOD.append((aid, x, y, d))
+if GOOD:
+    for aid, x, y, d in sorted(GOOD, key=lambda v: v[3]):
+        print(f"  조립체 {aid}: {x}+{y} 가 {d:.2f} Å 로 한 자리를 만든다")
+    aid, x, y, d = sorted(GOOD, key=lambda v: v[3])[0]
+    print(f"\n  ★ 템플릿은 조립체 {aid} 의 {x}+{y} 로 만든다.")
+    print("    S2 이후 셀에서 이 조합을 쓸 것. (앞서 만든 merged.pdb 가 이것과")
+    print("    같은 조합이면 결과는 그대로다 — 우연히 맞았던 것이고, 이제 근거가 있다.)")
+    ASM_BEST = (aid, x, y, BUILT[aid])
+else:
+    print("  어느 조립체에서도 두 Cys 쌍이 한 자리를 이루지 않는다.")
+    print("  잔기 번호나 구조 형태를 다시 봐야 한다.")
+    ASM_BEST = None
+```
+
+---
+
 ## CELL S2 — Y19 CooC 를 직접 뜯어본다
 
 ```python
