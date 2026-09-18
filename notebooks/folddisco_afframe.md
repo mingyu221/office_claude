@@ -1489,11 +1489,48 @@ if P2src.exists():
     })
     T2 = annotate(T2, ["BL21_acc", "MG1655_acc"]).sort_values("TM_to_CooC1",
                                                               ascending=False)
+
+    # 긴 설명문 대신 **짧은 이름**을 따로 뽑는다. 발표 표에는 이쪽을 쓴다.
+    #   "septum site-determining protein MinD"  →  "MinD"
+    #   "P-loop NTPase family protein Mrp"      →  "Mrp"
+    GENERIC = {"protein", "family", "putative", "domain", "containing", "system",
+               "uncharacterized", "predicted", "probable", "type", "subunit",
+               "hypothetical", "biosynthesis", "and", "of", "the"}
+    def short(name, acc=""):
+        """관용명(대문자로 시작하는 유전자 기호형 낱말)을 고른다. 없으면 설명문 축약."""
+        s = str(name).strip()
+        if not s: return ""
+        toks = re.findall(r"[A-Za-z][A-Za-z0-9\-]*", s)
+        # YeiR / MinD / BcsQ / Mrp / Etk / Wzc 처럼 대문자+소문자 섞인 짧은 기호
+        for w in reversed(toks):
+            if 3 <= len(w) <= 6 and re.match(r"^[A-Z][a-z]", w) and w.lower() not in GENERIC:
+                return w
+            if 3 <= len(w) <= 5 and w.isupper():
+                return w
+        # 기호가 없으면 일반 낱말을 걷어낸 나머지를 줄여 쓴다
+        rest = [w for w in toks if w.lower() not in GENERIC]
+        return " ".join(rest)[:28] if rest else s[:28]
+
+    T2["BL21_short"]   = [short(n, a) for n, a in zip(T2.BL21_acc_name, T2.BL21_acc)]
+    T2["MG1655_short"] = [("(게놈에만 — pseudogene)" if v == "~" else
+                           "(없음)" if v == "O" else short(n))
+                          for v, n in zip(T2["MG1655_판정"], T2.MG1655_acc_name)]
     T2.to_csv(SLIDE/"table2_bl21_family_vs_MG1655.csv", index=False,
               encoding="utf-8-sig")
     audit(T2, ["BL21_acc", "MG1655_acc"], "표2")
-    print("\n[표2] 서열(mmseqs) 기준")
+    print("\n[표2] 서열(mmseqs) 기준 — 전체")
     print(T2.to_string(index=False))
+
+    # 발표에 그대로 올릴 형태
+    SHORT = T2[["BL21_short", "MG1655_short", "fident"]].rename(
+        columns={"BL21_short": "BL21", "MG1655_short": "MG1655 상대"})
+    SHORT.to_csv(SLIDE/"table2_short.csv", index=False, encoding="utf-8-sig")
+    print("\n[표2-요약] 발표용 — 짧은 이름만")
+    print(SHORT.to_string(index=False))
+    print(f"\n  저장: {SLIDE/'table2_short.csv'}")
+    print("  ※ 이름이 이상하게 잘리면 아래를 보고 short() 를 손볼 것:")
+    for _, r in T2.iterrows():
+        print(f"      {r.BL21_acc:12s} {str(r.BL21_acc_name)[:46]:46s} → {r.BL21_short}")
 else:
     print(f"\n[표2] 없음 — CELL F7 을 먼저 ({P2src.name})")
 
