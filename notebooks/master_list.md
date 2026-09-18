@@ -220,7 +220,7 @@ if MISSING:
 print("\n" + "=" * 100); print("### 마스터 리스트"); print("=" * 100)
 print(f"  단백질 {len(T)}개 × 열 {len(T.columns)}개")
 print(f"  ★ {OUT}")
-print("\n  근거축수 분포 (서로 다른 축 몇 개에서 걸렸나):")
+print("\n  n_axes 분포 (서로 다른 축 몇 개에서 걸렸나):")
 print(T["n_axes"].value_counts().sort_index(ascending=False).to_string())
 
 SHOW = [c for c in ["protein", "n_axes", "score", "cys4_win", "mg_status", "mobile",
@@ -244,7 +244,7 @@ try:
         ("tm_HypA/G3E/CooC","해당 과 스윕에서의 TM-score. 0.5 같은 폴드, 0.9 사실상 동일"),
         ("ni_grade_old", "구 Track B (ChCODH2 와 함께 접음) 배위 등급 A~D"),
         ("ni_grade_mono","신 파이프라인 (단량체 + Ni) 배위 등급"),
-        ("ni_grade_dimer","동형이량체 + Ni. 'A-계면' 은 두 사슬이 나눠 문 Cys4 = CooC1 형"),
+        ("ni_grade_dimer","동형이량체 + Ni. 'A_bridged' = 두 사슬이 나눠 배위한 Cys4 (CooC1 형)"),
         ("plddt_motif",  "모티프 구간 평균 pLDDT — plddt_mean 과 비교해야 의미가 있다"),
         ("fd_metal",     "Folddisco 금속 모티프 히트. ※ 비검출은 부재의 근거가 아니다"),
         ("rf2ppi",       "※ 대조군 0.266 으로 실패한 축. 참고만"),

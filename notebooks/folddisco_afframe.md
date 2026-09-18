@@ -1027,7 +1027,17 @@ print(f"  slide_lines.txt                 위 문장 그대로")
 #   과가 같은 구성원으로 채워져 있으면 '균주 차이 없음' 이 구조 수준에서도 성립한다.
 # =============================================================================
 BLM = sorted(F[(F.frame == "예측") & (F.strain == "BL21")].protein)
-print(f"  BL21 과 구성원 {len(BLM)}개를 다른 두 균주 구조에 직접 건다")
+print("=" * 100); print("### 무엇을 무엇에 거는가"); print("=" * 100)
+print(f"  질의 : BL21 의 CooC-like {len(BLM)}개 (ChCooC1 과 TM>=0.5 인 것들)")
+for s in ["MG1655", "Y19"]:
+    if s in STRUCT_ALL:
+        _n = sum(1 for f_ in Path(STRUCT_ALL[s]).iterdir()
+                 if f_.suffix.lower() in (".cif", ".pdb"))
+        print(f"  대상 : {s} 구조 **전체 {_n:,}개** ({Path(STRUCT_ALL[s]).name})")
+print("\n  ★ 상대 균주의 CooC-like 목록(7개, 15개)하고만 비교하는 것이 아니다.")
+print("    프로테옴 구조 전체에 걸어서 가장 닮은 것을 찾는다. 그래야")
+print("    'BL21 에만 있는 것' 을 놓치지 않는다 — 상대 목록에 없는 단백질이")
+print("    답일 수도 있기 때문이다.")
 
 # 구조 파일 경로 찾기 (crosswalk 역방향)
 _xw = pd.read_csv(TBL/"id_crosswalk_struct_to_genbank.csv") \
@@ -1072,7 +1082,7 @@ for pidv in BLM:
                      .str.replace(r"_[A-Za-z0-9]$", "", regex=True)
         d = d.sort_values("alntmscore", ascending=False).drop_duplicates("prot")
         top = d.iloc[0]
-        # 열 이름을 풀어 쓴다. '과원' 은 내가 줄여 만든 말이라 알아볼 수 없었다.
+        # 열 이름은 기준을 그대로 쓴다.
         #   {균주}_hit        그 균주에서 나온 최고 히트가 누구인가
         #   {균주}_TM         그 히트의 TM-score
         #   {균주}_in_family  그 히트가 그 균주의 CooC 과 목록(TM>=0.5)에도 있는가

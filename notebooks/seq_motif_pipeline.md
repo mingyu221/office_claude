@@ -676,7 +676,7 @@ for _, r in CL.head(TOPD).iterrows():
     (DIN/f"{r.protein.replace('|','_')}_dimer.yaml").write_text(_y.safe_dump(doc, sort_keys=False))
     n += 1
 
-# 양성대조군 — Ch CooC1. 이게 A-계면으로 안 나오면 아래 전부 못 믿는다
+# 양성대조군 — Ch CooC1. 이것이 A_bridged 로 안 나오면 아래 전부 못 믿는다
 CRY = TOOLS/"workspace"/"seek_ni_insertase"/"input"/"3kji.pdb"
 AA3 = {"ALA":"A","ARG":"R","ASN":"N","ASP":"D","CYS":"C","GLN":"Q","GLU":"E",
        "GLY":"G","HIS":"H","ILE":"I","LEU":"L","LYS":"K","MET":"M","PHE":"F",
@@ -732,7 +732,7 @@ CUDA_VISIBLE_DEVICES=0 boltz predict inputs_cooclike \\
   --output_format mmcif --num_workers 2
 echo DONE_cooclike
 """)
-print("  채점은 Q8 의 DOUT 을 out_cooclike 로 바꿔 돌리면 된다 (A-계면 등급).")
+print("  채점은 Q8 의 DOUT 을 out_cooclike 로 바꿔 돌리면 된다 (A_bridged 등급).")
 ```
 
 ---
@@ -1208,7 +1208,7 @@ if rows:
         print("\n    ⚠ 대조군이 A 가 아니다. 이량체 예측 자체가 이 자리를 못 만든다는")
         print("      뜻이므로, 아래 결과를 근거로 쓰면 안 된다.")
 
-    print("\n" + "=" * 96); print("### A-계면 (두 사슬이 나눠 문 Cys4)"); print("=" * 96)
+    print("\n" + "=" * 96); print("### A_bridged — 두 사슬이 나눠 배위한 Cys4"); print("=" * 96)
     hot = E[E.grade == "A_bridged"]
     print(hot.to_string(index=False) if len(hot) else "  없음")
 
