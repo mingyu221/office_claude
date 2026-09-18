@@ -41,6 +41,15 @@ FAA = {"BL21":   _pick(INHOUSE/"bl21_db_match_qjz.faa", PLIST/"bl21_de3_protein.
 STRUCT = {"BL21": TOOLS/"database"/"bacteriaDB"/"structures_UP000503272",
           "Y19":  TOOLS/"database"/"bacteriaDB"/"structures_UP000034085"}
 
+# 구조 DB 를 만든 쪽이 준 정본 매핑. 시트당 한 균주이고, 각 구조에
+#   UniParc accession / UniProtKB accessions / Genbank / Selected structure
+# 가 들어 있다. Selected structure 가 "ColabFold predicted" 면 자체 예측이고
+# 파일명이 cf_{UniParc}.pdb, 아니면 그 값이 AFDB accession 이라 AF-{그것}-F1 이다.
+# 이 파일이 있으면 stem -> Genbank 가 100% 풀린다 (실측: 히트 2,232건 실패 0).
+XLSX = _pick(BASE/"input"/"external"/"structure_accessions.xlsx",
+             TOOLS/"database"/"bacteriaDB"/"structure_accessions.xlsx",
+             PLIST/"structure_accessions.xlsx")
+
 SETS    = {"metal": "metal_run01_{s}.tsv", "atp": "atp_run02_{s}.tsv"}
 STRAINS = ["BL21", "MG1655", "Y19"]
 # 구조 DB 에 이름 규칙이 두 가지 섞여 있다.
@@ -65,6 +74,10 @@ for s in STRAINS:
 for s, d in STRUCT.items():
     print(f"  struct {s:8s} {'O' if d.is_dir() else 'X'}  {d}")
 print(f"  table  {'O' if TBL.is_dir() else 'X'}  {TBL}")
+print(f"  xlsx   {'O' if XLSX.exists() else 'X'}  {XLSX}")
+if not XLSX.exists():
+    print("     ※ 없으면 id_crosswalk_struct_to_genbank.csv 로 넘어간다.")
+    print("       그 경우 cf_* 구조의 이름이 안 붙을 수 있다.")
 if not ok:
     print("\n⚠ X 가 있으면 그 경로부터 고칠 것. 아래 셀은 원본 TSV 가 있어야 돈다.")
 ```
@@ -90,7 +103,7 @@ def read_set(kind, strain):
     n_rows = len(d)
     d["stem"] = d.tid.map(stem_of)
     d["acc"]  = d.tid.map(acc_of)
-    d["src"]  = d.acc.notna().map({True: "AF", False: "cf"})
+    d["src"]  = d.acc.notna().map({True: "AFDB", False: "ColabFold"})
     if "idf" in d: d = d.sort_values("idf", ascending=False)
     return d.drop_duplicates("stem").set_index("stem"), n_rows
 
@@ -103,7 +116,7 @@ for k in SETS:
         if d is None: print(f"  {k:6s} {s:8s} 없음"); continue
         c = d.src.value_counts().to_dict()
         print(f"  {k:6s} {s:8s} {NROW[(k,s)]:5d}행 / {len(d):5d}구조  "
-              f"(AlphaFold {c.get('AF',0)}, 자체예측 {c.get('cf',0)})")
+              f"(AFDB {c.get('AFDB',0)}, ColabFold {c.get('ColabFold',0)})")
         if NROW[(k, s)] != len(d):
             print(f"      ⚠ 행 {NROW[(k,s)]} ≠ 구조 {len(d)} — 같은 구조가 두 번 나왔다")
 assert all(DATA[(k, s)] is not None for k in SETS for s in STRAINS), "TSV 누락 — M1 점검"
@@ -126,12 +139,38 @@ for s in STRAINS:
             HDR[k] = h[len(k):].strip()
 
 XW = {}       # stem -> GenBank protein ID
+SRC_INFO = {}  # stem -> "AFDB" / "ColabFold"
+if XLSX.exists():
+    xl = pd.ExcelFile(XLSX)
+    for sh in xl.sheet_names:
+        d = xl.parse(sh)
+        n_cf = 0
+        for _, r in d.iterrows():
+            gb = str(r["Genbank"]).split(",")[0].strip()
+            upi = str(r["UniParc accession"]).strip()
+            sel = str(r["Selected structure"]).strip()
+            XW[f"cf_{upi}"] = gb; SRC_INFO[f"cf_{upi}"] = "ColabFold"
+            if sel and sel != "ColabFold predicted":
+                for v in ("v6", "v5", "v4", "v3"):
+                    XW[f"AF-{sel}-F1-model_{v}"] = gb
+                    SRC_INFO[f"AF-{sel}-F1-model_{v}"] = "AFDB"
+            else:
+                n_cf += 1
+        print(f"  xlsx [{sh[:26]}] 구조 {len(d)} (ColabFold {n_cf}, AFDB {len(d)-n_cf})")
 _x = TBL/"id_crosswalk_struct_to_genbank.csv"
 if _x.exists():
     d = pd.read_csv(_x).dropna(subset=["protein"])
     for k, v in d.set_index("tid")["protein"].to_dict().items():
-        XW[stem_of(k)] = str(v).split(",")[0]
-print(f"  crosswalk {len(XW)}건, FASTA 헤더 {len(HDR)}건")
+        XW.setdefault(stem_of(k), str(v).split(",")[0])   # 엑셀이 우선
+print(f"  매핑 {len(XW)}건, FASTA 헤더 {len(HDR)}건")
+
+# 히트가 이 매핑으로 다 풀리는지 먼저 본다 — 안 풀리면 이름 없는 행이 생긴다
+for k in SETS:
+    for s in STRAINS:
+        idx = list(DATA[(k, s)].index)
+        miss = [i for i in idx if i not in XW]
+        if miss:
+            print(f"  ⚠ {k} {s}: {len(miss)}/{len(idx)} 미매핑 예) {miss[:2]}")
 
 UNI = {}
 CACHE = TBL/"uniprot_name_cache.tsv"
@@ -208,18 +247,19 @@ TBL.mkdir(parents=True, exist_ok=True)
 print("=" * 96); print("### 표 1 — 균주별 모티프 매칭"); print("=" * 96)
 def _cnt(k, s):
     d = DATA[(k, s)]; c = d.src.value_counts().to_dict()
-    return len(d), c.get("AF", 0), c.get("cf", 0)
+    return len(d), c.get("AFDB", 0), c.get("ColabFold", 0)
 rows = []
 for s in STRAINS:
     m, m_af, m_cf = _cnt("metal", s); a, a_af, a_cf = _cnt("atp", s)
-    rows.append({"균주": s, "metal": m, "metal(AF/cf)": f"{m_af}/{m_cf}",
-                 "ATP": a, "ATP(AF/cf)": f"{a_af}/{a_cf}", "프로테옴": NPROT[s],
+    rows.append({"균주": s, "metal": m, "metal(AFDB/cf)": f"{m_af}/{m_cf}",
+                 "ATP": a, "ATP(AFDB/cf)": f"{a_af}/{a_cf}", "프로테옴": NPROT[s],
                  "metal %": round(100*m/NPROT[s], 2), "ATP %": round(100*a/NPROT[s], 2)})
 T1 = pd.DataFrame(rows)
 print(T1.to_string(index=False))
 T1.to_csv(TBL/"motif_counts_by_strain.csv", index=False, encoding="utf-8-sig")
-print("\n  한 행이 한 구조이고 한 단백질이다. AF/cf 는 구조 출처가 둘이라는 뜻이고")
-print("  (AlphaFold DB / 자체 예측), accession 으로 키를 잡으면 cf 쪽이 빠진다.")
+print("\n  한 행이 한 구조이고 한 단백질이다. AFDB/cf 는 구조의 출처다 —")
+print("  AlphaFold DB 에 없어 ColabFold 로 접은 것이 BL21 250, Y19 21 개 있다.")
+print("  둘 다 structure_accessions.xlsx 로 Genbank 에 붙으므로 이름은 다 나온다.")
 print("  ATP 보유율이 20%대면 그 축은 선별력이 없다.")
 
 # ---------------------------- 표 2 ----------------------------
