@@ -1213,3 +1213,119 @@ for tag, pat, outname in SWEEPS:
 print("\n  ※ 앞으로 Foldseek 은 항상 --exact-tmscore 1 을 붙인다.")
 print("    안 붙이면 근사값이라 1.0 을 넘고, tier 경계 근처 개수가 달라진다.")
 ```
+
+---
+
+## CELL F12 — 접근번호에 통용되는 이름을 붙인다
+
+```python
+# =============================================================================
+# CELL F12 | AAC74259.1 / P37655 만 있으면 아무도 못 알아본다
+#
+#   두 출처에서 로컬로 긁는다. 네트워크 불필요.
+#     (1) GenBank 접근번호 (AAC*/AAT*/QJZ*/AKE*) → 프로테옴 FASTA 헤더
+#         NCBI 형식이면 [gene=...] [locus_tag=b####] [protein=...] 가 들어 있고,
+#         아니면 헤더 뒤쪽 설명문을 그대로 쓴다
+#     (2) UniProt 접근번호 (P37655 등) → AlphaFold CIF 의 _struct.title
+#         AFDB 모델 파일은 단백질 이름을 제목으로 달고 있다
+#
+#   그래도 못 찾으면 빈칸으로 두고 몇 개인지 찍는다. 추측해 채우지 않는다.
+# =============================================================================
+import re
+NAME, GENE, LOCUS = {}, {}, {}
+
+# ---- (1) 프로테옴 FASTA 헤더 ----
+FAA = {"BL21":   TOOLS/"database"/"bacteriaDB"/"inhouseDB"/"bl21_db_match_qjz.faa",
+       "MG1655": TOOLS/"database"/"protein_list"/"mg1655_protein.faa",
+       "Y19":    TOOLS/"database"/"bacteriaDB"/"inhouseDB"/"y19_db_match.faa"}
+print("=" * 100); print("### 헤더 형식 확인"); print("=" * 100)
+for st, p in FAA.items():
+    if not p.exists(): print(f"  X  {st}: {p}"); continue
+    with open(p, errors="ignore") as fh:
+        for l in fh:
+            if l.startswith(">"): print(f"  {st:8s} {l.rstrip()[:130]}"); break
+    for l in open(p, errors="ignore"):
+        if not l.startswith(">"): continue
+        h = l[1:].rstrip()
+        acc = re.search(r"\b((?:AAC|AAT|AAN|QJZ|AKE|AGE|AHZ)\w*\.\d+)", h)
+        acc = acc.group(1) if acc else h.split()[0]
+        g  = re.search(r"\[gene=([^\]]+)\]", h)
+        lt = re.search(r"\[locus_tag=([^\]]+)\]", h)
+        pr = re.search(r"\[protein=([^\]]+)\]", h)
+        if g:  GENE[acc]  = g.group(1)
+        if lt: LOCUS[acc] = lt.group(1)
+        if pr: NAME[acc]  = pr.group(1)
+        else:
+            # NCBI 대괄호 형식이 아니면 접근번호 뒤 ~ 종명 앞까지를 이름으로
+            txt = re.sub(r"^\S+\s*", "", h)
+            txt = re.split(r"\s*\[(?:Escherichia|Citrobacter)", txt)[0]
+            if txt and acc not in NAME: NAME[acc] = txt.strip()[:70]
+print(f"\n  FASTA 에서 이름 {len(NAME)} · 유전자명 {len(GENE)} · 로커스 {len(LOCUS)}")
+
+# ---- (2) AlphaFold CIF 의 _struct.title ----
+def cif_title(path):
+    try:
+        txt, out = open(path, errors="ignore").read(6000), None
+        m = re.search(r"_struct\.title\s+(?:'([^']*)'|\"([^\"]*)\"|(\S.*))", txt)
+        if m: out = (m.group(1) or m.group(2) or m.group(3)).strip().strip("'\"")
+        return out
+    except Exception:
+        return None
+
+UNI_TITLE = {}
+def uniprot_name(acc):
+    if acc in UNI_TITLE: return UNI_TITLE[acc]
+    for d in STRUCT_ALL.values():
+        for f in Path(d).glob(f"AF-{acc}-F1-model_v*.cif"):
+            UNI_TITLE[acc] = cif_title(f); return UNI_TITLE[acc]
+    UNI_TITLE[acc] = None; return None
+
+def label(acc):
+    """접근번호 하나를 사람이 읽는 이름으로."""
+    a = str(acc).strip()
+    if re.fullmatch(r"[A-NR-Z][0-9][A-Z0-9]{3}[0-9]", a) or re.fullmatch(r"[A-Z0-9]{6,10}", a):
+        n = uniprot_name(a)
+        if n: return n
+    parts = []
+    if a in GENE:  parts.append(GENE[a])
+    if a in LOCUS: parts.append(f"({LOCUS[a]})")
+    if a in NAME:  parts.append(NAME[a])
+    return " ".join(parts) if parts else ""
+
+# ---- 표2 에 이름 열 붙이기 ----
+C = pd.read_csv(TBL/"cooc_fold_mg1655.csv")
+C["BL21_name"]   = [label(p) for p in C.protein]
+C["MG1655_acc"]  = [ (re.search(r"있음 (\S+)", str(g)).group(1)
+                      if re.search(r"있음 (\S+)", str(g)) else
+                      ("genome only" if v == "~" else "absent"))
+                     for v, g in zip(C.MG1655, C["근거"]) ]
+C["MG1655_name"] = [label(a) for a in C.MG1655_acc]
+C["fident"]      = [ (re.search(r"fident ([\d.]+)", str(g)).group(1)
+                      if re.search(r"fident ([\d.]+)", str(g)) else None)
+                     for g in C["근거"] ]
+T2 = C[["protein", "BL21_name", "tm_CooC", "MG1655_acc", "MG1655_name", "fident"]] \
+       .rename(columns={"protein": "BL21_acc", "tm_CooC": "TM_to_CooC1"}) \
+       .sort_values("TM_to_CooC1", ascending=False)
+T2.to_csv(SLIDE/"table2_bl21_family_vs_MG1655.csv", index=False, encoding="utf-8-sig")
+print("\n" + "=" * 100); print("### 표2 — 이름 붙임"); print("=" * 100)
+print(T2.to_string(index=False))
+
+# ---- 표1 의 Top hit 에도 ----
+T1p = SLIDE/"table1_fold_counts.csv"
+if T1p.exists():
+    T1 = pd.read_csv(T1p)
+    T1["Top hit name"] = [label(h) for h in T1["Top hit"]]
+    T1.to_csv(T1p, index=False, encoding="utf-8-sig")
+    print("\n" + "=" * 100); print("### 표1 — Top hit 이름"); print("=" * 100)
+    print(T1[["Strain", "Frame", "Top hit", "Top hit name", "Top TM"]].to_string(index=False))
+
+# ---- 못 찾은 것 ----
+miss = [a for a in list(T2.BL21_acc) + list(T2.MG1655_acc)
+        if a not in ("genome only", "absent") and not label(a)]
+print(f"\n  이름 못 찾은 접근번호 {len(miss)}개" + (f": {miss}" if miss else ""))
+if miss:
+    print("  → FASTA 헤더에 설명이 없는 경우다. NCBI/UniProt 에서 직접 확인할 것:")
+    for a in miss[:5]:
+        print(f"     https://www.ncbi.nlm.nih.gov/protein/{a}")
+print(f"\n저장: {SLIDE/'table2_bl21_family_vs_MG1655.csv'}")
+```
