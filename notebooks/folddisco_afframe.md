@@ -1055,9 +1055,9 @@ rows = []
 for pidv in BLM:
     q = find_struct(pidv, "BL21")
     if q is None:
-        rows.append({"BL21": pidv, "비고": "구조 파일 못 찾음"}); continue
+        rows.append({"BL21": pidv, "note": "구조 파일 못 찾음"}); continue
     rec = {"BL21": pidv,
-           "TM_CooC": float(F[(F.frame == "예측") & (F.strain == "BL21") &
+           "TM_to_CooC1": float(F[(F.frame == "예측") & (F.strain == "BL21") &
                               (F.protein == pidv)].tm.iloc[0])}
     for s in ["MG1655", "Y19"]:
         o = FSD/f"x_{pidv}_vs_{s}_{Path(STRUCT_ALL[s]).name}.m8"
@@ -1066,14 +1066,19 @@ for pidv in BLM:
                f'--format-output "{FFMT}" -e 10 --max-seqs 50 --exact-tmscore 1 '
                f'--threads {THREADS}', quiet=True)
         if not (o.exists() and o.stat().st_size):
-            rec[s] = None; rec[f"{s}_TM"] = None; continue
+            rec[f"{s}_hit"] = None; rec[f"{s}_TM"] = None; continue
         d = pd.read_csv(o, sep="\t", names=FFMT.split(","))
         d["prot"] = d.target.apply(lambda x: Path(str(x)).stem) \
                      .str.replace(r"_[A-Za-z0-9]$", "", regex=True)
         d = d.sort_values("alntmscore", ascending=False).drop_duplicates("prot")
         top = d.iloc[0]
-        rec[s] = pid(top.prot); rec[f"{s}_TM"] = round(float(top.alntmscore), 3)
-        rec[f"{s}_과원"] = "O" if pid(top.prot) in MEMSET.get(s, set()) else "."
+        # 열 이름을 풀어 쓴다. '과원' 은 내가 줄여 만든 말이라 알아볼 수 없었다.
+        #   {균주}_hit        그 균주에서 나온 최고 히트가 누구인가
+        #   {균주}_TM         그 히트의 TM-score
+        #   {균주}_in_family  그 히트가 그 균주의 CooC 과 목록(TM>=0.5)에도 있는가
+        rec[f"{s}_hit"] = pid(top.prot)
+        rec[f"{s}_TM"]  = round(float(top.alntmscore), 3)
+        rec[f"{s}_in_family"] = "O" if pid(top.prot) in MEMSET.get(s, set()) else "."
     rows.append(rec)
 
 X = pd.DataFrame(rows)
@@ -1081,8 +1086,11 @@ X.to_csv(TBL/"slide_foldseek"/"table3_family_correspondence.csv",
          index=False, encoding="utf-8-sig")
 print("\n" + "=" * 100); print("### 세 균주 과 구성원 대응"); print("=" * 100)
 print(X.to_string(index=False))
-print("\n  MG1655_과원 / Y19_과원 열 — 그 최고 히트가 해당 균주의 CooC 과 목록에")
-print("  들어 있는가. O 가 많으면 세 균주가 **같은 구성원으로 채워진 같은 과**다.")
+print("\n  열 읽는 법")
+print("    {균주}_hit        그 BL21 단백질을 해당 균주 구조에 걸었을 때 최고 히트")
+print("    {균주}_TM         그 히트의 TM-score. 0.9 이상이면 사실상 같은 단백질")
+print("    {균주}_in_family  그 히트가 해당 균주의 CooC 과 목록(TM>=0.5)에도 있는가")
+print("  in_family 가 전부 O 면 세 균주가 **같은 구성원으로 채워진 같은 과**다.")
 if "MG1655_TM" in X:
     hi = X[X.MG1655_TM >= 0.9]
     print(f"\n  MG1655 에 TM ≥ 0.9 대응이 있는 BL21 구성원: {len(hi)}/{len(X)}")
