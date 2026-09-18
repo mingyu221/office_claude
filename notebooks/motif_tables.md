@@ -422,3 +422,157 @@ print("  표3 의 분류는 주석 문자열에서 나온 것이지 측정이 �
 print("  evidence 열의 단어를 보고 직접 걸러낼 것. ATP모티프 O 는 구조 쪽 근거가")
 print("  하나 더 있다는 뜻이고, 이름이 빈 행은 아무 판정도 받지 않았다는 뜻이다.")
 ```
+
+---
+
+## CELL M4 — "MG1655 에 없음" 을 검증한다
+
+```python
+# =============================================================================
+# CELL M4 | 미검출과 부재를 가른다
+#   M3 의 'BL21+Y19 (MG없음)' 과 'BL21 단독' 은 MG1655 히트 목록에 같은
+#   시그니처가 없다는 뜻일 뿐이다. 세 가지가 섞여 있다 —
+#     진짜 없음 / 구조 버전 차이로 미검출 / 질의 민감도 밖.
+#
+#   가르는 법: MG1655 프로테옴에 직교체가 있는지 묻고, 있으면 그 직교체에
+#   같은 Cys 쌍이 보존돼 있는지 정렬로 확인한다.
+#     Cys 보존됨  -> 미검출이다. 이 자리는 균주 변별에 못 쓴다
+#     직교체 없음 -> 게놈까지 확인한다 (어노테이션 누락·pseudogene 배제)
+#
+#   ★ HslO(QJZ13803.1) 가 목록에 있다. K-12 에 hslO 는 분명히 있으므로
+#     적어도 하나는 미검출이다. 그 하나가 나머지의 성격을 시사한다.
+# =============================================================================
+import subprocess, urllib.request
+_tmp = BASE/"tmp"/"m4"; _tmp.mkdir(parents=True, exist_ok=True)
+def sh(c, quiet=False):
+    r = subprocess.run(c, shell=True, text=True, stdout=subprocess.PIPE,
+                       stderr=subprocess.STDOUT)
+    if not quiet: print(r.stdout.rstrip())
+    return r.stdout
+
+# 검증 대상: BL21 쪽에서 MG1655 에 짝이 없는 것 전부
+TGT = {}
+for p_ in ("B.Y", "B.."):
+    sub = piv[piv.pattern == p_]
+    for s_, v in sub["BL21"].dropna().items():
+        for one in str(v).split(","):
+            TGT[one] = (p_, s_)     # protein -> (패턴, 시그니처)
+print(f"검증 대상 {len(TGT)}개")
+for k, (p_, s_) in sorted(TGT.items(), key=lambda x: x[1][0]):
+    print(f"  {p_}  {k:14s} {s_}")
+
+# ---------- 서열 ----------
+SEQ = {}
+for s in STRAINS:
+    nm, buf = None, []
+    for l in open(FAA[s], errors="ignore"):
+        if l.startswith(">"):
+            if nm: SEQ[nm] = "".join(buf)
+            nm, buf = l[1:].split()[0], []
+        else: buf.append(l.strip())
+    if nm: SEQ[nm] = "".join(buf)
+
+q = BASE/"input"/"seq"/"m4_bl21_nohit.faa"; q.parent.mkdir(parents=True, exist_ok=True)
+q.write_text("".join(f">{k}\n{SEQ[k]}\n" for k in TGT if k in SEQ))
+print(f"\n질의 {sum(1 for k in TGT if k in SEQ)} / {len(TGT)}개 (FASTA 에 있는 것만)")
+
+# ---------- 1. MG1655 프로테옴 ----------
+print("\n" + "=" * 96); print("### 1. MG1655 프로테옴에 직교체가 있는가"); print("=" * 96)
+o = BASE/"result"/"search"/"m4_vs_MG1655.m8"; o.parent.mkdir(parents=True, exist_ok=True)
+FMT = "query,target,fident,alnlen,qcov,tcov,qstart,qend,tstart,tend,evalue,bits,qaln,taln"
+if not (o.exists() and o.stat().st_size):
+    sh(f'mmseqs easy-search "{q}" "{FAA["MG1655"]}" "{o}" "{_tmp}" '
+       f'--format-output "{FMT}" -e 1e-3 -s 7.5 -a 1 --threads 16 -v 1')
+BEST = {}
+if o.exists() and o.stat().st_size:
+    d = pd.read_csv(o, sep="\t", names=FMT.split(","))
+    d = d.sort_values("bits", ascending=False).drop_duplicates("query")
+    BEST = {r["query"]: r for _, r in d.iterrows()}
+print(f"  직교체 있음 {len(BEST)} / {len(TGT)}")
+
+# ---------- 2. Cys 쌍이 보존됐는가 ----------
+def cys_kept(row, cys_pos):
+    """질의의 Cys 위치가 정렬 상대에서도 C 인가. (보존수, 확인가능수, 상대위치)"""
+    qa, ta = str(row["qaln"]), str(row["taln"])
+    qi = int(row["qstart"]); ti = int(row["tstart"])
+    keep, seen, at = 0, 0, []
+    for cq, ct in zip(qa, ta):
+        if cq != "-":
+            if qi in cys_pos:
+                seen += 1
+                if ct == "C": keep += 1; at.append(f"{ti}C")
+                else:         at.append(f"{ti}{ct}")
+            qi += 1
+        if ct != "-": ti += 1
+    return keep, seen, ",".join(at)
+
+rows = []
+for k, (pat, sig_) in TGT.items():
+    cys = [int(x[1:]) for x in sig_.split(",")]
+    r = BEST.get(k)
+    if r is None:
+        rows.append({"protein": k, "패턴": pat, "sig": sig_, "MG직교체": "없음",
+                     "fident": None, "qcov": None, "Cys보존": "", "판정": "게놈 확인 필요"})
+        continue
+    keep, seen, at = cys_kept(r, set(cys))
+    ver = ("미검출 (직교체·Cys 둘 다 있음)" if seen and keep == seen
+           else "Cys 달라짐" if seen
+           else "정렬 구간 밖")
+    rows.append({"protein": k, "패턴": pat, "sig": sig_,
+                 "MG직교체": str(r["target"]), "fident": round(float(r["fident"]), 3),
+                 "qcov": round(float(r["qcov"]), 3),
+                 "Cys보존": f"{keep}/{seen} ({at})", "판정": ver})
+V = pd.DataFrame(rows)
+pd.set_option("display.max_colwidth", 44)
+print("\n" + V.to_string(index=False))
+
+# ---------- 3. 직교체가 없는 것만 게놈 확인 ----------
+NOHIT = [r["protein"] for r in rows if r["MG직교체"] == "없음"]
+print("\n" + "=" * 96); print(f"### 2. 게놈 확인 ({len(NOHIT)}개)"); print("=" * 96)
+GEN = {}
+if NOHIT:
+    g = BASE/"input"/"external"/"MG1655_U00096.3.fna"
+    if not (g.exists() and g.stat().st_size > 1_000_000):
+        url = ("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
+               "?db=nuccore&id=U00096.3&rettype=fasta&retmode=text")
+        try:
+            with urllib.request.urlopen(url, timeout=300) as r_: g.write_bytes(r_.read())
+            print(f"  게놈 받음 {g.stat().st_size/1e6:.1f} MB")
+        except Exception as e:
+            print(f"  ⚠ 게놈 내려받기 실패 {e}")
+    if g.exists() and g.stat().st_size > 1_000_000:
+        q2 = BASE/"input"/"seq"/"m4_nohit.faa"
+        q2.write_text("".join(f">{k}\n{SEQ[k]}\n" for k in NOHIT if k in SEQ))
+        o2 = BASE/"result"/"search"/"m4_vs_MG1655genome.m8"
+        GF = "query,target,fident,alnlen,qlen,qstart,qend,evalue,bits"
+        if not (o2.exists() and o2.stat().st_size):
+            sh(f'mmseqs easy-search "{q2}" "{g}" "{o2}" "{_tmp}" --search-type 2 '
+               f'--format-output "{GF}" -e 1e-3 -s 7.5 --threads 16 -v 1')
+        if o2.exists() and o2.stat().st_size:
+            d2 = pd.read_csv(o2, sep="\t", names=GF.split(","))
+            for k_, gg in d2.groupby("query"):
+                top = gg.sort_values("bits", ascending=False).iloc[0]
+                cov = (float(top.qend) - float(top.qstart) + 1)/float(top.qlen)
+                GEN[k_] = (f"게놈에 온전 (fid {top.fident:.2f} cov {cov:.2f})"
+                           if top.fident >= 0.80 and cov >= 0.70 else
+                           f"게놈에 조각 (fid {top.fident:.2f} cov {cov:.2f})"
+                           if top.fident >= 0.80 else
+                           f"먼 유사체만 (fid {top.fident:.2f})")
+    for k in NOHIT:
+        v = GEN.get(k, "게놈에도 없음")
+        print(f"  {k:14s} {v}")
+        V.loc[V.protein == k, "판정"] = ("진짜 부재" if v == "게놈에도 없음"
+                                         else f"미검출 — {v}")
+else:
+    print("  전부 프로테옴에 직교체가 있다.")
+
+V.to_csv(TBL/"motif_strain_specific_verified.csv", index=False, encoding="utf-8-sig")
+print("\n" + "=" * 96); print("### 판정 요약"); print("=" * 96)
+print(V.판정.value_counts().to_string())
+real = V[V.판정 == "진짜 부재"]
+print(f"\n★ 검증을 통과한 '진짜 MG1655 부재' {len(real)}개")
+print(real[["protein", "패턴", "sig", "Cys보존"]].to_string(index=False) if len(real) else "  없음")
+print(f"\n저장: {TBL/'motif_strain_specific_verified.csv'}")
+print("\n  '미검출' 로 분류된 것은 균주 변별에 쓸 수 없다. 구조 DB 의 버전 차이나")
+print("  질의 민감도가 만든 차이지 생물학이 아니다.")
+```
