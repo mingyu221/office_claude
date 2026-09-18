@@ -61,26 +61,108 @@ if not Y19_COOC_FILE.exists():
 
 ---
 
-## CELL S0 — 3kji 의 조립체를 제대로 읽는다
+## CELL S0 — 3kji 파일을 검증한다 (거울상 / 조립체)
 
 ```python
 # =============================================================================
-# CELL S0 | REMARK 350 을 조립체 단위로 읽는다
-#   앞서 쓴 파서는 BIOMT 행을 연산자 번호로만 모았다. 조립체가 둘이면
-#   BIOMOLECULE 1 의 BIOMT1 과 BIOMOLECULE 2 의 BIOMT1 이 같은 키로 덮어써지고,
-#   APPLY THE FOLLOWING TO CHAINS 도 무시했다. 그래서 B–B2 가 2.13 Å 으로 나온
-#   것이 정당한 조립체인지, 다른 조립체의 연산자를 B 에 잘못 건 결과인지
-#   구분할 수 없었다.
+# CELL S0 | 3kji 좌표를 쓰기 전에 두 가지를 검사한다
 #
-#   여기서는 조립체마다 따로 만들고, 사슬 적용 범위를 지키고, 각각에서
-#   Cys 쌍 거리를 재서 '어느 조립체가 Ni 자리를 만드는가' 를 직접 본다.
+#   (1) 파일 자체가 거울상인가.
+#       같은 엔트리로 돌아다니는 좌표 파일이 여러 개고, 그 중 하나는 손대칭이
+#       뒤집혀 있다. 단백질은 전부 L-아미노산이므로 CA 주변 (N, C, CB) 의
+#       부호 있는 부피가 한쪽 부호로만 나온다. 부호가 반대면 그 파일은 거울상이다.
+#       기준 부호는 외운 상수로 두지 않고, 정상 구조(Y19 CooC AlphaFold 모델)에서
+#       런타임에 직접 구한다.
+#
+#   (2) REMARK 350 연산자가 거울상을 만드는가.
+#       앞서 쓴 파서는 BIOMT 행을 연산자 번호로만 모았다. 조립체가 둘이면
+#       BIOMOLECULE 1 의 BIOMT1 과 BIOMOLECULE 2 의 BIOMT1 이 같은 키로 덮어써진다.
+#       서로 다른 조립체의 행이 한 행렬에 섞이면 그 행렬은 회전이 아니게 되고
+#       (det ≠ +1, RᵀR ≠ I) 결과는 거울상이거나 일그러진 사본이다.
+#       그러니 모든 연산자에 det 와 직교성을 걸고, 통과 못 하면 버린다.
+#
+#   그리고 어느 조립체가 맞는지는 기하 추정이 아니라 파일 안의 금속 원자가
+#   정한다. Cys SG 네 개가 2.0–2.8 Å 로 금속을 무는 조립체가 Ni 자리다.
 # =============================================================================
 import itertools, math
-RES = (112, 114)
+RES      = (112, 114)
 SITE_MAX = 12.0
+METALS   = {"NI", "ZN", "FE", "CO", "MG"}
 
+# ---- 기하 도우미 ------------------------------------------------------------
+def _v(a, b):        return [b[i] - a[i] for i in range(3)]
+def _cross(a, b):    return [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]]
+def _dot(a, b):      return sum(a[i]*b[i] for i in range(3))
+def _det(R):
+    return (R[0][0]*(R[1][1]*R[2][2]-R[1][2]*R[2][1])
+          - R[0][1]*(R[1][0]*R[2][2]-R[1][2]*R[2][0])
+          + R[0][2]*(R[1][0]*R[2][1]-R[1][1]*R[2][0]))
+def _orth_err(R):
+    e = 0.0
+    for i in range(3):
+        for j in range(3):
+            v = sum(R[k][i]*R[k][j] for k in range(3))
+            e = max(e, abs(v - (1.0 if i == j else 0.0)))
+    return e
+
+# ---- 좌표 읽기 (pdb / cif 공용) ---------------------------------------------
+def load_atoms(path):
+    """[(chain, resseq, resname, atomname, (x,y,z), raw_pdb_line|None)]"""
+    path = Path(path); out = []
+    if path.suffix.lower() in (".cif", ".mmcif"):
+        cols, inloop, hdr = {}, False, []
+        for l in open(path, errors="ignore"):
+            if l.startswith("_atom_site."):
+                hdr.append(l.strip().split(".")[1]); inloop = True; continue
+            if inloop and (l.startswith("#") or l.startswith("loop_")):
+                if cols: break
+                if hdr: cols = {n: i for i, n in enumerate(hdr)}
+                continue
+            if inloop and l[:4] in ("ATOM", "HETA"):
+                if not cols: cols = {n: i for i, n in enumerate(hdr)}
+                f = l.split()
+                try:
+                    ch = f[cols.get("auth_asym_id", cols.get("label_asym_id"))]
+                    rs = f[cols.get("auth_seq_id",  cols.get("label_seq_id"))]
+                    rn = f[cols["label_comp_id"]]; an = f[cols["label_atom_id"]].strip('"')
+                    xyz = (float(f[cols["Cartn_x"]]), float(f[cols["Cartn_y"]]), float(f[cols["Cartn_z"]]))
+                except Exception:
+                    continue
+                if rs.lstrip("-").isdigit(): out.append((ch, int(rs), rn, an, xyz, None))
+        return out
+    for l in open(path, errors="ignore"):
+        if not l.startswith(("ATOM", "HETATM")): continue
+        rs = l[22:26].strip()
+        if not rs.lstrip("-").isdigit(): continue
+        out.append((l[21], int(rs), l[17:20].strip(), l[12:16].strip(),
+                    (float(l[30:38]), float(l[38:46]), float(l[46:54])), l.rstrip("\n")))
+    return out
+
+# ---- (1) 손대칭 검사 ---------------------------------------------------------
+def handedness(atoms, limit=400):
+    """CA 마다 (N-CA)·[(C-CA)×(CB-CA)] 부호를 세어 (양수, 음수, 평균) 반환."""
+    by = {}
+    for ch, rs, rn, an, xyz, _l in atoms:
+        if an in ("N", "CA", "C", "CB") and rn != "GLY":
+            by.setdefault((ch, rs), {})[an] = xyz
+    pos = neg = 0; acc = []
+    for k, d in list(by.items())[:limit]:
+        if len(d) < 4: continue
+        ca = d["CA"]
+        v = _dot(_v(ca, d["N"]), _cross(_v(ca, d["C"]), _v(ca, d["CB"])))
+        acc.append(v)
+        if v > 0: pos += 1
+        else:     neg += 1
+    return pos, neg, (sum(acc)/len(acc) if acc else 0.0)
+
+def hand_sign(atoms):
+    p, n, m = handedness(atoms)
+    if p + n == 0: return 0
+    return 1 if p > n else -1
+
+# ---- REMARK 350: 조립체 단위 + 연산자 검증 ----------------------------------
 def parse_remark350(path):
-    """[{id, chains:[...], ops:[(R,t)...]}] 로 조립체를 읽는다."""
+    """[{id, chains:[...], ops:[(R,t,ok,det,err)...]}]"""
     asm, cur, ops = [], None, {}
     def flush():
         nonlocal cur, ops
@@ -89,9 +171,11 @@ def parse_remark350(path):
             for k in sorted(ops, key=lambda s: int(s)):
                 m = ops[k]
                 if len(m) == 3:
-                    o.append(([m[i][:3] for i in (1, 2, 3)], [m[i][3] for i in (1, 2, 3)]))
-            cur["ops"] = o
-            asm.append(cur)
+                    R = [m[i][:3] for i in (1, 2, 3)]
+                    t = [m[i][3]  for i in (1, 2, 3)]
+                    d, e = _det(R), _orth_err(R)
+                    o.append((R, t, (abs(d - 1.0) < 1e-3 and e < 1e-3), d, e))
+            cur["ops"] = o; asm.append(cur)
         cur, ops = None, {}
     for l in open(path, errors="ignore"):
         if not l.startswith("REMARK 350"): continue
@@ -108,30 +192,37 @@ def parse_remark350(path):
     flush()
     return asm
 
-def load_atoms(path):
-    out = []
-    for l in open(path, errors="ignore"):
-        if not l.startswith(("ATOM", "HETATM")): continue
-        rs = l[22:26].strip()
-        if rs.lstrip("-").isdigit():
-            out.append((l[21], int(rs), l[17:20].strip(), l.rstrip("\n")))
-    return out
+# PDB 사슬 ID 는 한 글자다. 사본에는 안 쓰인 글자를 하나 새로 배정한다.
+_POOL = list("BCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
+def _newid(used, want):
+    if want not in used: return want
+    for c in _POOL:
+        if c not in used: return c
+    return want
 
-def xform(atoms, chains, R, t, tag):
-    out = []
-    for c, r, n, l in atoms:
-        if chains and c not in chains: continue
-        x, y, z = float(l[30:38]), float(l[38:46]), float(l[46:54])
-        nx = R[0][0]*x+R[0][1]*y+R[0][2]*z+t[0]
-        ny = R[1][0]*x+R[1][1]*y+R[1][2]*z+t[1]
-        nz = R[2][0]*x+R[2][1]*y+R[2][2]*z+t[2]
-        out.append((f"{c}{tag}", r, n, l[:30] + f"{nx:8.3f}{ny:8.3f}{nz:8.3f}" + l[54:]))
+def xform(atoms, chains, R, t, tag, used=None):
+    """tag 가 비면 원본 사슬 ID 를 쓰고, 아니면 새 한 글자를 배정한다."""
+    used = used if used is not None else set()
+    out, remap = [], {}
+    for ch, rs, rn, an, (x, y, z), raw in atoms:
+        if chains and ch not in chains: continue
+        if tag:
+            if ch not in remap:
+                remap[ch] = _newid(used, ch)
+                used.add(remap[ch])
+            cid = remap[ch]
+        else:
+            cid = ch; used.add(cid)
+        nx = R[0][0]*x + R[0][1]*y + R[0][2]*z + t[0]
+        ny = R[1][0]*x + R[1][1]*y + R[1][2]*z + t[1]
+        nz = R[2][0]*x + R[2][1]*y + R[2][2]*z + t[2]
+        nl = (raw[:21] + cid + raw[22:30] + f"{nx:8.3f}{ny:8.3f}{nz:8.3f}" + raw[54:]) if raw else None
+        out.append((cid, rs, rn, an, (nx, ny, nz), nl))
     return out
 
 def sg(atoms, ch, rs):
-    for c, r, _n, l in atoms:
-        if c == ch and r == rs and l[12:16].strip() == "SG":
-            return (float(l[30:38]), float(l[38:46]), float(l[46:54]))
+    for c, r, _rn, an, xyz, _l in atoms:
+        if c == ch and r == rs and an == "SG": return xyz
     return None
 
 def center(atoms, ch):
@@ -139,51 +230,115 @@ def center(atoms, ch):
     if any(x is None for x in p): return None
     return tuple(sum(v[i] for v in p)/2 for i in range(3))
 
-A0  = load_atoms(COOC1_PDB)
-ASM = parse_remark350(COOC1_PDB)
-print("=" * 96); print(f"### {COOC1_PDB.name} 의 조립체 {len(ASM)}개"); print("=" * 96)
+def metals(atoms):
+    return [(c, r, rn, xyz) for c, r, rn, an, xyz, _l in atoms
+            if rn.upper() in METALS and an.upper() == rn.upper()]
 
-BUILT = {}
-for a in ASM:
-    parts = []
-    for i, (R, t) in enumerate(a["ops"], 1):
-        ident = (all(abs(R[x][y]-(1 if x == y else 0)) < 1e-6 for x in range(3) for y in range(3))
-                 and all(abs(v) < 1e-6 for v in t))
-        parts += xform(A0, a["chains"], R, t, "" if ident else str(i))
-    BUILT[a["id"]] = parts
-    chs = sorted({c for c, _r, _n, _l in parts})
-    print(f"\n  조립체 {a['id']}  적용 사슬 {a['chains']}  연산 {len(a['ops'])}개")
-    print(f"    생성 사슬: {chs}")
-    cen = {c: center(parts, c) for c in chs}
-    cen = {k: v for k, v in cen.items() if v}
-    if len(cen) < 2:
-        print(f"    Cys{RES[0]}/{RES[1]} 자리를 가진 사슬이 {len(cen)}개 — 자리를 못 만든다")
-        continue
-    for x, y in itertools.combinations(sorted(cen), 2):
-        d = math.dist(cen[x], cen[y])
-        print(f"    {x}–{y}  자리 중심 {d:6.2f} Å" + ("   ← 한 자리" if d <= SITE_MAX else ""))
+# =============================================================================
+# 0. 손에 있는 3kji 좌표 파일을 전부 세운다
+# =============================================================================
+CAND = sorted({p for p in COOC1_PDB.parent.glob("*3kji*")} |
+              {p for p in COOC1_PDB.parent.glob("*3KJI*")})
+print("=" * 96); print("### 0. 3kji 좌표 파일"); print("=" * 96)
+if not CAND:
+    print(f"  {COOC1_PDB.parent} 에 3kji 파일이 없다.")
+for p in CAND:
+    print(f"  {p.name:28s} {p.stat().st_size/1024:8.1f} KB")
 
-print("\n" + "=" * 96); print("### 판정"); print("=" * 96)
-GOOD = []
-for aid, parts in BUILT.items():
-    chs = sorted({c for c, _r, _n, _l in parts})
-    cen = {c: center(parts, c) for c in chs}
-    cen = {k: v for k, v in cen.items() if v}
-    for x, y in itertools.combinations(sorted(cen), 2):
-        d = math.dist(cen[x], cen[y])
-        if d <= SITE_MAX: GOOD.append((aid, x, y, d))
-if GOOD:
-    for aid, x, y, d in sorted(GOOD, key=lambda v: v[3]):
-        print(f"  조립체 {aid}: {x}+{y} 가 {d:.2f} Å 로 한 자리를 만든다")
-    aid, x, y, d = sorted(GOOD, key=lambda v: v[3])[0]
-    print(f"\n  ★ 템플릿은 조립체 {aid} 의 {x}+{y} 로 만든다.")
-    print("    S2 이후 셀에서 이 조합을 쓸 것. (앞서 만든 merged.pdb 가 이것과")
-    print("    같은 조합이면 결과는 그대로다 — 우연히 맞았던 것이고, 이제 근거가 있다.)")
-    ASM_BEST = (aid, x, y, BUILT[aid])
+# 기준 부호 — 정상 L-단백질에서 런타임에 구한다
+REF = None
+if Y19_COOC_FILE.exists():
+    REF = hand_sign(load_atoms(Y19_COOC_FILE))
+    print(f"\n  기준 부호(정상 L-단백질, {Y19_COOC_FILE.name}): {REF:+d}")
 else:
-    print("  어느 조립체에서도 두 Cys 쌍이 한 자리를 이루지 않는다.")
-    print("  잔기 번호나 구조 형태를 다시 봐야 한다.")
-    ASM_BEST = None
+    print("\n  ⚠ 기준 구조가 없다. 부호만 출력하고 판정은 보류한다.")
+
+print("\n" + "=" * 96); print("### 1. 파일별 손대칭"); print("=" * 96)
+FILE_OK = {}
+for p in CAND:
+    at = load_atoms(p)
+    pos, neg, mean = handedness(at)
+    s = hand_sign(at)
+    if REF is None:   v = "?"
+    elif s == REF:    v = "정상 (L)"
+    else:             v = "★ 거울상 (D) — 쓰면 안 된다"
+    FILE_OK[p] = (REF is not None and s == REF)
+    print(f"  {p.name:28s} 원자 {len(at):6d}  부호 +{pos}/-{neg}  평균 {mean:+8.3f}  → {v}")
+
+USE = [p for p in CAND if FILE_OK.get(p)]
+if REF is None: USE = CAND
+if not USE:
+    print("\n  ⚠ 쓸 수 있는 파일이 없다. 아래는 건너뛴다.")
+SRC = USE[0] if USE else None
+if SRC and SRC != COOC1_PDB:
+    print(f"\n  ★ COOC1_PDB 를 {SRC.name} 로 바꿔야 한다 (현재: {COOC1_PDB.name})")
+
+# =============================================================================
+# 2. 조립체를 만든다 — 연산자 검증을 걸고
+# =============================================================================
+BUILT, ASM_BEST = {}, None
+if SRC:
+    COOC1_PDB = SRC
+    A0  = load_atoms(SRC)
+    ASM = parse_remark350(SRC)
+    print("\n" + "=" * 96); print(f"### 2. {SRC.name} 의 조립체 {len(ASM)}개"); print("=" * 96)
+    for a in ASM:
+        print(f"\n  조립체 {a['id']}  적용 사슬 {a['chains']}  연산 {len(a['ops'])}개")
+        parts, used = [], set()
+        for i, (R, t, ok, d, e) in enumerate(a["ops"], 1):
+            if not ok:
+                print(f"    연산 {i}: det {d:+.4f}  직교오차 {e:.2e}  → 회전이 아니다. 버린다")
+                continue
+            ident = (all(abs(R[x][y]-(1 if x == y else 0)) < 1e-6 for x in range(3) for y in range(3))
+                     and all(abs(v) < 1e-6 for v in t))
+            parts += xform(A0, a["chains"], R, t, "" if ident else str(i), used)
+        if not parts:
+            print("    쓸 수 있는 연산이 없다."); continue
+        BUILT[a["id"]] = parts
+        chs = sorted({c for c, *_ in parts})
+        ps, ns, _m = handedness(parts)
+        print(f"    생성 사슬: {chs}   조립 후 부호 +{ps}/-{ns}")
+        cen = {c: center(parts, c) for c in chs}; cen = {k: v for k, v in cen.items() if v}
+        for x, y in itertools.combinations(sorted(cen), 2):
+            dd = math.dist(cen[x], cen[y])
+            print(f"    {x}–{y}  자리 중심 {dd:6.2f} Å" + ("   ← 한 자리" if dd <= SITE_MAX else ""))
+        for c, r, rn, xyz in metals(parts):
+            near = [(f"{cc}{rr}", math.dist(xyz, x2))
+                    for cc, rr, _rn2, an2, x2, _l2 in parts if an2 == "SG"]
+            near = sorted(near, key=lambda v: v[1])[:6]
+            near = [(k, d2) for k, d2 in near if d2 < 3.2]
+            print(f"    금속 {rn} {c}{r}: SG {len(near)}개가 " +
+                  ", ".join(f"{k} {d2:.2f}Å" for k, d2 in near) if near
+                  else f"    금속 {rn} {c}{r}: 3.2 Å 안에 SG 없음")
+
+# =============================================================================
+# 3. 판정 — 금속을 Cys 네 개가 무는 조립체
+# =============================================================================
+print("\n" + "=" * 96); print("### 3. 판정"); print("=" * 96)
+SCORE = []
+for aid, parts in BUILT.items():
+    best = 0
+    for c, r, rn, xyz in metals(parts):
+        n = sum(1 for cc, rr, _rn, an, x2, _l in parts
+                if an == "SG" and math.dist(xyz, x2) < 3.2)
+        best = max(best, n)
+    chs = sorted({c for c, *_ in parts})
+    cen = {c: center(parts, c) for c in chs}; cen = {k: v for k, v in cen.items() if v}
+    pair = sorted(((x, y, math.dist(cen[x], cen[y]))
+                   for x, y in itertools.combinations(sorted(cen), 2)), key=lambda v: v[2])
+    SCORE.append((aid, best, pair[0] if pair else None))
+    if pair: print(f"  조립체 {aid}: 금속 배위 Cys {best}개, 가장 가까운 자리쌍 {pair[0][0]}+{pair[0][1]} {pair[0][2]:.2f} Å")
+    else:    print(f"  조립체 {aid}: 금속 배위 Cys {best}개, Cys 자리쌍 없음")
+
+win = [s for s in SCORE if s[1] >= 4] or [s for s in SCORE if s[2] and s[2][2] <= SITE_MAX]
+if win:
+    aid, nc, pair = sorted(win, key=lambda s: (-s[1], s[2][2] if s[2] else 9e9))[0]
+    print(f"\n  ★ 템플릿은 {COOC1_PDB.name} 의 조립체 {aid}, 사슬 {pair[0]}+{pair[1]} 로 만든다.")
+    print(f"    근거: 금속을 Cys {nc}개가 3.2 Å 안에서 물고, 두 Cys 쌍 중심이 {pair[2]:.2f} Å 이다.")
+    print("    CELL 55 의 cooc1_ni_site_merged.pdb 를 이 조합으로 다시 만들어야 한다.")
+    ASM_BEST = (aid, pair[0], pair[1], BUILT[aid])
+else:
+    print("\n  어느 조립체도 Ni 자리를 만들지 않는다. 파일과 잔기 번호를 다시 봐야 한다.")
 ```
 
 ---
