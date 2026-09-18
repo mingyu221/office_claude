@@ -11,17 +11,40 @@
 
 ### 표 8-1 (메인)
 
-| BL21(DE3) | TM | MG1655 | TM | Name |
-|---|---|---|---|---|
-| QJZ13931.1 | 0.708 | P37655 | 0.731 | BcsQ |
-| QJZ11902.1 | 0.638 | P0AEZ3 | 0.631 | MinD |
-| QJZ12661.1 | 0.638 | P0AF08 | 0.563 | ApbC / Mrp |
-| QJZ11745.1 | 0.605 | P38134 | 0.573 | Etk |
-| QJZ12620.1 | 0.562 | P76387 | 0.560 | Wzc |
-| QJZ14620.1 | 0.554 | P39337 | 0.550 | YjgM |
-| QJZ12684.1 | 0.518 | P33368 | 0.545 | YohF |
-| QJZ12719.1 | 0.502 | P33030 | *0.414* | YeiR |
-| **8** | | **7** | | |
+| BL21(DE3) | TM | qcov | MG1655 | TM | qcov | Name |
+|---|---|---|---|---|---|---|
+| QJZ13931.1 | 0.708 | 0.98 | P37655 | 0.731 | 0.96 | BcsQ |
+| QJZ11902.1 | 0.638 | 0.98 | P0AEZ3 | 0.631 | 0.98 | MinD |
+| QJZ12661.1 | 0.638 | 0.99 | P0AF08 | 0.563 | 0.99 | ApbC / Mrp |
+| QJZ11745.1 | 0.605 | 0.74 | P38134 | 0.573 | 0.74 | Etk |
+| QJZ12620.1 | 0.562 | 0.74 | P76387 | 0.560 | 0.74 | Wzc |
+| QJZ14620.1 | 0.554 | *0.16* ⚠ | P39337 | 0.550 | *0.16* ⚠ | YjgM |
+| QJZ12684.1 | 0.518 | *0.21* ⚠ | P33368 | 0.545 | *0.21* ⚠ | YohF |
+| QJZ12719.1 | 0.502 | 0.85 | P33030 | *0.414* | — | YeiR |
+| **8** | | | **7** | | | |
+
+**양성대조군** — Y19 `AHZ96930.1` CooC: TM **0.837**, qcov **0.99**, tcov **1.00**, fident **0.385**
+
+### ★ qcov 를 넣으면 두 줄이 빠진다
+
+`YjgM` 과 `YohF` 는 qcov **0.16 / 0.21** — ChCooC1 의 16~21% 조각만 정렬됐다.
+TM 0.55 는 그 조각 안에서의 값이다. **실질은 BL21 6 / MG1655 5**, BcsQ 를 슈도진으로
+빼면 **5 / 4** 다.
+
+`Etk` 와 `Wzc` 의 tcov 0.23 은 정상이다 — 두 단백질이 720 잔기가 넘어 ChCooC1 이
+ATPase 도메인에만 맞는다. **qcov 0.74 로 질의 쪽은 대부분 설명된다.**
+
+### 진짜 차이는 TM 이 아니라 fident 에 있다
+
+| | fident |
+|---|---|
+| Y19 CooC (양성대조군) | **0.385** |
+| BL21 · MG1655 히트 전부 | **0.13 ~ 0.20** |
+
+대조군만 서열 동일성이 두 배다. 나머지는 **P-loop ATPase 초과(ParA/MinD 계열)를
+공유할 뿐**이고, CooC 도 같은 초과에 속하니 당연한 결과다.
+
+> **BL21 의 히트들은 CooC 와 같은 초과에 속할 뿐, CooC 직교체가 아니다.**
 
 - TM = Foldseek `alntmscore`, `--exact-tmscore 1`. **ipTM 이 아니다** — 두 구조의 겹침을 재는 측정값이다 (0–1).
 - TM ≥ 0.5 = 같은 폴드 (Xu & Zhang 2010). 위 표는 **TM ≥ 0.5** 컷.
@@ -148,16 +171,32 @@
 | Boltz 등급 | **A** (Cys4), Ni–S 2.23–2.40 Å |
 | 배위 잔기 | Cys99 · Cys102 · Cys112 · Cys115 (**전부 후보 단백질 자신의 사슬**) |
 | MG1655 | 프로테옴·게놈 **둘 다 부재** |
-| 폴드 | **HypA-like** (Foldseek) |
+| ~~폴드~~ | ~~HypA-like~~ → **철회**. 아래 참조 |
 
 ### 근거는 셋이다
 
 1. Cys4 Ni 배위 자리 (Boltz, 2.23 Å)
-2. HypA 폴드 — HypA 는 [NiFe] 하이드로게나제 성숙의 **Ni 삽입 인자**다
-3. MG1655 부재 — 실험 전제(BL21 lysate 만 활성 회복)와 방향이 같다
+2. MG1655 부재 — 프로테옴·게놈 둘 다. 실험 전제(BL21 lysate 만 활성 회복)와 방향이 같다
+3. 기능 미상 + 133 aa 소형 — grade A 중 유일하게 기능이 안 알려진 것
 
-> **넷이 아니다.** Cys4 재질의(folddisco) 히트는 그 질의의 템플릿이 이 단백질 자신이라
-> 자기참조다. 근거에서 뺐다.
+> **Cys4 재질의(folddisco) 히트는 근거가 아니다.** 그 질의의 템플릿이 이 단백질 자신이라
+> 자기참조다.
+
+### ★ HypA 폴드 주장은 철회한다
+
+`.m8` 을 열어 확인한 결과다.
+
+| 비교 | TM | **qcov** |
+|---|---|---|
+| 진짜 HypA 파랄로그끼리 (`QJZ13171.1` ↔ `QJZ13424.1`) | **0.900** | **0.98 / 1.00** |
+| QJZ12568.1 → `QJZ13424.1` (HypA #2) | 0.664 | **0.26** |
+| QJZ12568.1 → `QJZ13171.1` (HypA #1) | **0.499** | 0.38 |
+
+진짜 파랄로그는 전체가 정렬되는데(qcov ≈ 1.0) 이 후보는 **26% 만** 정렬되고,
+두 HypA 중 **하나에는 0.5 컷 아래**다. **직교체도 파랄로그도 아니다.**
+
+> **TM 은 qcov 없이 읽으면 안 된다.** qcov 가 낮으면 TM 이 높아도
+> "일부 도메인만 공유"라는 뜻이다.
 
 ### 그림 캡션
 
@@ -204,3 +243,79 @@ ChCODH2 로 넘기기 전의 적재 상태로 읽힌다. 다만 이것은 **도�
 | 9 | UniProt P37655 / P0DP92, PMID 24097954 |
 | 11 | `result/table/ni_site_grade_named.csv` |
 | 12 | `boltz_results_inputs/predictions/ChCODH2_WT__QJZ12568.1/ChCODH2_WT__QJZ12568.1_model_0.cif` |
+
+---
+
+## 슬라이드 14 (마지막) — 종합: 후보와 근거
+
+**제목**: Candidates for expression and in vitro Ni incorporation
+
+### 선정 원칙
+
+> Candidates were selected for **plausibility of metal handling**, not for strain
+> specificity. Gene presence/absence did not account for the phenotype, and the
+> in vitro reconstitution assay asks whether a protein inserts Ni — not whether
+> MG1655 also carries the gene.
+
+**근거 축은 둘만 썼다** — 재현성이 확인된 측정 두 가지.
+Folddisco `metal_rmsd` · Boltz Ni 배위 도너 등급.
+
+### 후보 표
+
+| # | Protein | Ni-site grade | Evidence axis | Status |
+|---|---|---|---|---|
+| **1** | **QJZ12568.1** hypothetical HO396_09830, 133 aa | **A** — Cys₄, 2.23 Å | Ni coordination **+ absent from MG1655** (proteome and genome) **+ uncharacterised** | **Primary** |
+| 2 | QJZ13396.1 **GspE**, 497 aa | **A** — Cys₄, 2.29 Å | Ni coordination; site quality highest | Established Zn enzyme |
+| 3 | QJZ13803.1 **HslO** (Hsp33) | **A** — Cys₄, 2.18 Å | Ni coordination | **No strain discrimination** — Y19 ortholog identical |
+| 4 | QJZ10977.1 **ErpA** | — | Folddisco `metal_rmsd` **0.133**; Fe-S insertion, C-cluster is [NiFe₄S₄] | **No Ni captured** |
+| 5 | QJZ11953.1 **YchJ** / QJZ12547.1 **YecA** | — | Folddisco `metal_rmsd` 0.155 / **0.123** (lowest); SEC-C / zinc-ribbon, uncharacterised | **No Ni captured** |
+| — | QJZ12719.1 **YeiR** | D | **Only protein recovered by both axes**; COG0523 / G3E family (HypB, UreG, CooC) | **Reserve** — MG1655 carries a near-identical copy (fident 0.996) |
+
+**1–3 은 Boltz 축, 4–5 는 Folddisco 축이다.** 4·5 는 Ni 이 후보 쪽 사슬로 오지 않아
+등급이 없다. 근거의 종류가 다르다는 것을 표에서 읽을 수 있어야 한다.
+
+### 제외한 것
+
+| | 이유 |
+|---|---|
+| Tgt · HisB · GmhB | grade B 로 자리는 좋으나 **세 균주가 모두 동일하게 잡는다**. 기능이 확립된 효소라 사전확률이 낮다 |
+| QJZ14223.1 LysR | MG1655 최고 히트가 파랄로그 (fident 0.345) |
+| QJZ13177.1 | pLDDT 56.7 |
+
+### 무엇이 음성이었는지 — 먼저 말할 것
+
+| 축 | 결과 |
+|---|---|
+| Foldseek (ChCooC1 질의) | 상위 히트가 **양쪽 균주에 모두 존재** → 균주 변별 불가 |
+| Boltz Ni 배위 등급 | HisB · Tgt · PhnP 가 **세 균주 모두** 동일 등급 → 균주 변별 불가 |
+| `ipTM` | 대조군 CooC1 = 0.300 인데 후보들이 그 위 → **폐기** |
+| `ligand_ipTM` | 계면 배치 0/348, 사슬 길이와 ρ = −0.807 → **폐기** |
+| RF2-PPI | 대조군이 떨어짐 → 순위를 근거로 못 씀 |
+
+> 여섯 축 중 다섯이 0 이었다. **후보는 통과한 축에서만 나왔다.**
+
+### 다음 단계
+
+```
+1.  PPI-based search
+    326 BL21-specific / low-similarity proteins × ChCODH2
+    → interface quality, then Ni coordination on the candidate chain
+
+2.  Homodimeric re-prediction
+    G3E chaperones (YeiR, HypB, UreG, CooC) share the metal site across
+    the dimer interface; monomeric folding penalised them
+    → positive control: ChCooC1 itself. If it does not grade at the
+      interface, the track is not used
+
+3.  Wet-lab
+    Express candidates 1-5, in vitro Ni incorporation into apo-ChCODH2
+```
+
+### 발표에서 반드시 같이 말할 것
+
+1. **예측 구조다.** 결정구조가 아니다. Boltz 가 Ni 위치를 정했다
+2. **Cys₄ 는 Zn 과 Ni 이 공유하는 자리다.** 자리의 종류만으로 두 금속을 못 가른다 —
+   grade A 셋 중 둘이 알려진 아연 단백질인 것이 그 증거다
+3. **입구가 좁았다.** Track B 326개만 도킹했다. identical + high-similarity **3,746개(91%)는 평가받지 못했다**
+4. **단량체로 접었다.** 이량체 계면 자리를 갖는 단백질에 불리했다
+5. `O / −` 는 **도킹·채점 여부**이지 균주 내 유무가 아니다
