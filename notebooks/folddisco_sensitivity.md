@@ -312,33 +312,87 @@ if SRC:
                   else f"    금속 {rn} {c}{r}: 3.2 Å 안에 SG 없음")
 
 # =============================================================================
-# 3. 판정 — 금속을 Cys 네 개가 무는 조립체
+# 3. 판정 + 질의 기하 실측 + 템플릿 생성
+#
+#   조립체가 둘 다 4-Cys 자리를 만들면 그것은 '서로 다른 조립체' 가 아니라
+#   비대칭단위에 독립적으로 들어 있는 **같은 이량체의 두 사본**이다. 하나를
+#   고르는 것보다 둘 다 만들어 질의해 보는 것이 낫다 — 두 사본이 다른 결과를
+#   내면 그 차이가 이 질의의 취약성을 그대로 재 준다.
+#
+#   그리고 folddisco 질의가 실제로 쓰는 수는 '자리 중심 거리' 가 아니라
+#   **한 사슬 안의 SG–SG 거리**다. Y19 CooC 의 8.16 Å 과 비교할 값이 이것이다.
 # =============================================================================
-print("\n" + "=" * 96); print("### 3. 판정"); print("=" * 96)
-SCORE = []
-for aid, parts in BUILT.items():
-    best = 0
-    for c, r, rn, xyz in metals(parts):
-        n = sum(1 for cc, rr, _rn, an, x2, _l in parts
-                if an == "SG" and math.dist(xyz, x2) < 3.2)
-        best = max(best, n)
-    chs = sorted({c for c, *_ in parts})
-    cen = {c: center(parts, c) for c in chs}; cen = {k: v for k, v in cen.items() if v}
-    pair = sorted(((x, y, math.dist(cen[x], cen[y]))
-                   for x, y in itertools.combinations(sorted(cen), 2)), key=lambda v: v[2])
-    SCORE.append((aid, best, pair[0] if pair else None))
-    if pair: print(f"  조립체 {aid}: 금속 배위 Cys {best}개, 가장 가까운 자리쌍 {pair[0][0]}+{pair[0][1]} {pair[0][2]:.2f} Å")
-    else:    print(f"  조립체 {aid}: 금속 배위 Cys {best}개, Cys 자리쌍 없음")
+print("\n" + "=" * 96); print("### 3. 질의 기하 실측"); print("=" * 96)
 
-win = [s for s in SCORE if s[1] >= 4] or [s for s in SCORE if s[2] and s[2][2] <= SITE_MAX]
-if win:
-    aid, nc, pair = sorted(win, key=lambda s: (-s[1], s[2][2] if s[2] else 9e9))[0]
-    print(f"\n  ★ 템플릿은 {COOC1_PDB.name} 의 조립체 {aid}, 사슬 {pair[0]}+{pair[1]} 로 만든다.")
-    print(f"    근거: 금속을 Cys {nc}개가 3.2 Å 안에서 물고, 두 Cys 쌍 중심이 {pair[2]:.2f} Å 이다.")
-    print("    CELL 55 의 cooc1_ni_site_merged.pdb 를 이 조합으로 다시 만들어야 한다.")
-    ASM_BEST = (aid, pair[0], pair[1], BUILT[aid])
+def intra_sg(parts, ch):
+    a, b = sg(parts, ch, RES[0]), sg(parts, ch, RES[1])
+    return math.dist(a, b) if (a and b) else None
+
+QUAL = []
+for aid, parts in BUILT.items():
+    chs = sorted({c for c, *_ in parts})
+    mets = metals(parts)
+    print(f"\n  조립체 {aid}  사슬 {chs}")
+    for ch in chs:
+        d = intra_sg(parts, ch)
+        if d: print(f"    {ch}: SG{RES[0]}–SG{RES[1]} = {d:6.2f} Å   ← 질의 기하 그 자체")
+    best_n, devs = 0, []
+    for c, r, rn, xyz in mets:
+        ds = sorted(math.dist(xyz, x2) for cc, rr, _rn, an, x2, _l in parts
+                    if an == "SG" and math.dist(xyz, x2) < 3.2)
+        if len(ds) >= best_n:
+            best_n = max(best_n, len(ds))
+        if len(ds) >= 4:
+            devs += [abs(v - 2.30) for v in ds[:4]]   # Zn–S 통상 2.3 Å
+        print(f"    금속 {rn} {c}{r}: 배위 {len(ds)}개  " +
+              " ".join(f"{v:.2f}" for v in ds))
+    reg = (sum(devs)/len(devs)) if devs else 9.99
+    if best_n >= 4:
+        QUAL.append((aid, best_n, reg))
+        print(f"    → 4-Cys 자리 성립. 배위 규칙성(|d−2.30| 평균) {reg:.3f} Å")
+
+print("\n" + "=" * 96); print("### 4. 템플릿"); print("=" * 96)
+if not QUAL:
+    print("  4-Cys 자리를 만드는 조립체가 없다. 잔기 번호를 다시 볼 것.")
+    ASM_BEST = None
 else:
-    print("\n  어느 조립체도 Ni 자리를 만들지 않는다. 파일과 잔기 번호를 다시 봐야 한다.")
+    if len({a for a, _n, _r in QUAL}) > 1:
+        print("  조립체가 둘 다 4-Cys 자리를 만든다 → 같은 이량체의 독립 사본 두 개다.")
+        print("  하나를 고르지 않고 둘 다 템플릿으로 만든다. 질의 결과가 갈리면")
+        print("  그 차이가 이 질의의 좌표 오차 민감도다.")
+    MERGED = {}
+    for aid, n, reg in sorted(QUAL, key=lambda v: v[2]):
+        parts = BUILT[aid]
+        cen = {c: center(parts, c) for c in sorted({c for c, *_ in parts})}
+        cen = {k: v for k, v in cen.items() if v}
+        x, y = sorted(((p_, q_, math.dist(cen[p_], cen[q_]))
+                       for p_, q_ in itertools.combinations(sorted(cen), 2)),
+                      key=lambda v: v[2])[0][:2]
+        # 두 사슬의 Cys 를 좌표 그대로 두고 한 사슬로 합친다 (2번째는 +1000 번)
+        out = OUT/f"cooc1_merged_asm{aid}.pdb"
+        with open(out, "w") as fh:
+            for cid, rs, rn, an, xyz, raw in parts:
+                if cid not in (x, y) or rs not in RES or not raw: continue
+                nrs = rs if cid == x else rs + 1000
+                fh.write(raw[:21] + "A" + f"{nrs:4d}" + raw[26:] + "\n")
+            fh.write("END\n")
+        qres = f"A{RES[0]},A{RES[1]},A{RES[0]+1000},A{RES[1]+1000}"
+        MERGED[aid] = (out, qres, x, y, reg)
+        print(f"\n  조립체 {aid}: {x}+{y}  →  {out.name}")
+        print(f"    질의 잔기 {qres}   배위 규칙성 {reg:.3f} Å")
+    aid = sorted(QUAL, key=lambda v: v[2])[0][0]
+    out, qres, x, y, reg = MERGED[aid]
+    print(f"\n  ★ 배위가 가장 규칙적인 것은 조립체 {aid} ({x}+{y}, {reg:.3f} Å) 다.")
+    print("    CELL 55 는 두 파일 모두로 돌리고 결과를 나란히 볼 것.")
+    ASM_BEST = (aid, x, y, BUILT[aid])
+
+# 금속 이름을 한 번 더 못박는다 — 이 자리는 결정에서 무엇이 들어 있었는가
+_M = sorted({rn for parts in BUILT.values() for _c, _r, rn, _x in metals(parts)})
+print(f"\n  ※ 이 구조의 자리에 들어 있는 금속: {', '.join(_M) if _M else '없음'}")
+if _M and "NI" not in _M:
+    print("    Ni 가 아니다. '실측 Ni 자리' 가 아니라 '실측 금속 자리' 로 읽어야 한다.")
+    print("    CooC1 의 CXC 는 Ni 과 Zn 을 모두 잡고, 결정에는 Zn 이 들어간 것이다.")
+    print("    Cys4 티올레이트 자리라는 성격은 같지만, 거리는 Zn–S 기준이다.")
 ```
 
 ---
@@ -495,6 +549,116 @@ else:
     print("    이 모델의 Cys 배치가 질의 기하와 다르다는 뜻이다.")
     print("    그 경우 Folddisco 로는 이 자리를 찾을 수 없고, Foldseek(폴드) 축으로")
     print("    가는 것이 맞다. 실제로 대조군을 통과한 것은 Foldseek 뿐이었다.")
+```
+
+---
+
+## CELL S3b — 스윕의 두 가지 이상을 확인한다
+
+```python
+# =============================================================================
+# CELL S3b | S3 결과에 답이 안 되는 것이 둘 있다. folddisco 를 다시 돌리지 않고
+#            이미 저장된 sweep_*.tsv 와 질의 한 번으로 확인한다.
+#
+#   (1) 왜 넓혔는데 줄었나.
+#       49 → 52 → 48 → 48. 넓힌 검색이 좁은 검색의 상위집합이 아니다.
+#       상위집합이 아니면 "넓혀도 안 나온다" 를 상한선으로 쓸 수 없다.
+#       개수 말고 집합을 직접 비교한다. 빠진 단백질이 무엇인지 이름을 본다.
+#
+#   (2) folddisco 는 손대칭을 구분하는가.
+#       거울상은 원자 간 거리를 전부 보존하고 각도의 크기도 보존한다.
+#       뒤집히는 것은 부호뿐이다. folddisco 의 서술자가 부호 없는 각도만 쓰면
+#       거울상 질의와 정상 질의가 **같은 결과**를 낸다.
+#       그러면 3kji 파일 출처 문제는 folddisco 축에 영향이 없다 (대신
+#       folddisco 로는 D 형과 L 형을 구분할 수 없다는 뜻이 된다).
+#       추측하지 말고 질의를 뒤집어 돌려서 답을 받는다.
+# =============================================================================
+
+# ---- (1) 스윕이 중첩 집합인가 -------------------------------------------------
+print("=" * 96); print("### (1) 넓힌 검색이 좁은 검색을 포함하는가"); print("=" * 96)
+
+def hits(d_, a_, s):
+    o = OUT/f"sweep_d{d_}_a{a_}_{s}.tsv"
+    if not (o.exists() and o.stat().st_size): return None
+    dd = pd.read_csv(o, sep="\t"); dd.columns = [c.strip().lstrip("#") for c in dd.columns]
+    return set(dd.tid.astype(str))
+
+LOST = []
+for s in ["BL21", "MG1655", "Y19"]:
+    print(f"\n  [{s}]")
+    prev = None
+    for d_, a_ in GRID:
+        h = hits(d_, a_, s)
+        if h is None:
+            print(f"    d={d_:<4} a={a_:<5} 파일 없음"); continue
+        if prev is None:
+            print(f"    d={d_:<4} a={a_:<5} {len(h):4d}개  (기준)")
+        else:
+            gone, new_ = prev[1] - h, h - prev[1]
+            flag = "" if not gone else f"   ★ {len(gone)}개 사라짐"
+            print(f"    d={d_:<4} a={a_:<5} {len(h):4d}개  "
+                  f"+{len(new_)} / -{len(gone)}{flag}")
+            for g in sorted(gone)[:6]:
+                LOST.append({"strain": s, "from": f"{prev[0]}", "to": f"d{d_}/a{a_}", "tid": g})
+                print(f"        사라짐: {g}")
+        prev = (f"d{d_}/a{a_}", h)
+
+print("\n  읽는 법")
+print("    -0 이면 중첩 집합이다 → S3 의 '안 나온다' 는 상한선으로 읽어도 된다.")
+print("    사라진 것이 있으면 folddisco 의 점수·IDF 컷이 허용폭에 따라 움직인다는")
+print("    뜻이다. 그러면 특정 단백질이 넓힌 설정에서 오히려 탈락할 수 있고,")
+print("    Y19 CooC 의 부재도 '못 찾는다' 가 아니라 '밀려났다' 일 수 있다.")
+
+# ---- (2) folddisco 가 거울상을 구분하는가 -------------------------------------
+print("\n" + "=" * 96); print("### (2) folddisco 의 손대칭 감도"); print("=" * 96)
+
+MIR = OUT/"3kji_mirror.pdb"
+with open(COOC1_PDB, errors="ignore") as fh, open(MIR, "w") as out:
+    for l in fh:
+        if l.startswith(("ATOM", "HETATM")) and len(l) > 54:
+            z = float(l[46:54])
+            out.write(l[:46] + f"{-z:8.3f}" + l[54:])
+        else:
+            out.write(l)
+print(f"  거울상 질의 생성: {MIR.name}  (z 부호만 반전 — 거리는 전부 보존된다)")
+
+D0, A0_ = 0.5, 5.0
+CMP = {}
+for tag, qp in [("정상", COOC1_PDB), ("거울상", MIR)]:
+    o = OUT/f"chir_{tag}_BL21.tsv"
+    if not (o.exists() and o.stat().st_size):
+        sh(f'"{FD}" query -p "{qp}" -q {QRES} -i "{IDX["BL21"]}" -t {THREADS} '
+           f'-d {D0} -a {A0_} --per-structure --header --sort-by idf --top 20000 -o "{o}"',
+           quiet=True)
+    if o.exists() and o.stat().st_size:
+        dd = pd.read_csv(o, sep="\t"); dd.columns = [c.strip().lstrip("#") for c in dd.columns]
+        CMP[tag] = set(dd.tid.astype(str))
+    else:
+        CMP[tag] = set()
+    print(f"  {tag:6s} 질의 → BL21 히트 {len(CMP[tag])}개")
+
+a, b = CMP.get("정상", set()), CMP.get("거울상", set())
+inter = a & b
+jac = len(inter) / max(len(a | b), 1)
+print(f"\n  교집합 {len(inter)}  자카드 {jac:.3f}")
+print("\n" + "=" * 96); print("### 판정"); print("=" * 96)
+if not a and not b:
+    print("  둘 다 0 이다. 질의가 안 돌았다 — 경로와 잔기 번호를 볼 것.")
+elif jac > 0.95:
+    print("  ★ folddisco 는 손대칭을 구분하지 못한다.")
+    print("    거울상 질의가 정상 질의와 같은 결과를 낸다. 부호 없는 거리·각도만")
+    print("    쓴다는 뜻이다.")
+    print("    → 좋은 소식: 3kji 파일을 어느 쪽으로 썼든 Track C 결과는 안 바뀐다.")
+    print("      S3 의 스윕도, 80개 히트 목록도 파일 출처와 무관하다.")
+    print("    → 나쁜 소식: folddisco 는 D 형과 L 형을 구분해 주지 않는다.")
+    print("      기하가 맞는 것처럼 보이는 히트에 거울상 배치가 섞여 들어올 수 있다.")
+    print("      배위 등급(Boltz) 축이 그걸 거르는 유일한 단계다.")
+else:
+    print("  ★ folddisco 는 손대칭에 민감하다.")
+    print(f"    거울상 질의가 완전히 다른 결과를 낸다 (자카드 {jac:.3f}).")
+    print("    → S0 으로 COOC1_PDB 를 확정하기 전까지 Track C 결과 전부가 미정이다.")
+    print("      S3 의 스윕, 80개 히트, Y19 CooC 부재 판정 모두 여기 걸린다.")
+    print("      S0 을 먼저 돌리고 이 노트북을 처음부터 다시 돌릴 것.")
 ```
 
 ---
