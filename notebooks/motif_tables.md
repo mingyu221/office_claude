@@ -338,8 +338,31 @@ print(hot[["strain", "struct", "protein", "ntp", "evidence", "ATP모티프",
            "nres", "plddt", "desc"]].to_string(index=False) if len(hot) else "  없음")
 T3.to_csv(TBL/"motif_metal_ntp.csv", index=False, encoding="utf-8-sig")
 
+# ---------------------------- 요약 한 장 ----------------------------
+# 네 열이 한 줄에 있어야 비교가 된다. 다만 앞의 셋과 마지막은 성격이 다르다 —
+# metal·ATP·metal+ATP 는 구조 기하의 측정이고, metal+NTP 는 주석 문자열이다.
+print("\n" + "=" * 96); print("### 요약"); print("=" * 96)
+S = []
+for s in STRAINS:
+    m = set(DATA[("metal", s)].index); a = set(DATA[("atp", s)].index)
+    ntp = set(T3[(T3.strain == s) & (T3.ntp != "해당 없음")].struct)
+    S.append({"균주": s, "metal motif": len(m), "ATP motif": len(a),
+              "metal + ATP motif": len(m & a), "metal + NTP motif": len(ntp),
+              "셋 다": len(m & a & ntp)})
+SUM = pd.DataFrame(S)
+print(SUM.to_string(index=False))
+SUM.to_csv(TBL/"motif_summary.csv", index=False, encoding="utf-8-sig")
+print("\n  metal + ATP  : 구조 기하 둘이 한 단백질에서 겹친 것 — 측정이다.")
+print("  metal + NTP  : 이름에 ATPase/GTPase/kinase/ligase 가 있는 것 — 주석이다.")
+print("                 표3 의 evidence 열로 어느 단어에 걸렸는지 확인할 것.")
+print("  셋 다        : 위 둘을 모두 만족. 여기가 가장 좁은 교집합이다.")
+_ntp_break = pd.crosstab(T3[T3.ntp != "해당 없음"].ntp, T3[T3.ntp != "해당 없음"].strain)
+print("\n  NTP 내역")
+print(_ntp_break.to_string())
+
 print("\n### 저장")
-for f in ["motif_counts_by_strain.csv", "motif_metal_and_atp.csv", "motif_metal_ntp.csv"]:
+for f in ["motif_counts_by_strain.csv", "motif_metal_and_atp.csv",
+          "motif_metal_ntp.csv", "motif_summary.csv"]:
     print(f"  {TBL/f}")
 print("\n### 읽는 법")
 print("  표3 의 분류는 주석 문자열에서 나온 것이지 측정이 아니다.")
