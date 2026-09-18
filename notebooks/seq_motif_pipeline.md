@@ -285,7 +285,7 @@ print(f"\n저장: {TBL/'seqmotif_strain_verdict.csv'}")
 #     앞에서 프로파지를 배제할 근거는 없지만, 사전확률이 낮다는 것은
 #     표에 남아 있어야 한다.
 # =============================================================================
-GAP        = 6      # 이 간격 안이면 같은 블록으로 본다
+GAP        = 20     # QJZ 번호 단위. 프로파지 한 덩어리가 이 정도로 벌어져 있다
 MIN_BLOCK  = 3      # 이만큼 모이면 삽입 구간으로 의심
 MOBILE_KW  = ["phage", "terminase", "tail", "capsid", "portal", "integrase",
               "transposase", "recombinase", "antitermination", "excisionase",
@@ -293,8 +293,11 @@ MOBILE_KW  = ["phage", "terminase", "tail", "capsid", "portal", "integrase",
               "IS[0-9]", "insertion sequence", "prophage", "tRNA-", "repressor"]
 
 def locus_num(pid, desc):
-    m = re.search(r"HO396_(\d+)", str(desc))
-    if m: return int(m.group(1))
+    """QJZ 번호만 쓴다.
+       HO396 로커스 태그는 어노테이션이 있는 단백질 설명에만 붙어 있어서,
+       HO396 우선으로 두면 어떤 행은 HO396(예: 3665), 어떤 행은 QJZ(예: 11292)가
+       되어 **두 좌표계가 한 축에 섞인다.** 실제로 그렇게 나왔다.
+       QJZ 는 모든 행에 있고 HO396 과 순서가 일치하므로 이쪽으로 통일한다."""
     m = re.search(r"QJZ(\d+)", str(pid))
     return int(m.group(1)) if m else None
 
@@ -317,6 +320,7 @@ MOBILE = set()
 for b in blocks:
     ids = [x.protein for x in b]
     lo, hi = int(b[0]["locnum"]), int(b[-1]["locnum"])
+    lo, hi = f"QJZ{lo}", f"QJZ{hi}"
     kw = sum(1 for x in b if re.search("|".join(MOBILE_KW), str(x.desc), re.I))
     tag = ""
     if len(b) >= MIN_BLOCK:
@@ -610,7 +614,11 @@ print(f"    그중 폴드 정보 있음 {int(CL.fold.notna().sum())}, "
 def dscore(r):
     p, why = 0, []
     if pd.notna(r.fold):                        p += 3; why.append(f"+3 {r.fold}폴드")
-    if r.mg_status == "프로테옴 없음":            p += 3; why.append("+3 MG없음")
+    if r.mg_status == "프로테옴 없음":
+        if r.get("mobile", 0) == 1:
+            why.append("(MG없음-프로파지)")     # Q5 와 같은 규칙. 가산 없음
+        else:
+            p += 3; why.append("+3 MG없음")
     elif r.mg_status == "모티프 달라짐":          p += 1; why.append("+1 모티프차이")
     if (r.n_CXC or 0) > 0:                      p += 2; why.append("+2 CXC")   # CooC1 과 동일 배치
     elif (r.n_CXXC or 0) > 0:                   p += 1; why.append("+1 CXXC")
@@ -658,8 +666,14 @@ if CRY.exists():
             {"ligand":  {"id": "L", "ccd": "NI"}}]}, sort_keys=False))
     print(f"\n  ★ 양성대조군 CTRL-CooC1_dimer.yaml ({len(cs)} 잔기 ×2)")
     # 음성대조군 — CXC 가 아예 없는 비슷한 길이의 단백질
+    # Cys 쌍이 없을 뿐 아니라 Cys 자체가 거의 없어야 음성대조군이다.
+    # 앞서 고른 것은 Cys4 창이 5 여서 Ni 을 잡아도 이상하지 않았다.
     neg = D[(D.n_CXC.fillna(0) == 0) & (D.n_CXXC.fillna(0) == 0) &
-            (D.len.between(len(cs) - 40, len(cs) + 40))].head(1)
+            (D.n_cys.fillna(9) <= 1) &
+            (D.len.between(len(cs) - 60, len(cs) + 60))].head(1)
+    if not len(neg):
+        neg = D[(D.n_cys.fillna(9) <= 1)].sort_values(
+            "len", key=lambda s: (s - len(cs)).abs()).head(1)
     if len(neg):
         ns = SEQ["BL21"][neg.iloc[0].protein]
         (DIN/f"NEG-{neg.iloc[0].protein}_dimer.yaml").write_text(_y.safe_dump(
