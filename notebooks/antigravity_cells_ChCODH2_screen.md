@@ -7861,7 +7861,10 @@ if _ni.exists() and _xwp.exists():
         else:
             print("  결과 없음")
         CTRL_OK = n_self > 0
-        print(f"\n  => 양성 대조 {'통과' if CTRL_OK else '실패'}")
+        print(f"\n  => 자기-자신 대조 {'통과' if CTRL_OK else '실패'}")
+        print("  ※ 이것은 질의 구조와 인덱스 안의 구조가 같은 파일인 경우다.")
+        print("    covered-node 4 가 작동한다는 것까지만 말해주고, 직교체를 찾을 수")
+        print("    있는지는 말해주지 않는다. 그건 아래 (4c) 에서 본다.")
         if not CTRL_OK:
             print("  자기 자신조차 4잔기로 못 찾는다. 이 인덱스에서 --covered-node 는")
             print("  3 이상을 만족할 수 없다 (쌍 단위 인덱스로 보인다).")
@@ -7869,11 +7872,52 @@ if _ni.exists() and _xwp.exists():
 else:
     print("  ni_site_grade.csv / crosswalk 이 없어 대조를 못 돌린다 — 판정 보류.")
 
+# ---------- (4c) 음성 대조 — 직교체를 찾기는 하는가 ----------
+# 이 질의는 Ch CooC1 에서 뽑았다. 그렇다면 CooC1 의 직교체는 반드시 찾아야 한다.
+# Y19 에 CooC 가 있다 (AHZ96930.1, Foldseek tm 0.938). 그것이 metal 목록에
+# 있는가? 없다면 이 질의의 직교체 민감도가 0 이라는 뜻이고, 그러면 위의 0 은
+# '그런 단백질이 없다'가 아니라 '있어도 못 찾는다'가 된다.
+print("\n" + "=" * 100); print("### (4c) 음성 대조 — Y19 의 CooC 를 찾는가"); print("=" * 100)
+ORTH_OK = None
+Y19_COOC = "AHZ96930.1"
+_mt = DIR["folddisco"]/"metal_run01_Y19.tsv"
+_at = DIR["folddisco"]/"atp_run02_Y19.tsv"
+_xwp = DIR["table"]/"id_crosswalk_struct_to_genbank.csv"
+if _mt.exists() and _xwp.exists():
+    _x = pd.read_csv(_xwp).dropna(subset=["protein"])
+    _stems = [Path(str(k)).stem for k, v in _x.set_index("tid")["protein"].to_dict().items()
+              if Y19_COOC in str(v)]
+    if not _stems:
+        print(f"  {Y19_COOC} 의 구조를 crosswalk 에서 못 찾았다 — 판정 보류")
+    else:
+        print(f"  {Y19_COOC} 구조: {_stems[0]}")
+        for tag, f in [("metal", _mt), ("ATP", _at)]:
+            if not f.exists(): print(f"  {tag:6s} 파일 없음"); continue
+            txt = f.read_text(errors="ignore")
+            hit = any(st in txt for st in _stems)
+            print(f"  {tag:6s} 히트 {'O' if hit else 'X'}")
+            if tag == "metal": ORTH_OK = hit
+        if ORTH_OK is False:
+            print("\n  ★ 금속 질의가 자기 원본의 직교체를 못 찾는다.")
+            print("    Walker A 질의는 같은 단백질을 찾고, Foldseek 은 tm 0.938 로 찾는다.")
+            print("    구조는 인덱스에 있다. 못 찾는 것은 질의 쪽 문제다 —")
+            print("    -d 0.5 / -a 5.0 이 직교체 사이의 발산을 못 견딘다.")
+            print("    따라서 covered-node 4 의 0 을 생물학적 음성으로 읽을 수 없다.")
+else:
+    print("  metal_run01_Y19.tsv 또는 crosswalk 이 없어 대조 불가 — 판정 보류")
+
 # ---------- (5) 판정 ----------
 print("\n" + "=" * 100); print("### (5) 판정"); print("=" * 100)
 _n4 = int(R.loc[4].sum()) if 4 in R.index else 0
-if CTRL_OK is False:
-    print("  양성 대조가 실패했으므로 covered-node 4 의 0 은 해석하지 않는다.")
+if ORTH_OK is False:
+    print("  직교체 대조가 실패했다 — 이 질의는 Y19 의 CooC 도 못 찾는다.")
+    print("  그러므로 covered-node 4 의 0 은 '그런 단백질이 없다'가 아니라")
+    print("  '이 질의로는 있어도 못 찾는다' 이다. 음성으로 읽지 않는다.")
+    print("\n  다음에 할 것: 질의의 발산 허용폭을 넓힌다 (-d 1.0~2.0, -a 10~20).")
+    print("    Y19 CooC 가 잡히기 시작하는 지점이 이 방법의 실제 민감도다.")
+    print("    그 지점을 찾기 전에는 어떤 0 도 음성이 아니다.")
+elif CTRL_OK is False:
+    print("  자기-자신 대조가 실패했으므로 covered-node 4 의 0 은 해석하지 않는다.")
     print("  대신 covered-node 2 의 목록(19/15/21)이 이 질의로 얻은 전부다.")
     print("  그 목록은 원 질의(29/21/30)의 부분집합에 가깝다 — 기하가 정확해진 만큼")
     print("  좁아진 것이고, 여기에는 의미가 있다. 이쪽을 후보로 볼 것.")
@@ -7902,10 +7946,10 @@ elif _n4 > 0:
         B.to_csv(DIR["table"]/"cooc1_merged_hits.csv", index=False, encoding="utf-8-sig")
         print(f"\n  저장: {DIR['table']/'cooc1_merged_hits.csv'}")
 else:
-    print("  covered-node 4 에서 0. 양성 대조가 통과했으므로 도구는 정상이고,")
+    print("  covered-node 4 에서 0. 자기-자신 대조와 직교체 대조를 모두 통과했고")
     print("  기하도 검증됐다 (SG–SG 2.86~3.56 Å).")
     print("  ★ 세 균주 어디에도 이 자리를 한 사슬로 재현하는 단백질이 없다.")
-    print("    확실한 음성이고, 그 자체로 결과다.")
+    print("    이때에만 음성이라고 말할 수 있다.")
 print("\n  비교:")
 print("    CELL 29   원 질의 A112,A114 (2잔기)        BL21 29 / Y19 30 / MG1655 21")
 print("    CELL 29f  ASU 의 A·B (사슬 간 60 Å — 틀린 질의)  covered-node 4 에서 0")

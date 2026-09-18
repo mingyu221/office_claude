@@ -125,7 +125,9 @@ assert all(DATA[(k, s)] is not None for k in SETS for s in STRAINS), "TSV 누락
 NPROT = {}
 for s in STRAINS:
     d = STRUCT.get(s)
-    NPROT[s] = (len(list(d.glob("AF-*"))) if d and d.is_dir()
+    # AF-* 만 세면 cf_* (ColabFold) 가 빠진다 — BL21 250, Y19 21 개.
+    NPROT[s] = (len([f for f in d.iterdir() if f.name.startswith(("AF-", "cf_"))])
+                if d and d.is_dir()
                 else sum(1 for l in open(FAA[s], errors="ignore") if l.startswith(">")))
 print("\n  프로테옴:", {s: NPROT[s] for s in STRAINS})
 
@@ -282,7 +284,9 @@ print(T2.drop(columns=["atp_res"]).to_string(index=False))
 print("\n  균주별: " + " / ".join(f"{s} {int((T2.strain == s).sum())}" for s in STRAINS))
 
 # 길이와 잔기 번호가 세 균주에서 같으면 직교체다 — 균주를 가르지 못한다
-T2["_key"] = T2.nres.astype(str) + "|" + T2.metal_res.astype(str).str.split(":").str[0]
+# 길이를 키에 넣으면 직교체가 한두 잔기 차이로 안 묶인다 (190 vs 188).
+# 잔기 시그니처만 쓴다 — 같은 자리를 같은 번호로 맞춘 것이 직교체다.
+T2["_key"] = T2.metal_res.astype(str).str.split(":").str[0]
 g = T2.groupby("_key").strain.nunique()
 shared = set(g[g >= 3].index)
 print(f"\n  세 균주 공통 묶음 {len(shared)}개 (길이·잔기 동일) — 균주 구분 불가")
