@@ -1350,6 +1350,27 @@ T2.to_csv(SLIDE/"table2_bl21_family_vs_MG1655.csv", index=False, encoding="utf-8
 print("\n" + "=" * 100); print("### 표2 — 이름 붙임"); print("=" * 100)
 print(T2.to_string(index=False))
 
+# ---- 표3 에도 이름을 붙인다 (GenBank 쪽과 UniProt 쪽을 나란히) ----
+_t3p = SLIDE/"table3_family_correspondence.csv"
+if _t3p.exists():
+    X3n = pd.read_csv(_t3p)
+    if "BL21" in X3n.columns:
+        X3n["BL21_name"] = [label(a) for a in X3n.BL21]
+    for s in ["MG1655", "Y19"]:
+        if f"{s}_hit" in X3n.columns:
+            X3n[f"{s}_name"] = [label(a) for a in X3n[f"{s}_hit"]]
+    # 이름이 바로 옆에 오도록 열 순서를 짠다
+    ORD3 = ["BL21", "BL21_name", "TM_to_CooC1"]
+    for s in ["MG1655", "Y19"]:
+        ORD3 += [f"{s}_hit", f"{s}_name", f"{s}_TM"]
+    X3n = X3n[[c for c in ORD3 if c in X3n.columns] +
+              [c for c in X3n.columns if c not in ORD3]]
+    X3n.to_csv(_t3p, index=False, encoding="utf-8-sig")
+    print("\n" + "=" * 110); print("### 표3 — 이름 붙임"); print("=" * 110)
+    print(X3n.to_string(index=False))
+    print("\n  같은 행의 BL21_name / MG1655_name / Y19_name 이 같은 단백질을 가리키면")
+    print("  GenBank 와 UniProt 로 ID 체계가 달라도 같은 것임이 이름으로 확인된다.")
+
 # ---- 표1 의 Top hit 에도 ----
 T1p = SLIDE/"table1_fold_counts.csv"
 if T1p.exists():
