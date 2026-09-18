@@ -267,6 +267,84 @@ print(f"\n저장: {TBL/'seqmotif_strain_verdict.csv'}")
 
 ---
 
+## CELL Q3b — "MG1655 에 없다" 가 프로파지인지 가른다
+
+```python
+# =============================================================================
+# CELL Q3b | 유전체 위치를 본다
+#
+#   BL21(DE3) 는 T7 발현을 위해 **λDE3 프로파지를 삽입해 만든 균주**다.
+#   그 구간의 유전자는 MG1655 에 없는 것이 당연하다 — 균주 제작의 산물이지
+#   생물학적 신호가 아니다. 다른 프로파지·이동성 구간도 마찬가지다.
+#
+#   구분하는 법: 진짜 단독 유전자는 유전체에 흩어져 있고, 삽입 구간은
+#   **번호가 연속으로 뭉쳐 있다.** QJZ 번호와 HO396 로커스 태그가 유전체
+#   순서를 따르므로 그대로 쓸 수 있다.
+#
+#   ※ 이 셀은 후보를 **버리지 않는다.** 표시만 한다. lysate 차이라는 관찰
+#     앞에서 프로파지를 배제할 근거는 없지만, 사전확률이 낮다는 것은
+#     표에 남아 있어야 한다.
+# =============================================================================
+GAP        = 6      # 이 간격 안이면 같은 블록으로 본다
+MIN_BLOCK  = 3      # 이만큼 모이면 삽입 구간으로 의심
+MOBILE_KW  = ["phage", "terminase", "tail", "capsid", "portal", "integrase",
+              "transposase", "recombinase", "antitermination", "excisionase",
+              "holin", "lysozyme", "baseplate", "host specificity", "Bet",
+              "IS[0-9]", "insertion sequence", "prophage", "tRNA-", "repressor"]
+
+def locus_num(pid, desc):
+    m = re.search(r"HO396_(\d+)", str(desc))
+    if m: return int(m.group(1))
+    m = re.search(r"QJZ(\d+)", str(pid))
+    return int(m.group(1)) if m else None
+
+ONLY = V[V.bl21_only == 1].merge(CAND[["protein", "desc", "len"]], on="protein", how="left")
+ONLY["loc"] = [locus_num(p, d) for p, d in zip(ONLY.protein, ONLY.desc)]
+ONLY = ONLY.dropna(subset=["loc"]).sort_values("loc")
+
+blocks, cur = [], []
+for _, r in ONLY.iterrows():
+    if cur and r.loc - cur[-1]["loc"] <= GAP: cur.append(r)
+    else:
+        if cur: blocks.append(cur)
+        cur = [r]
+if cur: blocks.append(cur)
+
+print("=" * 100); print("### MG1655 에 없는 것들의 유전체 배치"); print("=" * 100)
+MOBILE = set()
+for b in blocks:
+    ids = [x.protein for x in b]
+    lo, hi = int(b[0].loc), int(b[-1].loc)
+    kw = sum(1 for x in b if re.search("|".join(MOBILE_KW), str(x.desc), re.I))
+    tag = ""
+    if len(b) >= MIN_BLOCK:
+        tag = "  ★ 삽입 구간 의심"; MOBILE |= set(ids)
+    elif kw:
+        tag = "  (이동성 어노테이션)"; MOBILE |= set(ids)
+    print(f"\n  {lo}–{hi}  {len(b)}개  이동성 어노테이션 {kw}/{len(b)}{tag}")
+    for x in b:
+        mark = "·" if re.search("|".join(MOBILE_KW), str(x.desc), re.I) else " "
+        print(f"    {mark} {x.protein:12s} {int(x.len):5d}aa  {str(x.desc)[:66]}")
+
+print("\n" + "=" * 100); print("### 판정"); print("=" * 100)
+print(f"  MG1655 에 없는 것 {len(ONLY)}개")
+print(f"    삽입 구간/이동성   {len(MOBILE)}개  ← 균주 제작·프로파지의 산물일 가능성")
+print(f"    흩어진 단독 유전자 {len(ONLY) - len(MOBILE)}개  ← 이쪽이 관심 대상")
+solo = ONLY[~ONLY.protein.isin(MOBILE)]
+if len(solo):
+    print("\n  단독:")
+    print(solo[["protein", "len", "desc"]].to_string(index=False))
+
+V["mobile"] = V.protein.isin(MOBILE).astype(int)
+V.to_csv(TBL/"seqmotif_strain_verdict.csv", index=False, encoding="utf-8-sig")
+print(f"\n  V 에 mobile 열 추가 후 재저장: {TBL/'seqmotif_strain_verdict.csv'}")
+print("\n  ※ BL21(DE3) 는 λDE3 를 삽입해 만든 균주다. 그 구간이 MG1655 에 없는 것은")
+print("    설계상 그런 것이지 발견이 아니다. 발표에서는 두 줄을 나눠 쓸 것 —")
+print("    '균주 특이 33개 중 프로파지 N개를 빼면 M개' 가 정직한 문장이다.")
+```
+
+---
+
 ## CELL Q4 — 폴드와 좌표 신뢰도를 붙인다
 
 ```python
@@ -408,8 +486,11 @@ print(f"\n저장: {TBL/'seqmotif_fold_plddt.csv'}")
 # =============================================================================
 TOPN = 400
 
-D = CAND.merge(V[["protein", "mg_status", "bl21_only"]], on="protein", how="left") \
-        .merge(Q, on="protein", how="left")
+_vc = ["protein", "mg_status", "bl21_only"] + (["mobile"] if "mobile" in V.columns else [])
+D = CAND.merge(V[_vc], on="protein", how="left").merge(Q, on="protein", how="left")
+if "mobile" not in D.columns:
+    D["mobile"] = 0
+    print("  ⚠ mobile 열이 없다 — CELL Q3b 를 먼저 돌리면 프로파지가 구분된다")
 
 def _pos(v):
     """NaN 안전. float('nan') 은 파이썬에서 참이라 `x or 0` 로 쓰면
@@ -424,7 +505,13 @@ def score(r):
         # Cys4 후보와 배타로 둔다. 둘 다 주면 같은 증거를 두 번 세는 것이고,
         # 그 결과 CooC 형(단량체당 CXC 하나)이 3점 뒤처져 상위에서 밀린다.
         p += 2; why.append("+2 CXC/CXXC")
-    if r.bl21_only == 1:                       p += 3; why.append("+3 MG없음")
+    if r.bl21_only == 1:
+        if r.get("mobile", 0) == 1:
+            # 프로파지/삽입 구간은 MG1655 에 없는 것이 설계상 당연하다.
+            # 버리지는 않되 '균주 특이' 가산은 주지 않는다.
+            p += 0; why.append("(MG없음-프로파지)")
+        else:
+            p += 3; why.append("+3 MG없음")
     elif r.mg_status == "모티프 달라짐":        p += 1; why.append("+1 모티프차이")
     if pd.notna(r.fold):                       p += 2; why.append(f"+2 {r.fold}폴드")
     if pd.notna(r.len) and r.len <= 250:       p += 1; why.append("+1 소형")
@@ -441,7 +528,8 @@ print("=" * 96); print("### 점수 분포"); print("=" * 96)
 print(D.score.value_counts().sort_index(ascending=False).to_string())
 print("\n" + "=" * 96); print(f"### 상위 25"); print("=" * 96)
 print(D.head(25)[["protein", "len", "score", "cys4_win", "n_CXC", "n_CXXC",
-                  "fold", "fold_tm", "plddt_motif", "mg_status", "desc"]].to_string(index=False))
+                  "fold", "fold_tm", "plddt_motif", "mg_status", "mobile",
+                  "desc"]].to_string(index=False))
 print(f"\n저장: {TBL/'seqmotif_ranked.csv'}")
 
 # ---- 눈금 맞추기: 기존 채점의 grade A/B 를 반드시 포함시킨다 ----
