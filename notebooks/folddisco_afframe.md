@@ -588,3 +588,169 @@ print("\n  ※ BL21 에는 tm 0.9 이상의 진짜 CooC 이 없다는 것이 이
 print("    (최고 ApbC tm 0.690). 그러니 여기서 O 가 나와도 'CooC 자체' 가 아니라")
 print("    'CooC 과에 드는 BL21 단백질' 이다. 그 구분을 표에 유지할 것.")
 ```
+
+---
+
+## CELL F8 — 그 자리가 루프인가, 그리고 AF 는 그걸 아는가
+
+```python
+# =============================================================================
+# CELL F8 | 왜 예측 모델끼리도 기하가 안 맞는지 — 자리 자체를 본다
+#
+#   구조를 열어 보면 Cys112/114 가 루프에 있다. 루프면 예측 좌표의 신뢰도가
+#   낮고, 낮으면 직교체끼리 5.30 Å 과 8.16 Å 으로 갈리는 것이 설명된다.
+#   AlphaFold 는 자기 확신도를 잔기마다 pLDDT 로 적어 둔다 (B-factor 칸).
+#   추측하지 말고 그 값을 읽는다.
+#
+#   보는 것 셋.
+#     (1) 질의 잔기의 pLDDT — 단백질 평균보다 낮은가
+#     (2) 이차구조 대략 판정 — 나선/가닥/루프 (CA 간격으로 낸 근사)
+#     (3) folddisco 금속 히트 80개의 매칭 잔기도 같은 경향인가
+#         그렇다면 그 목록 전체가 '좌표를 못 믿는 자리' 위에 세워진 것이다
+# =============================================================================
+def load_bf(path):
+    """{(chain, resseq): (resname, {atom: (xyz, bfactor)})}"""
+    path = Path(path); out = {}
+    if path.suffix.lower() in (".cif", ".mmcif"):
+        hdr, started = [], False
+        for l in open(path, errors="ignore"):
+            if l.startswith("_atom_site."):
+                hdr.append(l.strip().split(".")[1]); started = True; continue
+            if started and l[:4] in ("ATOM", "HETA"):
+                c = {n: i for i, n in enumerate(hdr)}
+                f = l.split()
+                try:
+                    ch = f[c.get("auth_asym_id", c.get("label_asym_id"))]
+                    rs = f[c.get("auth_seq_id", c.get("label_seq_id"))]
+                    rn = f[c["label_comp_id"]]; an = f[c["label_atom_id"]].strip('"')
+                    xyz = tuple(float(f[c[k]]) for k in ("Cartn_x", "Cartn_y", "Cartn_z"))
+                    bf = float(f[c["B_iso_or_equiv"]])
+                except Exception:
+                    continue
+                if not rs.lstrip("-").isdigit(): continue
+                out.setdefault((ch, int(rs)), (rn, {}))[1][an] = (xyz, bf)
+            elif started and l.startswith("#") and out:
+                break
+        return out
+    for l in open(path, errors="ignore"):
+        if not l.startswith(("ATOM", "HETATM")): continue
+        rs = l[22:26].strip()
+        if not rs.lstrip("-").isdigit(): continue
+        try: bf = float(l[60:66])
+        except ValueError: bf = float("nan")
+        xyz = (float(l[30:38]), float(l[38:46]), float(l[46:54]))
+        out.setdefault((l[21], int(rs)), (l[17:20].strip(), {}))[1][l[12:16].strip()] = (xyz, bf)
+    return out
+
+def ss_proxy(atoms, ch, rs):
+    """CA(i)–CA(i+4) 거리로 낸 이차구조 근사. 나선 ~6.2 Å, 가닥 ~12–13 Å.
+       DSSP 가 아니다. 대략만 본다."""
+    def ca(k):
+        v = atoms.get((ch, k))
+        return v[1]["CA"][0] if v and "CA" in v[1] else None
+    a, b = ca(rs - 2), ca(rs + 2)
+    if not (a and b): return "?"
+    d = math.dist(a, b)
+    return "나선" if d < 7.0 else "가닥" if d > 11.0 else "루프/전이"
+
+def plddt_of(atoms, ch, rs):
+    v = atoms.get((ch, rs))
+    if not v: return None
+    return sum(b for _x, b in v[1].values()) / len(v[1])
+
+def mean_plddt(atoms):
+    vals = [b for _k, (_rn, at) in atoms.items() for _x, b in at.values()]
+    return sum(vals) / len(vals) if vals else None
+
+print("=" * 96); print("### (1) 질의 잔기의 pLDDT"); print("=" * 96)
+TARGETS = [("Ch CooC1 (AF)", AF_PATH, None, AF_RES),
+           ("Y19 CooC (AF)", Y19_FILE, None, None)]
+for name, path, ch, res in TARGETS:
+    if not Path(path).exists(): print(f"  {name}: 파일 없음"); continue
+    A = load_bf(path)
+    chains = sorted({c for c, _r in A})
+    ch = ch or chains[0]
+    mp = mean_plddt(A)
+    if res is None:   # Y19 은 CXC 를 직접 찾는다
+        cys = sorted(r for (c, r), (rn, _a) in A.items() if c == ch and rn == "CYS")
+        res = next(((a, b) for a, b in itertools.combinations(cys, 2) if b - a == 2), tuple(cys[:2]))
+    print(f"\n  [{name}]  사슬 {ch}  전체 평균 pLDDT {mp:.1f}")
+    for r in res:
+        p, s = plddt_of(A, ch, r), ss_proxy(A, ch, r)
+        if p is None: print(f"    {r}: 없음"); continue
+        print(f"    {r:4d}  pLDDT {p:5.1f}  (평균 대비 {p-mp:+5.1f})   이차구조 {s}")
+    lo = [r for r in res if (plddt_of(A, ch, r) or 100) < mp]
+    print(f"    → 질의 잔기가 평균보다 낮은 것 {len(lo)}/{len(res)}")
+
+print("\n" + "=" * 96); print("### (2) 주변 구간의 pLDDT 프로파일"); print("=" * 96)
+A = load_bf(AF_PATH)
+ch = sorted({c for c, _r in A})[0]
+lo, hi = min(AF_RES) - 10, max(AF_RES) + 10
+mp = mean_plddt(A)
+for r in range(lo, hi + 1):
+    p = plddt_of(A, ch, r)
+    if p is None: continue
+    rn = A[(ch, r)][0]
+    bar = "█" * int(p / 4)
+    mark = "  ←질의" if r in AF_RES else ""
+    print(f"    {r:4d} {rn:3s} {p:5.1f} {bar}{mark}")
+print(f"    (전체 평균 {mp:.1f})")
+
+print("\n" + "=" * 96); print("### (3) folddisco 금속 히트 80개의 매칭 잔기는?"); print("=" * 96)
+MM = TBL/"folddisco_metal_motif_detail.csv"
+if not MM.exists():
+    print(f"  {MM.name} 없음 — 건너뛴다")
+else:
+    d = pd.read_csv(MM)
+    col = next((c for c in ["matching_residues", "residues", "match"] if c in d.columns), None)
+    tcol = next((c for c in ["tid", "target", "path"] if c in d.columns), None)
+    if not col or not tcol:
+        print(f"  필요한 열이 없다: {list(d.columns)[:12]}")
+    else:
+        rows, miss = [], 0
+        for _, r in d.head(200).iterrows():
+            p = Path(str(r[tcol]))
+            if not p.exists():
+                cand = [s/p.name for s in STRUCT.values() if (s/p.name).exists()]
+                if not cand: miss += 1; continue
+                p = cand[0]
+            try: At = load_bf(p)
+            except Exception: miss += 1; continue
+            chs = sorted({c for c, _x in At})
+            if not chs: continue
+            c0, mpp = chs[0], mean_plddt(At)
+            for tok in re.findall(r"([A-Za-z])(\d+)", str(r[col]).split(":")[0]):
+                rr = int(tok[1])
+                pv = plddt_of(At, c0, rr)
+                if pv is None: continue
+                rows.append({"protein": p.stem, "res": rr, "plddt": round(pv, 1),
+                             "mean": round(mpp, 1), "delta": round(pv - mpp, 1),
+                             "ss": ss_proxy(At, c0, rr)})
+        if not rows:
+            print(f"  구조 파일을 못 찾았다 (미해결 {miss}건)")
+        else:
+            P = pd.DataFrame(rows)
+            P.to_csv(TBL/"motif_residue_plddt.csv", index=False, encoding="utf-8-sig")
+            print(f"  매칭 잔기 {len(P)}개 / 단백질 {P.protein.nunique()}개  (구조 미해결 {miss})")
+            print(f"\n  매칭 잔기 pLDDT 평균 {P.plddt.mean():.1f}  "
+                  f"vs 단백질 평균 {P['mean'].mean():.1f}  "
+                  f"(차이 {P.delta.mean():+.1f})")
+            print(f"  평균보다 낮은 잔기 {int((P.delta < 0).sum())}/{len(P)} "
+                  f"({(P.delta < 0).mean()*100:.0f}%)")
+            print(f"  pLDDT 70 미만 {int((P.plddt < 70).sum())} "
+                  f"({(P.plddt < 70).mean()*100:.0f}%)")
+            print("\n  이차구조 분포:")
+            print(P.ss.value_counts().to_string())
+            print(f"\n저장: {TBL/'motif_residue_plddt.csv'}")
+
+print("\n" + "=" * 96); print("### 판정"); print("=" * 96)
+print("  질의 잔기가 루프이고 pLDDT 가 낮으면 —")
+print("    그 좌표는 AlphaFold 스스로도 확신하지 않는 값이다. 직교체끼리")
+print("    5.30 Å 과 8.16 Å 으로 갈린 것은 종간 차이가 아니라 예측 불확실성이다.")
+print("    허용폭을 아무리 넓혀도 '노이즈를 노이즈에 맞추는' 일이 된다.")
+print("\n  그러면 이 자리는 구조 모티프 검색의 대상이 아니다. 남는 길 둘:")
+print("    (a) 서열 모티프 — CXC / CXXC 패턴을 프로테옴 전체에서 직접 찾는다.")
+print("        좌표를 안 쓰므로 pLDDT 와 무관하다. GPU 도 필요 없다")
+print("    (b) 폴드 — Foldseek. 루프 하나가 흔들려도 폴드 판정은 버틴다.")
+print("        F6 에서 두 프레임의 자카드가 높게 나온 것이 그 증거다")
+```
