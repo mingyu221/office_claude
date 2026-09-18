@@ -2726,12 +2726,12 @@ for d in _SETS:
                      "A_배위": chains.get("A", 0), "B_배위": chains.get("B", 0),
                      "A_최단": round(mind.get("A", float("nan")), 2),
                      "B_최단": round(mind.get("B", float("nan")), 2),
-                     "계면": chains.get("A", 0) > 0 and chains.get("B", 0) > 0})
+                     "bridged": chains.get("A", 0) > 0 and chains.get("B", 0) > 0})
 
 NIP = pd.DataFrame(rows)
 def _where(r):
     if r.get("Ni") == "없음": return "Ni 없음"
-    if r.get("계면"):          return "계면 (양쪽 사슬에 배위)"
+    if r.get("bridged"):          return "계면 (양쪽 사슬에 배위)"
     if r.get("A_배위", 0) > 0: return "ChCODH2 쪽만"
     if r.get("B_배위", 0) > 0: return "후보 쪽만"
     return f"어디에도 안 붙음 (>{CUT_NI}A)"
@@ -6810,7 +6810,7 @@ if bl:
 # 공유하는 것들이 통째로 들어온다. 버리지는 않되 무게를 달리 준다.
 G["self_hit"] = (G.member == G.via_seed).astype(int)     # seed 자기 자신
 G["tier"] = pd.cut(G.tm, bins=[0, 0.70, 0.90, 9],
-                   labels=["폴드만", "주변", "핵심"])
+                   labels=["TM 0.5-0.7", "TM 0.7-0.9", "TM>=0.9"])
 print("\n--- 등급 분포 ---")
 print(pd.crosstab(G.tier, G.strain).to_string())
 print("  핵심(tm>=0.90) 만 G3E/SIMIBI 과로 읽는다. 폴드만(0.5~0.7) 은 P-loop 위상")
@@ -6870,11 +6870,11 @@ if "bl21_only" in G:
     print(hot[COLS].to_string(index=False) if len(hot) else "  없음")
     print("\n  이 과의 공통 업무가 '금속을 다른 단백질에 넣는 것' 이다.")
     print("  다만 아래 둘을 먼저 통과해야 후보다.")
-    print("   1) tier 가 '핵심' 인가 — 0.5~0.7 은 P-loop 위상 공유일 뿐이다")
+    print("   1) tier 가 'TM>=0.9' 인가 — 0.5~0.7 은 P-loop 위상 공유일 뿐이다")
     print("   2) genome_MG1655 가 '게놈에도 없음' 인가 — 프로테옴 부재는")
     print("      어노테이션 누락·pseudogene 과 구분되지 않는다")
     if "genome_MG1655" in hot:
-        real = hot[(hot.tier == "핵심") & (hot.genome_MG1655 == "게놈에도 없음")]
+        real = hot[(hot.tier == "TM>=0.9") & (hot.genome_MG1655 == "게놈에도 없음")]
         print(f"\n  둘 다 통과: {len(real)}개")
         if len(real): print(real[COLS].to_string(index=False))
 print(f"\n저장: {DIR['table']/'g3e_family_sweep.csv'}")
@@ -7532,7 +7532,7 @@ for nm in PATH["both"]:
     if bp is not None: lt_ = LEN["bait"][bp]
     if lb_ is not None and lb_ <= L_MAX:      ASSIGN[nm] = ("both", PATH["both"][nm], lb_)
     elif lt_ is not None and lt_ <= L_MAX:    ASSIGN[nm] = ("bait", bp, lt_)
-    else:                                     ASSIGN[nm] = ("미채점", None, lb_ or lt_)
+    else:                                     ASSIGN[nm] = ("unscored", None, lb_ or lt_)
 _c = pd.Series([v[0] for v in ASSIGN.values()]).value_counts()
 print(f"\n--- 위상 배정 ({len(ASSIGN)}쌍) ---")
 for k_, v_ in _c.items(): print(f"  {k_:8s} {v_:5d}쌍  ({100*v_/len(ASSIGN):4.1f}%)")

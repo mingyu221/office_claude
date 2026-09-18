@@ -1078,7 +1078,8 @@ for pidv in BLM:
         #   {균주}_in_family  그 히트가 그 균주의 CooC 과 목록(TM>=0.5)에도 있는가
         rec[f"{s}_hit"] = pid(top.prot)
         rec[f"{s}_TM"]  = round(float(top.alntmscore), 3)
-        rec[f"{s}_in_family"] = "O" if pid(top.prot) in MEMSET.get(s, set()) else "."
+        # in_family 열은 뺐다. X 가 CooC1 과 TM>=0.5 이고 Y 가 X 와 거의 같으면
+        # Y 도 자동으로 0.5 를 넘는다 — 구성상 거의 항상 O 라 정보가 없다.
     rows.append(rec)
 
 X = pd.DataFrame(rows)
@@ -1087,10 +1088,9 @@ X.to_csv(TBL/"slide_foldseek"/"table3_family_correspondence.csv",
 print("\n" + "=" * 100); print("### 세 균주 과 구성원 대응"); print("=" * 100)
 print(X.to_string(index=False))
 print("\n  열 읽는 법")
-print("    {균주}_hit        그 BL21 단백질을 해당 균주 구조에 걸었을 때 최고 히트")
-print("    {균주}_TM         그 히트의 TM-score. 0.9 이상이면 사실상 같은 단백질")
-print("    {균주}_in_family  그 히트가 해당 균주의 CooC 과 목록(TM>=0.5)에도 있는가")
-print("  in_family 가 전부 O 면 세 균주가 **같은 구성원으로 채워진 같은 과**다.")
+print("    {균주}_hit   그 BL21 단백질을 해당 균주 구조에 걸었을 때 최고 히트")
+print("    {균주}_TM    그 히트의 TM-score. 0.9 이상이면 사실상 같은 단백질")
+print("\n  MG1655_TM 이 전부 0.9 이상이면 BL21 고유 구성원이 없다는 뜻이다.")
 if "MG1655_TM" in X:
     hi = X[X.MG1655_TM >= 0.9]
     print(f"\n  MG1655 에 TM ≥ 0.9 대응이 있는 BL21 구성원: {len(hi)}/{len(X)}")

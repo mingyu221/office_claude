@@ -1181,7 +1181,7 @@ for cif in cifs:
     nhis = sum(1 for d, c, ch, s, _a in donors if c == "HIS")
     ncys = len(cys)
     bridged = len(by_ch) >= 2           # 두 사슬이 같이 물었는가
-    if   ncys >= 4 and bridged: g, why = "A-계면", "두 사슬이 나눠 문 Cys4 — CooC1 형"
+    if   ncys >= 4 and bridged: g, why = "A_bridged", "두 사슬이 나눠 문 Cys4 — CooC1 형"
     elif ncys >= 4:             g, why = "A", "한 사슬 안의 Cys4"
     elif ncys == 3:             g, why = "B", "Cys3"
     elif ncys == 2 and nhis:    g, why = "B", "Cys2His"
@@ -1189,7 +1189,7 @@ for cif in cifs:
     else:                       g, why = "D", "산소 공여체 위주"
     rows.append({"grade": g, "protein": Path(cif).stem.replace("_model_0", "")
                                   .replace("_dimer", ""),
-                 "Cys": ncys, "His": nhis, "사슬별Cys": dict(by_ch), "계면": bridged,
+                 "Cys": ncys, "His": nhis, "Cys_by_chain": dict(by_ch), "bridged": bridged,
                  "min_dist": donors[0][0] if donors else None,
                  "donors": " ".join(f"{c}{ch}{s}" for _d, c, ch, s, _a in donors)[:70],
                  "why": why})
@@ -1209,20 +1209,20 @@ if rows:
         print("      뜻이므로, 아래 결과를 근거로 쓰면 안 된다.")
 
     print("\n" + "=" * 96); print("### A-계면 (두 사슬이 나눠 문 Cys4)"); print("=" * 96)
-    hot = E[E.grade == "A-계면"]
+    hot = E[E.grade == "A_bridged"]
     print(hot.to_string(index=False) if len(hot) else "  없음")
 
     # 단량체 결과와 나란히
     if GP.exists():
         M1 = pd.read_csv(GP)[["protein", "grade", "Cys"]] \
-               .rename(columns={"grade": "단량체등급", "Cys": "단량체Cys"})
-        CMP = E[["protein", "grade", "Cys", "계면"]] \
-                .rename(columns={"grade": "이량체등급", "Cys": "이량체Cys"}) \
+               .rename(columns={"grade": "grade_monomer", "Cys": "Cys_monomer"})
+        CMP = E[["protein", "grade", "Cys", "bridged"]] \
+                .rename(columns={"grade": "grade_dimer", "Cys": "Cys_dimer"}) \
                 .merge(M1, on="protein", how="left")
         CMP.to_csv(TBL/"seqmotif_mono_vs_dimer.csv", index=False, encoding="utf-8-sig")
         print("\n" + "=" * 96); print("### 단량체 → 이량체 변화"); print("=" * 96)
-        print(CMP.sort_values("이량체등급").to_string(index=False))
-        up = CMP[(CMP.단량체등급.isin(["C", "D"])) & (CMP.이량체등급.str.startswith("A"))]
+        print(CMP.sort_values("grade_dimer").to_string(index=False))
+        up = CMP[(CMP["grade_monomer"].isin(["C", "D"])) & (CMP["grade_dimer"].str.startswith("A"))]
         print(f"\n  ★ 단량체에서 C/D 였다가 이량체에서 A 로 올라온 것: {len(up)}개")
         print("    이것이 단량체 예측이 놓치고 있던 것이다.")
 else:
