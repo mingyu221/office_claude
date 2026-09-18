@@ -579,9 +579,9 @@ for tag, qp in [("cry", CRY_A), ("af", AF_PATH)]:
             RES_FS.append({"frame": "결정" if tag == "cry" else "예측", "strain": s,
                            "protein": pid(r.prot), "tm": round(float(r.alntmscore), 3),
                            "fident": round(float(r.fident), 3), "qcov": round(float(r.qcov), 3),
-                           "tier": ("TM>=0.9" if r.alntmscore >= TM_CORE else
-                                    "TM 0.7-0.9" if r.alntmscore >= TM_NEAR
-                                    else "TM 0.5-0.7")})
+                           "tier": ("핵심 (TM>=0.9)" if r.alntmscore >= TM_CORE else
+                                    "주변 (TM 0.7-0.9)" if r.alntmscore >= TM_NEAR
+                                    else "폴드만 (TM 0.5-0.7)")})
 
 F = pd.DataFrame(RES_FS)
 F.to_csv(TBL/"cooc_fold_afframe.csv", index=False, encoding="utf-8-sig")
@@ -608,7 +608,7 @@ for s in STRUCT_ALL:
     sub = F[(F.frame == "예측") & (F.strain == s)]
     if not len(sub): continue
     print(f"\n  [{s}]  " + "  ".join(f"{t} {len(sub[sub.tier==t])}"
-                                     for t in ["TM>=0.9", "TM 0.7-0.9", "TM 0.5-0.7"]))
+                                     for t in ["핵심 (TM>=0.9)", "주변 (TM 0.7-0.9)", "폴드만 (TM 0.5-0.7)"]))
     print(sub.sort_values("tm", ascending=False)
              .head(12)[["protein", "tm", "fident", "tier"]].to_string(index=False))
 ```
@@ -900,7 +900,7 @@ if not _mgf.exists() and (TBL/"cooc_fold_MG1655.csv").exists():
 if _mgf.exists() and "MG1655" not in set(F.strain):
     m = pd.read_csv(_mgf)
     m = m.rename(columns={"alntmscore": "tm", "prot": "protein", "stem": "protein"})
-    m["tier"] = ["TM>=0.9" if v >= 0.90 else "TM 0.7-0.9" if v >= 0.70 else "TM 0.5-0.7" for v in m.tm]
+    m["tier"] = ["핵심 (TM>=0.9)" if v >= 0.90 else "주변 (TM 0.7-0.9)" if v >= 0.70 else "폴드만 (TM 0.5-0.7)" for v in m.tm]
     F = pd.concat([F, m[["frame", "strain", "protein", "tm", "fident", "qcov", "tier"]]],
                   ignore_index=True)
     print(f"  MG1655 {len(m)}행 합침")
@@ -915,7 +915,7 @@ for st in ["BL21", "MG1655", "Y19"]:
         if not len(sub):
             if fr == "예측":
                 rows.append({"Strain": LABEL[st], "Frame": "AFDB", "TM>=0.5": None,
-                             "TM>=0.7": None, "TM>=0.9": None,
+                             "TM>=0.7": None, "핵심 (TM>=0.9)": None,
                              "Top hit": "no structure DB", "Top TM": None})
             continue
         top = sub.sort_values("tm", ascending=False).iloc[0]
@@ -925,7 +925,7 @@ for st in ["BL21", "MG1655", "Y19"]:
         rows.append({"Strain": LABEL[st], "Frame": "AFDB" if fr == "예측" else "Crystal",
                      "TM>=0.5": len(sub),
                      "TM>=0.7": int((sub.tm >= 0.70).sum()),
-                     "TM>=0.9": int((sub.tm >= 0.90).sum()),
+                     "핵심 (TM>=0.9)": int((sub.tm >= 0.90).sum()),
                      "Top hit": top.protein, "Top TM": round(float(top.tm), 3)})
 T1 = pd.DataFrame(rows)
 
@@ -944,7 +944,7 @@ if _cp.exists():
                   on=["Strain", "Frame"], how="left")
     # 왼쪽에서 오른쪽으로 컷이 조여지는 순서. 전부 누적.
     ORD = ["Strain", "Frame", "Proteome", "Total",
-           "TM>=0.3", "TM>=0.4", "TM>=0.5", "TM>=0.7", "TM>=0.9",
+           "TM>=0.3", "TM>=0.4", "TM>=0.5", "TM>=0.7", "핵심 (TM>=0.9)",
            "%proteome", "Top hit", "Top TM"]
     T1 = T1[[c for c in ORD if c in T1.columns] +
             [c for c in T1.columns if c not in ORD]]
@@ -954,7 +954,11 @@ else:
 T1.to_csv(SLIDE/"table1_fold_counts.csv", index=False, encoding="utf-8-sig")
 print("=" * 96); print("### 표1 — 폴드 검색 결과 (필터 전후 합본)"); print("=" * 96)
 print(T1.to_string(index=False))
-print("\n  열은 전부 **누적** 기준이다 — TM>=0.5 는 0.5 이상 전부(0.7, 0.9 포함).")
+print("\n  ※ 표1 의 열은 전부 **누적**이다 — TM>=0.5 는 0.5 이상 전부(0.7, 0.9 포함).")
+print("    구간별(핵심/주변/폴드만)로 보고 싶으면 뺄셈하면 된다:")
+print("      핵심   (TM>=0.9)      = TM>=0.9")
+print("      주변   (TM 0.7-0.9)   = TM>=0.7 − TM>=0.9")
+print("      폴드만 (TM 0.5-0.7)   = TM>=0.5 − TM>=0.7")
 print("  Total 은 -e 10 --max-seqs 2000 으로 되돌아온 정렬 전부라 그 자체에")
 print("  의미는 없다. %proteome 은 TM>=0.5 를 프로테옴 크기로 나눈 값이다.")
 
@@ -1180,7 +1184,7 @@ for tag, pat, outname in SWEEPS:
         print("  tm ≥ 0.50 인 것이 없다"); continue
     S = pd.DataFrame(rows).sort_values("tm", ascending=False) \
           .drop_duplicates(["strain", "protein"])       # 단백질당 최고 seed 1건
-    S["tier"] = ["TM>=0.9" if v >= 0.90 else "TM 0.7-0.9" if v >= 0.70 else "TM 0.5-0.7" for v in S.tm]
+    S["tier"] = ["핵심 (TM>=0.9)" if v >= 0.90 else "주변 (TM 0.7-0.9)" if v >= 0.70 else "폴드만 (TM 0.5-0.7)" for v in S.tm]
     out = TBL/f"{outname}_exact.csv"
     S.to_csv(out, index=False, encoding="utf-8-sig")
     print(f"  tm 최대 {S.tm.max():.3f}  (1.0 초과 {int((S.tm > 1.0).sum())}개 — 0 이어야 정상)")

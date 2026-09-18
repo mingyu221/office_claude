@@ -676,7 +676,7 @@ for _, r in CL.head(TOPD).iterrows():
     (DIN/f"{r.protein.replace('|','_')}_dimer.yaml").write_text(_y.safe_dump(doc, sort_keys=False))
     n += 1
 
-# 양성대조군 — Ch CooC1. 이것이 A_bridged 로 안 나오면 아래 전부 못 믿는다
+# 양성대조군 — Ch CooC1. 이것이 A-계면 으로 안 나오면 아래 전부 못 믿는다
 CRY = TOOLS/"workspace"/"seek_ni_insertase"/"input"/"3kji.pdb"
 AA3 = {"ALA":"A","ARG":"R","ASN":"N","ASP":"D","CYS":"C","GLN":"Q","GLU":"E",
        "GLY":"G","HIS":"H","ILE":"I","LEU":"L","LYS":"K","MET":"M","PHE":"F",
@@ -732,7 +732,7 @@ CUDA_VISIBLE_DEVICES=0 boltz predict inputs_cooclike \\
   --output_format mmcif --num_workers 2
 echo DONE_cooclike
 """)
-print("  채점은 Q8 의 DOUT 을 out_cooclike 로 바꿔 돌리면 된다 (A_bridged 등급).")
+print("  채점은 Q8 의 DOUT 을 out_cooclike 로 바꿔 돌리면 된다 (A-계면 등급).")
 ```
 
 ---
@@ -1181,7 +1181,7 @@ for cif in cifs:
     nhis = sum(1 for d, c, ch, s, _a in donors if c == "HIS")
     ncys = len(cys)
     bridged = len(by_ch) >= 2           # 두 사슬이 같이 물었는가
-    if   ncys >= 4 and bridged: g, why = "A_bridged", "두 사슬이 나눠 문 Cys4 — CooC1 형"
+    if   ncys >= 4 and bridged: g, why = "A-계면", "두 사슬이 나눠 문 Cys4 — CooC1 형"
     elif ncys >= 4:             g, why = "A", "한 사슬 안의 Cys4"
     elif ncys == 3:             g, why = "B", "Cys3"
     elif ncys == 2 and nhis:    g, why = "B", "Cys2His"
@@ -1189,7 +1189,7 @@ for cif in cifs:
     else:                       g, why = "D", "산소 공여체 위주"
     rows.append({"grade": g, "protein": Path(cif).stem.replace("_model_0", "")
                                   .replace("_dimer", ""),
-                 "Cys": ncys, "His": nhis, "Cys_by_chain": dict(by_ch), "bridged": bridged,
+                 "Cys": ncys, "His": nhis, "사슬별Cys": dict(by_ch), "계면": bridged,
                  "min_dist": donors[0][0] if donors else None,
                  "donors": " ".join(f"{c}{ch}{s}" for _d, c, ch, s, _a in donors)[:70],
                  "why": why})
@@ -1208,21 +1208,21 @@ if rows:
         print("\n    ⚠ 대조군이 A 가 아니다. 이량체 예측 자체가 이 자리를 못 만든다는")
         print("      뜻이므로, 아래 결과를 근거로 쓰면 안 된다.")
 
-    print("\n" + "=" * 96); print("### A_bridged — 두 사슬이 나눠 배위한 Cys4"); print("=" * 96)
-    hot = E[E.grade == "A_bridged"]
+    print("\n" + "=" * 96); print("### A-계면 — 두 사슬이 나눠 배위한 Cys4"); print("=" * 96)
+    hot = E[E.grade == "A-계면"]
     print(hot.to_string(index=False) if len(hot) else "  없음")
 
     # 단량체 결과와 나란히
     if GP.exists():
         M1 = pd.read_csv(GP)[["protein", "grade", "Cys"]] \
-               .rename(columns={"grade": "grade_monomer", "Cys": "Cys_monomer"})
-        CMP = E[["protein", "grade", "Cys", "bridged"]] \
-                .rename(columns={"grade": "grade_dimer", "Cys": "Cys_dimer"}) \
+               .rename(columns={"grade": "단량체등급", "Cys": "단량체Cys"})
+        CMP = E[["protein", "grade", "Cys", "계면"]] \
+                .rename(columns={"grade": "이량체등급", "Cys": "이량체Cys"}) \
                 .merge(M1, on="protein", how="left")
         CMP.to_csv(TBL/"seqmotif_mono_vs_dimer.csv", index=False, encoding="utf-8-sig")
         print("\n" + "=" * 96); print("### 단량체 → 이량체 변화"); print("=" * 96)
-        print(CMP.sort_values("grade_dimer").to_string(index=False))
-        up = CMP[(CMP["grade_monomer"].isin(["C", "D"])) & (CMP["grade_dimer"].str.startswith("A"))]
+        print(CMP.sort_values("이량체등급").to_string(index=False))
+        up = CMP[(CMP["단량체등급"].isin(["C", "D"])) & (CMP["이량체등급"].str.startswith("A"))]
         print(f"\n  ★ 단량체에서 C/D 였다가 이량체에서 A 로 올라온 것: {len(up)}개")
         print("    이것이 단량체 예측이 놓치고 있던 것이다.")
 else:

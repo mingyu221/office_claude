@@ -132,7 +132,7 @@ for fn, pre in [("seqmotif_dimer_grade.csv", "dimer"), ("cooclike_dimer_grade.cs
     for _, r in d.iterrows():
         put(key_of(r.protein), **{f"ni_grade_{pre}": r.get("grade"),
                                   f"ni_Cys_{pre}": r.get("Cys"),
-                                  f"ni_계면_{pre}": r.get("bridged")})
+                                  f"ni_계면_{pre}": r.get("계면")})
 
 # ---------------------------------------------------------------- 5. Folddisco (참고용)
 d = rd("motif_metal_3strain.csv")
@@ -194,8 +194,8 @@ def n_evi(r):
     if r.get("bl21_only") == 1 and r.get("mobile") != 1: n += 1
     return n
 
-T["n_axes"] = T.apply(n_evi, axis=1)
-ORDER = ["protein", "desc", "len", "n_axes", "score",
+T["근거축수"] = T.apply(n_evi, axis=1)
+ORDER = ["protein", "desc", "len", "근거축수", "score",
          "cys4_win", "cys4_cand", "n_cys", "n_CXC", "n_CXXC",
          "mg_status", "bl21_only", "mobile", "mg_hit", "mg_fident", "cys_kept", "cys_total",
          "tm_HypA", "tm_G3E", "tm_CooC", "tier_CooC", "cooc_vs_MG",
@@ -206,7 +206,7 @@ ORDER = ["protein", "desc", "len", "n_axes", "score",
          "rf2ppi", "boltz_iptm", "cooclike_score", "why"]
 T = T[[c for c in ORDER if c in T.columns] +
       [c for c in T.columns if c not in ORDER]]
-T = T.sort_values(["n_axes", "score"], ascending=False, na_position="last")
+T = T.sort_values(["근거축수", "score"], ascending=False, na_position="last")
 
 OUT = TBL/"MASTER_candidate_list.csv"
 T.to_csv(OUT, index=False, encoding="utf-8-sig")
@@ -220,10 +220,10 @@ if MISSING:
 print("\n" + "=" * 100); print("### 마스터 리스트"); print("=" * 100)
 print(f"  단백질 {len(T)}개 × 열 {len(T.columns)}개")
 print(f"  ★ {OUT}")
-print("\n  n_axes 분포 (서로 다른 축 몇 개에서 걸렸나):")
-print(T["n_axes"].value_counts().sort_index(ascending=False).to_string())
+print("\n  근거축수 분포 (서로 다른 축 몇 개에서 걸렸나):")
+print(T["근거축수"].value_counts().sort_index(ascending=False).to_string())
 
-SHOW = [c for c in ["protein", "n_axes", "score", "cys4_win", "mg_status", "mobile",
+SHOW = [c for c in ["protein", "근거축수", "score", "cys4_win", "mg_status", "mobile",
                     "tm_HypA", "tm_CooC", "ni_grade_old", "ni_grade_mono",
                     "plddt_motif", "desc"] if c in T.columns]
 print("\n  상위 25")
@@ -234,7 +234,7 @@ try:
     XL = TBL/"MASTER_candidate_list.xlsx"
     DICT = pd.DataFrame([
         ("protein",      "BL21 GenBank ID"),
-        ("n_axes",       "서로 다른 축(모티프/Ni배위/폴드/균주) 중 몇 개에서 걸렸나 0~4"),
+        ("근거축수",       "서로 다른 축(모티프/Ni배위/폴드/균주) 중 몇 개에서 걸렸나 0~4"),
         ("score",        "서열 파이프라인 점수 — why 열에 내역"),
         ("cys4_win",     "40잔기 창 안의 Cys 최대 개수"),
         ("mg_status",    "동일 / 모티프 보존 / 모티프 달라짐 / 게놈에만 있음 / 프로테옴 없음"),
@@ -244,14 +244,14 @@ try:
         ("tm_HypA/G3E/CooC","해당 과 스윕에서의 TM-score. 0.5 같은 폴드, 0.9 사실상 동일"),
         ("ni_grade_old", "구 Track B (ChCODH2 와 함께 접음) 배위 등급 A~D"),
         ("ni_grade_mono","신 파이프라인 (단량체 + Ni) 배위 등급"),
-        ("ni_grade_dimer","동형이량체 + Ni. 'A_bridged' = 두 사슬이 나눠 배위한 Cys4 (CooC1 형)"),
+        ("ni_grade_dimer","동형이량체 + Ni. 'A-계면' = 두 사슬이 나눠 배위한 Cys4 (CooC1 형)"),
         ("plddt_motif",  "모티프 구간 평균 pLDDT — plddt_mean 과 비교해야 의미가 있다"),
         ("fd_metal",     "Folddisco 금속 모티프 히트. ※ 비검출은 부재의 근거가 아니다"),
         ("rf2ppi",       "※ 대조군 0.266 으로 실패한 축. 참고만"),
         ("boltz_iptm",   "※ 대조군 0.300 인데 후보가 더 높았다. 순위에 쓰지 않는다"),
     ], columns=["열", "뜻"])
     sheets = [("전체", T)]
-    sheets.append(("n_axes_3plus", T[T["n_axes"] >= 3]))
+    sheets.append(("3축이상", T[T["근거축수"] >= 3]))
     if "bl21_only" in T.columns:
         _m = T.mobile if "mobile" in T.columns else 0
         sheets.append(("균주특이_비프로파지", T[(T.bl21_only == 1) & (_m != 1)]))
