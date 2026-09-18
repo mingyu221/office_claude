@@ -1097,6 +1097,17 @@ for pidv in BLM:
     rows.append(rec)
 
 X = pd.DataFrame(rows)
+
+# TM 은 정의상 0~1 이다. --exact-tmscore 1 을 줬는데도 넘는 값이 나오면
+# 그 수치는 발표에 쓸 수 없다. 조용히 넘기지 말고 세어서 알린다.
+for c in [c for c in X.columns if c.endswith("_TM")]:
+    over = X[pd.to_numeric(X[c], errors="coerce") > 1.0]
+    if len(over):
+        print(f"\n  ★ {c} 가 1.0 을 넘는 행 {len(over)}개 — TM 은 0~1 이어야 한다.")
+        print(over[["BL21", c]].to_string(index=False))
+        print("    --exact-tmscore 1 을 줬는데도 넘는다면 그 값은 근사치다.")
+        print("    순위에는 써도 되지만 슬라이드 숫자로는 쓰지 말 것.")
+
 X.to_csv(TBL/"slide_foldseek"/"table3_family_correspondence.csv",
          index=False, encoding="utf-8-sig")
 print("\n" + "=" * 100); print("### 세 균주 과 구성원 대응"); print("=" * 100)
@@ -1110,6 +1121,32 @@ if "MG1655_TM" in X:
     print(f"\n  MG1655 에 TM ≥ 0.9 대응이 있는 BL21 구성원: {len(hi)}/{len(X)}")
     print("  → 구조 수준에서도 BL21 고유 구성원이 없다는 뜻이다.")
 print(f"\n저장: {TBL/'slide_foldseek'/'table3_family_correspondence.csv'}")
+
+# ---- 표2(서열) 와 표3(구조) 가 같은 상대를 가리키는가 ----
+_t2 = SLIDE/"table2_bl21_family_vs_MG1655.csv" if 'SLIDE' in dir() \
+      else TBL/"slide_foldseek"/"table2_bl21_family_vs_MG1655.csv"
+if Path(_t2).exists():
+    B = pd.read_csv(_t2)
+    kc = "BL21_acc" if "BL21_acc" in B.columns else "protein"
+    CMP2 = X.merge(B[[kc, "MG1655_acc"]].rename(columns={kc: "BL21",
+                                                        "MG1655_acc": "서열_상대"}),
+                   on="BL21", how="left")
+    CMP2 = CMP2.rename(columns={"MG1655_hit": "구조_상대", "MG1655_TM": "구조_TM"})
+    print("\n" + "=" * 100); print("### 서열(mmseqs) 과 구조(Foldseek) 가 같은 상대를 가리키는가")
+    print("=" * 100)
+    print(CMP2[["BL21", "TM_to_CooC1", "서열_상대", "구조_상대", "구조_TM"]]
+          .to_string(index=False))
+    print("\n  ID 체계가 달라(GenBank vs UniProt) 직접 대조는 안 된다.")
+    print("  F12 가 붙인 이름 열로 비교할 것 — 이름이 다르면 두 방법이 서로 다른")
+    print("  단백질을 고른 것이고, 그 행은 구조가 '도메인만 닮은 다른 단백질' 을")
+    print("  집었을 가능성이 있다. 구조_TM 이 0.9 미만인 행부터 확인한다.")
+    low = CMP2[pd.to_numeric(CMP2["구조_TM"], errors="coerce") < 0.9]
+    if len(low):
+        print(f"\n  ★ 구조_TM < 0.9 인 행 {len(low)}개 — 여기가 갈릴 수 있다:")
+        print(low[["BL21", "서열_상대", "구조_상대", "구조_TM"]].to_string(index=False))
+    CMP2.to_csv(TBL/"slide_foldseek"/"table4_seq_vs_struct.csv",
+                index=False, encoding="utf-8-sig")
+    print(f"\n저장: {TBL/'slide_foldseek'/'table4_seq_vs_struct.csv'}")
 ```
 
 ---
@@ -1299,10 +1336,15 @@ def label(acc):
 # ---- 표2 에 이름 열 붙이기 ----
 C = pd.read_csv(TBL/"cooc_fold_mg1655.csv")
 C["BL21_name"]   = [label(p) for p in C.protein]
-C["MG1655_acc"]  = [ (re.search(r"있음 (\S+)", str(g)).group(1)
-                      if re.search(r"있음 (\S+)", str(g)) else
-                      ("genome only" if v == "~" else "absent"))
-                     for v, g in zip(C.MG1655, C["근거"]) ]
+def _mg_acc(v, g):
+    """근거 문장에서 MG1655 접근번호를 꺼낸다.
+       '게놈에만 있음 fident 0.987' 도 '있음 (\\S+)' 에 걸려 'fident' 를 잡았다.
+       판정 기호를 먼저 보고, 접근번호처럼 생긴 것만 받는다."""
+    if v == "~": return "genome only"
+    if v == "O": return "absent"
+    m = re.search(r"있음\s+([A-Z]{3}\d+\.\d+)", str(g))
+    return m.group(1) if m else ""
+C["MG1655_acc"] = [_mg_acc(v, g) for v, g in zip(C.MG1655, C["근거"])]
 C["MG1655_name"] = [label(a) for a in C.MG1655_acc]
 C["fident"]      = [ (re.search(r"fident ([\d.]+)", str(g)).group(1)
                       if re.search(r"fident ([\d.]+)", str(g)) else None)
