@@ -948,16 +948,26 @@ print("\n" + "=" * 96); print("### 표2 — BL21 과 구성원 × MG1655"); prin
 print(T2.to_string(index=False))
 
 print("\n" + "=" * 96); print("### 슬라이드 문장"); print("=" * 96)
-y19 = F[(F.strain == "Y19") & (F.frame == "결정")]
-ctl = y19[y19.protein.str.contains(Y19_GB.split(".")[0], na=False)]
-bl  = F[(F.strain == "BL21") & (F.frame == "예측")]
-print(f"  Control PASSED : ChCooC1 -> Y19 CooC  TM "
-      f"{float(ctl.iloc[0].tm):.3f}" if len(ctl) else "  대조군 행 없음")
+# 프레임을 반드시 밝힌다. 두 프레임 숫자를 한 문장에 섞으면 표와 안 맞는다.
+def ctl_tm(fr):
+    s = F[(F.strain == "Y19") & (F.frame == fr)]
+    s = s[s.protein.str.contains(Y19_GB.split(".")[0], na=False)]
+    return float(s.iloc[0].tm) if len(s) else None
+c_cry, c_af = ctl_tm("결정"), ctl_tm("예측")
+bl = F[(F.strain == "BL21") & (F.frame == "예측")]
+print("  Control PASSED : ChCooC1 -> Y19 CooC")
+print(f"      TM {c_cry:.3f} (crystal query) / {c_af:.3f} (AFDB query)"
+      if c_cry and c_af else "      대조군 행 없음")
 print(f"  BL21 CooC-family : {len(bl)} proteins, max TM {bl.tm.max():.3f}"
-      f"  -> no true CooC in BL21")
+      f"   [AFDB frame]  -> no true CooC in BL21")
+_core = int((F[F.frame == "예측"].tm >= 0.90).sum())
+print(f"  Core (TM >= 0.90) in AFDB frame : {_core}"
+      + ("  — 어느 균주에도 없다" if _core == 0 else ""))
 n_in = int((C.MG1655 != "O").sum())
 print(f"  All {n_in}/{len(C)} also present in MG1655"
       f"  -> no strain difference at family level")
+print("\n  ※ 위 숫자는 모두 프레임을 명시한 것이다. 슬라이드에 옮길 때")
+print("    crystal 값과 AFDB 값을 한 줄에 섞지 말 것 — 표와 안 맞게 된다.")
 print(f"\n저장: {SLIDE}")
 ```
 
