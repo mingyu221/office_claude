@@ -297,3 +297,131 @@ print("\n  ※ '.' 을 '아니다' 로 읽지 말 것. 특히 1번 축은 질의
 print("    0 으로 확인된 상태라, 안 잡힌 것이 없다는 뜻이 아니다 (민감도 노트북 참조).")
 print("    4번 축의 '?' 는 그 단백질이 균주특이 판정 대상에 아예 안 들어갔다는 뜻이다.")
 ```
+
+---
+
+## CELL R4 — 4번 축의 `?` 를 없앤다
+
+```python
+# =============================================================================
+# CELL R4 | '4_MG없음' 이 대부분 ? 인 이유와 그 해결
+#
+#   ? 는 '판정이 없다' 가 아니라 **'그 단백질에게 물어본 적이 없다'** 는 뜻이다.
+#   R3 의 축4 는 두 파일에서만 읽는다.
+#       cys4_bl21_strain_specificity.csv  — Cys4 를 가진 BL21 153개만 대상
+#       cys4_genome_check.csv             — 그 중 특이 판정 7개만 대상
+#   그런데 R3 의 대상 집합(UNIV)은 folddisco 금속 히트 · HypA 폴드 스윕 ·
+#   Ni 배위 채점까지 합친 것이라 훨씬 크다. 둘의 차집합이 전부 ? 로 찍힌다.
+#
+#   여기서는 UNIV 의 BL21 단백질 전부에게 같은 질문을 직접 던진다.
+#     (a) MG1655 프로테옴에 있는가   mmseqs, qcov >= 0.70
+#     (b) 없으면 게놈에는 있는가     mmseqs --search-type 2, fident >= 0.80
+#   BL21 이 아닌 것(Y19·MG1655 자신)은 질문 자체가 성립하지 않으므로 'n/a' 로 둔다.
+# =============================================================================
+import subprocess, tempfile
+TOOLS = Path("/mnt/af2results/mingyu")
+FAA_BL21 = TOOLS/"database"/"bacteriaDB"/"inhouseDB"/"bl21_db_match_qjz.faa"
+FAA_MG   = TOOLS/"database"/"protein_list"/"mg1655_protein.faa"
+GEN_MG   = BASE/"input"/"external"/"MG1655_U00096.3.fna"
+SRCH     = BASE/"result"/"search"; SRCH.mkdir(parents=True, exist_ok=True)
+FMT = "query,target,fident,alnlen,evalue,bits,qlen,tlen,qcov,tcov,qstart,qend"
+
+for n, p in [("BL21 faa", FAA_BL21), ("MG1655 faa", FAA_MG), ("MG1655 게놈", GEN_MG)]:
+    print(f"  {'O' if p.exists() else 'X'}  {n:12s} {p}")
+
+# ---- 질문 대상: UNIV 중 BL21 계열(QJZ*) ----
+TARGETS = sorted({k for k in UNIV if str(k).startswith("QJZ")})
+print(f"\n  UNIV {len(UNIV)}개 중 BL21(QJZ*) {len(TARGETS)}개에게 묻는다")
+print(f"  기존 판정이 있던 것: 프로테옴 {len(PROT_ABS)} / 게놈 {len(GENOME)}")
+
+def read_faa(p):
+    seqs, k = {}, None
+    for l in open(p):
+        if l.startswith(">"): k = l[1:].split()[0]; seqs[k] = []
+        elif k: seqs[k].append(l.strip())
+    return {k: "".join(v) for k, v in seqs.items()}
+
+SEQ = read_faa(FAA_BL21) if FAA_BL21.exists() else {}
+QF  = SRCH/"r4_universe.faa"
+miss = [t for t in TARGETS if t not in SEQ]
+with open(QF, "w") as fh:
+    for t in TARGETS:
+        if t in SEQ: fh.write(f">{t}\n{SEQ[t]}\n")
+print(f"  질의 FASTA {QF.name}: {len(TARGETS)-len(miss)}개 (FASTA 에 없는 ID {len(miss)}개)")
+
+def run(cmd):
+    r = subprocess.run(cmd, shell=True, text=True,
+                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    return r.stdout
+
+# ---- (a) 프로테옴 ----
+M_PROT = SRCH/"r4_universe_vs_MG1655.m8"
+if not (M_PROT.exists() and M_PROT.stat().st_size):
+    with tempfile.TemporaryDirectory() as td:
+        run(f'mmseqs easy-search "{QF}" "{FAA_MG}" "{M_PROT}" "{td}" '
+            f'--format-output "{FMT}" -s 7.5 -e 1e-3 --max-seqs 5 --threads 8')
+PH = {}
+if M_PROT.exists() and M_PROT.stat().st_size:
+    d = pd.read_csv(M_PROT, sep="\t", names=FMT.split(","))
+    d = d[d.qcov >= 0.70].sort_values("bits", ascending=False).drop_duplicates("query")
+    PH = {str(r.query): (float(r.fident), str(r.target)) for _, r in d.iterrows()}
+print(f"\n  (a) 프로테옴: qcov>=0.70 히트 {len(PH)} / 질의 {len(TARGETS)-len(miss)}")
+
+# ---- (b) 프로테옴에 없는 것만 게놈으로 ----
+NOHIT = [t for t in TARGETS if t in SEQ and t not in PH]
+GF = SRCH/"r4_nohit.faa"
+with open(GF, "w") as fh:
+    for t in NOHIT: fh.write(f">{t}\n{SEQ[t]}\n")
+print(f"  (b) 프로테옴 미검출 {len(NOHIT)}개를 게놈에 묻는다")
+M_GEN = SRCH/"r4_nohit_vs_MG1655genome.m8"
+if NOHIT and not (M_GEN.exists() and M_GEN.stat().st_size):
+    with tempfile.TemporaryDirectory() as td:
+        run(f'mmseqs easy-search "{GF}" "{GEN_MG}" "{M_GEN}" "{td}" --search-type 2 '
+            f'--format-output "{FMT}" -s 7.5 -e 1e-3 --max-seqs 5 --threads 8')
+GH = {}
+if M_GEN.exists() and M_GEN.stat().st_size:
+    d = pd.read_csv(M_GEN, sep="\t", names=FMT.split(","))
+    # ※ --search-type 2 의 alnlen 은 염기 단위다. 커버리지는 qstart/qend 로 낸다.
+    d["qcov2"] = (d.qend - d.qstart + 1) / d.qlen
+    d = d[(d.fident >= 0.80) & (d.qcov2 >= 0.70)] \
+          .sort_values("bits", ascending=False).drop_duplicates("query")
+    GH = {str(r.query): (float(r.fident), float(r.qcov2)) for _, r in d.iterrows()}
+print(f"      게놈 히트(fident>=0.80, cov>=0.70) {len(GH)}개")
+
+# ---- 축4 재계산 ----
+def ax4(k):
+    if not str(k).startswith("QJZ"): return "n/a", "BL21 단백질이 아니다"
+    if k not in SEQ:                 return "?",   "BL21 FASTA 에 ID 가 없다"
+    if k in PH:
+        f, t = PH[k];  return ".", f"MG1655 에 있음 {t} fident {f:.3f}"
+    if k in GH:
+        f, c = GH[k];  return "~", f"프로테옴엔 없고 게놈엔 있음 fident {f:.3f}"
+    return "O", "프로테옴·게놈 둘 다 없음"
+
+T2 = T.copy()
+res = [ax4(k) for k in T2.protein]
+T2["4_MG없음"] = [a for a, _ in res]
+T2["MG판정근거"] = [b for _, b in res]
+T2["통과"] = [sum(x == "O" for x in (r["1_Cys4"], r["2_HypA"], r["3_Ni등급"], r["4_MG없음"]))
+              for _, r in T2.iterrows()]
+T2 = T2.sort_values(["통과", "3_Ni등급", "metal_rmsd"], ascending=[False, True, True])
+
+print("\n" + "=" * 110); print("### 축4 재판정 분포"); print("=" * 110)
+print(T2["4_MG없음"].value_counts().to_string())
+print("\n  O   프로테옴·게놈 둘 다 없음  ← 진짜 BL21 특이")
+print("  ~   프로테옴엔 없고 게놈엔 있음 ← 어노테이션 누락")
+print("  .   MG1655 에 있음")
+print("  n/a BL21 단백질이 아님 (질문이 성립 안 함)")
+print("  ?   BL21 FASTA 에서 ID 를 못 찾음 (ID 계열 확인 필요)")
+
+print("\n" + "=" * 110); print("### 4축 표 (축4 재판정 반영)"); print("=" * 110)
+print(T2[["protein", "strain", "1_Cys4", "2_HypA", "3_Ni등급", "4_MG없음", "통과",
+          "grade", "HypA_tm", "metal_rmsd", "MG판정근거"]].to_string(index=False))
+T2.to_csv(TBL/"candidate_4axis_matrix.csv", index=False, encoding="utf-8-sig")
+print(f"\n저장(덮어씀): {TBL/'candidate_4axis_matrix.csv'}")
+
+print("\n" + "=" * 110); print("### 진짜 BL21 특이 (축4 = O)"); print("=" * 110)
+BO = T2[T2["4_MG없음"] == "O"]
+print(BO[["protein", "1_Cys4", "2_HypA", "3_Ni등급", "grade", "HypA_tm",
+          "metal_rmsd", "plddt"]].to_string(index=False) if len(BO) else "  없음")
+```
