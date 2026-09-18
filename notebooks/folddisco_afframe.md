@@ -1288,42 +1288,128 @@ print(f"\n  GenBank 이름 {len(NAME)} · gene= {len(GENE)} · locus_tag= {len(L
 if not GENE:
     print("  (헤더가 NCBI 대괄호 형식이 아니라 gene/locus_tag 는 없다 — 설명문을 쓴다)")
 
+AA3 = {"ALA":"A","ARG":"R","ASN":"N","ASP":"D","CYS":"C","GLN":"Q","GLU":"E",
+       "GLY":"G","HIS":"H","ILE":"I","LEU":"L","LYS":"K","MET":"M","PHE":"F",
+       "PRO":"P","SER":"S","THR":"T","TRP":"W","TYR":"Y","VAL":"V","MSE":"M"}
+
 def struct_title(path):
-    """AFDB 모델에서 단백질 이름.
-         .cif → _struct.title 'Zinc-binding GTPase YeiR'
-         .pdb → TITLE  ALPHAFOLD MONOMER V2.0 PREDICTION FOR ... (P0AAN3)"""
+    """구조 파일 머리의 이름. 없으면 None.
+       AFDB 배포본은 _struct.title / TITLE 에 이름을 달지만, 다시 저장된
+       파일은 그 줄이 잘려 있다 (이 DB 가 그렇다)."""
     try:
-        txt = open(path, errors="ignore").read(8000)
+        txt = open(path, errors="ignore").read(20000)
     except Exception:
         return None
-    m = re.search(r"_struct\.title\s+(?:'([^']*)'|\"([^\"]*)\"|(\S.*))", txt)
-    if m:
-        return (m.group(1) or m.group(2) or m.group(3)).strip().strip("'\"")
+    for pat in (r"_struct\.title\s+(?:'([^']*)'|\"([^\"]*)\"|(\S.*))",
+                r"_entity\.pdbx_description\s+(?:'([^']*)'|\"([^\"]*)\"|(\S.*))"):
+        m = re.search(pat, txt)
+        if m:
+            s = (m.group(1) or m.group(2) or m.group(3) or "").strip().strip("'\"")
+            if s and s not in ("?", ".", "None"): return s
     ttl = " ".join(l[10:].strip() for l in txt.splitlines() if l.startswith("TITLE"))
     if ttl:
         m = re.search(r"PREDICTION FOR\s+(.*)", ttl, re.I)
-        s = (m.group(1) if m else ttl).strip()
-        s = re.sub(r"\s*\([A-Z0-9]+\)\s*$", "", s)
-        return s.strip() or None
+        s = re.sub(r"\s*\([A-Z0-9]+\)\s*$", "", (m.group(1) if m else ttl).strip())
+        if s: return s
     return None
+
+def struct_seq(path):
+    """구조 파일의 아미노산 서열 (CA 순서)."""
+    seq, seen = [], set()
+    try:
+        if Path(path).suffix.lower() in (".cif", ".mmcif"):
+            hdr, started = [], False
+            for l in open(path, errors="ignore"):
+                if l.startswith("_atom_site."):
+                    hdr.append(l.strip().split(".")[1]); started = True; continue
+                if started and l[:4] == "ATOM":
+                    c = {n: i for i, n in enumerate(hdr)}; f = l.split()
+                    try:
+                        if f[c["label_atom_id"]].strip('"') != "CA": continue
+                        rs = f[c.get("auth_seq_id", c.get("label_seq_id"))]
+                        rn = f[c["label_comp_id"]]
+                    except Exception:
+                        continue
+                    if rs in seen: continue
+                    seen.add(rs); seq.append(AA3.get(rn, "X"))
+                elif started and l.startswith("#") and seq:
+                    break
+        else:
+            for l in open(path, errors="ignore"):
+                if l.startswith("ATOM") and l[12:16].strip() == "CA":
+                    rs = l[22:27]
+                    if rs in seen: continue
+                    seen.add(rs); seq.append(AA3.get(l[17:20].strip(), "X"))
+    except Exception:
+        return ""
+    return "".join(seq)
+
+# 서열 → GenBank 접근번호. **균주별로** 만든다.
+#   균주 간 fident 1.000 인 단백질이 여럿이라 하나로 합치면 먼저 들어간 균주가
+#   이긴다 — MG1655 구조에 BL21 번호가 붙는 일이 생긴다.
+SEQ2ACC = {}
+for _st, _fp in FAA.items():
+    if not _fp.exists(): continue
+    D_, _acc, _buf = {}, None, []
+    def _flush():
+        if _acc and _buf:
+            s = "".join(_buf)
+            D_.setdefault(s, _acc); D_.setdefault(s[:60], _acc)
+    for l in open(_fp, errors="ignore"):
+        if l.startswith(">"):
+            _flush(); _acc = l[1:].split()[0]; _buf = []
+        else: _buf.append(l.strip())
+    _flush()
+    SEQ2ACC[_st] = D_
+print("  서열 색인 " + " · ".join(f"{k} {len(v)}" for k, v in SEQ2ACC.items())
+      + "  (구조에 제목이 없으면 서열로 이름을 찾는다)")
+
+def seq_lookup(seq, prefer=None):
+    """서열로 GenBank 접근번호를 찾는다. prefer 균주를 먼저 본다."""
+    order = ([prefer] if prefer in SEQ2ACC else []) + \
+            [k for k in SEQ2ACC if k != prefer]
+    for st in order:
+        d = SEQ2ACC[st]
+        a = d.get(seq) or d.get(seq[:60])
+        if a: return a, st
+    return None, None
+
+def find_struct_file(acc):
+    """(파일, 어느 균주 DB 에서 나왔나)"""
+    for st, d in STRUCT_ALL.items():
+        for pat in (f"AF-{acc}-F1-model_v*.cif", f"AF-{acc}-F1-model_v*.pdb",
+                    f"AF-{acc}-*.cif", f"AF-{acc}-*.pdb",
+                    f"{acc}.cif", f"{acc}.pdb", f"{acc}-*.cif", f"{acc}-*.pdb",
+                    f"*{acc}*.cif", f"*{acc}*.pdb"):
+            for f in Path(d).glob(pat):
+                return f, st
+    return None, None
 
 print("\n  구조 DB (UniProt 이름은 여기서 읽는다)")
 for s, d in STRUCT_ALL.items():
     fs_ = [f for f in Path(d).iterdir() if f.suffix.lower() in (".cif", ".pdb")][:1]
-    ex = fs_[0] if fs_ else None
-    print(f"    {s:8s} {Path(d).name:28s} 예: {ex.name if ex else '없음'}"
-          + (f"  →  {struct_title(ex)}" if ex else ""))
+    if not fs_:
+        print(f"    {s:8s} {Path(d).name:28s} 파일 없음"); continue
+    ex = fs_[0]; ttl = struct_title(ex); sq = struct_seq(ex)
+    gb_, st_ = seq_lookup(sq, prefer=s)
+    print(f"    {s:8s} {Path(d).name:28s} 예: {ex.name}")
+    print(f"             제목: {ttl if ttl else '없음 → 서열로 찾는다'}")
+    print(f"             서열: {len(sq)}잔기  {sq[:30]}"
+          + (f"   ← {st_} 프로테옴의 {gb_}" if gb_ else "   ← 프로테옴에 없음"))
 
 UNI = {}
 def uniprot_name(acc):
+    """1) 구조 파일 제목  2) 안 되면 서열로 프로테옴에서 찾아 그 이름"""
     if acc in UNI: return UNI[acc]
-    for d in STRUCT_ALL.values():
-        for pat in (f"AF-{acc}-F1-model_v*.cif", f"AF-{acc}-F1-model_v*.pdb",
-                    f"AF-{acc}-*.cif", f"AF-{acc}-*.pdb"):
-            for f in Path(d).glob(pat):
-                n = struct_title(f)
-                if n: UNI[acc] = n; return n
-    UNI[acc] = None; return None
+    f, st = find_struct_file(acc)
+    if f is None:
+        UNI[acc] = None; return None
+    n = struct_title(f)
+    if not n:
+        gb, _ = seq_lookup(struct_seq(f), prefer=st)   # 그 구조가 속한 균주부터
+        if gb: n = f"{NAME.get(gb, '')} [{gb}]".strip()
+    UNI[acc] = n or None
+    return UNI[acc]
 
 ACC_GB  = re.compile(r"^[A-Z]{3}\d+\.\d+$")               # AAC75234.1 / QJZ12719.1
 ACC_UNI = re.compile(r"^[A-NR-Z][0-9][A-Z0-9]{3}[0-9]$|^[OPQ][0-9][A-Z0-9]{3}[0-9]$")
