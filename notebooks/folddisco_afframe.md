@@ -1414,4 +1414,55 @@ else:
                                     "구조_TM"] if c in diff.columns]].to_string(index=False))
         CMP2.to_csv(SLIDE/"table4_seq_vs_struct.csv", index=False, encoding="utf-8-sig")
         print(f"\n저장: {SLIDE/'table4_seq_vs_struct.csv'}")
+
+        # ---- 8 vs 7 의 정체: 진짜 차이인가, 컷 0.5 의 경계 효과인가 ----
+        #   BL21 8개 각각의 MG1655 상대가 MG1655 목록(TM>=0.5)에 있는지 보고,
+        #   없으면 **그 상대의 실제 TM** 을 원본 m8 에서 찾아 얼마나 모자라는지 잰다.
+        #   0.49 같은 값이면 그건 균주 차이가 아니라 컷에 걸린 것이다.
+        print("\n" + "=" * 110)
+        print("### BL21 8개 vs MG1655 7개 — 어디서 갈렸나")
+        print("=" * 110)
+        MGLIST = set(F[(F.frame == "예측") & (F.strain == "MG1655")].protein)
+        print(f"  MG1655 목록(TM>=0.5): {sorted(MGLIST)}")
+
+        raw = FSD/f"af_vs_MG1655_{Path(STRUCT_ALL['MG1655']).name}.m8"
+        TMALL = {}
+        if raw.exists() and raw.stat().st_size:
+            d_ = pd.read_csv(raw, sep="\t", names=FFMT.split(","))
+            d_["prot"] = d_.target.apply(lambda x: Path(str(x)).stem) \
+                          .str.replace(r"_[A-Za-z0-9]$", "", regex=True)
+            d_ = d_.sort_values("alntmscore", ascending=False).drop_duplicates("prot")
+            TMALL = {pid(k): float(v) for k, v in zip(d_.prot, d_.alntmscore)}
+
+        rows2 = []
+        for _, r in CMP2.iterrows():
+            h = str(r.get("구조_상대", ""))
+            rows2.append({"BL21": r.BL21, "BL21_TM": r.TM_to_CooC1,
+                          "MG1655_상대": h,
+                          "목록에있나": "O" if h in MGLIST else ".",
+                          "MG1655_TM": round(TMALL[h], 3) if h in TMALL else None})
+        Z = pd.DataFrame(rows2)
+        print()
+        print(Z.to_string(index=False))
+
+        out_ = Z[Z.목록에있나 == "."]
+        dup_ = Z[Z.MG1655_상대.duplicated(keep=False) & (Z.MG1655_상대 != "")]
+        print(f"\n  MG1655 상대가 목록 밖인 것: {len(out_)}개")
+        for _, r in out_.iterrows():
+            v = r.MG1655_TM
+            if v is not None:
+                print(f"    {r.BL21}: BL21 {r.BL21_TM:.3f} / MG1655 {v:.3f}"
+                      + ("   ← 컷 0.5 바로 아래. 균주 차이가 아니라 경계 효과다"
+                         if 0.40 <= v < 0.50 else ""))
+            else:
+                print(f"    {r.BL21}: MG1655 쪽 TM 을 원본에서 못 찾았다")
+        if len(dup_):
+            print(f"\n  서로 다른 BL21 단백질이 **같은 MG1655 상대**를 가리키는 경우: "
+                  f"{dup_.MG1655_상대.nunique()}개 상대에 {len(dup_)}행")
+            print(dup_.to_string(index=False))
+            print("    이것도 8 vs 7 의 차이를 만든다 — 8개가 7개로 접힌 것이다")
+        print("\n  ★ 슬라이드에 '8 vs 7' 을 차이로 쓰지 말 것.")
+        print("    같은 단백질이 컷 0.5 를 한쪽만 넘었거나, 둘이 한 상대로 접힌 결과다.")
+        Z.to_csv(SLIDE/"table5_8vs7.csv", index=False, encoding="utf-8-sig")
+        print(f"\n저장: {SLIDE/'table5_8vs7.csv'}")
 ```
