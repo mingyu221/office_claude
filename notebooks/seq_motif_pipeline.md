@@ -582,7 +582,10 @@ for pidv in sel_ids:
     wrote.append(pidv); n += 1
 TOTRES = sum(len(SEQ["BL21"][k]) for k in wrote)
 # 어떤 설정으로 만든 입력인지 남긴다. 나중에 '이거 어느 버전이지' 를 없앤다
-(BIN/"_manifest.json").write_text(json.dumps({
+# ★ 입력 폴더 안에 두면 안 된다. boltz 는 폴더의 모든 파일을 입력으로 읽고
+#   .json 을 만나면 "Unable to parse filetype .json" 으로 죽는다. 옆에 둔다.
+MANIFEST = BIN.parent/f"{BIN.name}_manifest.json"
+MANIFEST.write_text(json.dumps({
     "made_at": datetime.datetime.now().isoformat(timespec="seconds"),
     "TOPN": TOPN, "MAXLEN": MAXLEN,
     "n_written": n, "n_skipped_len": skip,
@@ -592,7 +595,7 @@ TOTRES = sum(len(SEQ["BL21"][k]) for k in wrote)
     "proteins": sorted(wrote),
 }, ensure_ascii=False, indent=1), encoding="utf-8")
 print(f"\n  Boltz 입력 {n}개 생성 (상위 {TOPN} + 눈금 {len(CAL)}, 길이 초과 제외 {skip})")
-print(f"  설정 기록: {BIN/'_manifest.json'}")
+print(f"  설정 기록: {MANIFEST}")
 print(f"  → {BIN}")
 print(f"  총 잔기 {TOTRES:,} — 기존 방식이면 여기에 630×{n} = {630*n:,} 이 더 붙는다")
 print(f"\n  ※ --use_msa_server 로 {n}건의 MSA 를 원격에서 받는다. 속도 제한이 걸리면")
@@ -711,14 +714,15 @@ if CRY.exists():
               f"(CXC 없음, {len(ns)} 잔기 ×2)")
         print("    이게 A 로 나오면 Boltz 가 Ni 을 아무 데나 넣는다는 뜻이다.")
 
-(DIN/"_manifest.json").write_text(json.dumps({
+DMANIFEST = DIN.parent/f"{DIN.name}_manifest.json"   # 입력 폴더 밖에 둔다
+DMANIFEST.write_text(json.dumps({
     "made_at": datetime.datetime.now().isoformat(timespec="seconds"),
     "TOPD": TOPD, "MAXTOK": MAXTOK, "n_written": n, "n_skipped_len": skip,
     "선정": "CXC/CXXC 보유 + cys4_win < 4 (혼자서는 Cys4 를 못 만드는 것)",
     "대조군": [f.name for f in DIN.glob("CTRL-*.yaml")] + [f.name for f in DIN.glob("NEG-*.yaml")],
 }, ensure_ascii=False, indent=1), encoding="utf-8")
 print(f"\n  이량체 입력 {n}개 (2×길이 > {MAXTOK} 제외 {skip}) + 대조군  → {DIN}")
-print(f"  설정 기록: {DIN/'_manifest.json'}")
+print(f"  설정 기록: {DMANIFEST}")
 print(f"""
 cd "{BASE/'result'/'boltz'}"
 CUDA_VISIBLE_DEVICES=0 boltz predict inputs_cooclike \\
@@ -915,7 +919,16 @@ def running():
     return pid
 
 n_in  = len([f for f in (BOLTZ_ROOT/IN_DIR).glob("*.yaml")])
-_man = BOLTZ_ROOT/IN_DIR/"_manifest.json"
+_man = BOLTZ_ROOT/f"{IN_DIR}_manifest.json"
+if not _man.exists() and (BOLTZ_ROOT/IN_DIR/"_manifest.json").exists():
+    _man = BOLTZ_ROOT/IN_DIR/"_manifest.json"      # 옛 위치
+_stray = [f.name for f in (BOLTZ_ROOT/IN_DIR).iterdir()
+          if f.is_file() and f.suffix.lower() not in (".yaml", ".yml", ".fasta", ".fa")]
+if _stray:
+    print(f"  ★ 입력 폴더에 yaml/fasta 가 아닌 파일이 있다: {_stray}")
+    print("    boltz 는 폴더의 모든 파일을 읽으려 해서 여기서 죽는다. 옮기고 다시 돌릴 것:")
+    for _s in _stray:
+        print(f"      mv {BOLTZ_ROOT/IN_DIR/_s} {BOLTZ_ROOT/(IN_DIR + '_' + _s.lstrip('_'))}")
 if _man.exists():
     import json as _j
     _m = _j.loads(_man.read_text())
@@ -966,8 +979,12 @@ if 'GPU' in dir() and GPU is not None and not pid and not (n_out >= n_in and n_i
            f'--max_msa_seqs 2048 --recycling_steps 3 --diffusion_samples 1 '
            f'--output_format mmcif --num_workers 2')
     # conda run 으로 감싼다. env 가 없으면 현재 인터프리터의 boltz 를 쓴다
-    has_env = subprocess.run(f"conda env list | grep -qE '^{CONDA_ENV}\\s'",
-                             shell=True).returncode == 0
+    # `conda env list | grep -q` 는 grep 이 먼저 닫혀 conda 가 BrokenPipeError
+    # 리포트를 통째로 뱉는다. 출력을 받아서 파이썬에서 본다.
+    _envs = subprocess.run("conda env list", shell=True, text=True,
+                           capture_output=True).stdout
+    has_env = any(l.split()[:1] == [CONDA_ENV] for l in _envs.splitlines()
+                  if l.strip() and not l.startswith("#"))
     inner = f"conda run -n {CONDA_ENV} --no-capture-output {cmd}" if has_env else cmd
     print(f"  conda env '{CONDA_ENV}': {'있음' if has_env else '없음 → 현재 환경으로'}")
     script = (f'cd {shlex.quote(str(BOLTZ_ROOT))} && '
@@ -975,7 +992,10 @@ if 'GPU' in dir() and GPU is not None and not pid and not (n_out >= n_in and n_i
               f'PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512 '   # 1.x/2.x 둘 다 먹는 옵션
               f'{inner}')
     LOG.parent.mkdir(parents=True, exist_ok=True)
-    with open(LOG, "ab") as lf:
+    if LOG.exists() and LOG.stat().st_size:
+        # 이어 쓰면 지난 실행의 실패 메시지가 계속 잡힌다. 돌릴 때마다 새로 연다.
+        LOG.rename(LOG.with_suffix(f".log.{time.strftime('%Y%m%d_%H%M%S')}"))
+    with open(LOG, "wb") as lf:
         proc = subprocess.Popen(["setsid", "bash", "-lc", script],
                                 stdout=lf, stderr=lf, start_new_session=True)
     PIDF.write_text(str(proc.pid))
