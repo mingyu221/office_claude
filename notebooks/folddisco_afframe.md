@@ -579,8 +579,9 @@ for tag, qp in [("cry", CRY_A), ("af", AF_PATH)]:
             RES_FS.append({"frame": "결정" if tag == "cry" else "예측", "strain": s,
                            "protein": pid(r.prot), "tm": round(float(r.alntmscore), 3),
                            "fident": round(float(r.fident), 3), "qcov": round(float(r.qcov), 3),
-                           "tier": ("핵심" if r.alntmscore >= TM_CORE else
-                                    "주변" if r.alntmscore >= TM_NEAR else "폴드만")})
+                           "tier": ("TM>=0.9" if r.alntmscore >= TM_CORE else
+                                    "TM 0.7-0.9" if r.alntmscore >= TM_NEAR
+                                    else "TM 0.5-0.7")})
 
 F = pd.DataFrame(RES_FS)
 F.to_csv(TBL/"cooc_fold_afframe.csv", index=False, encoding="utf-8-sig")
@@ -607,7 +608,7 @@ for s in STRUCT_ALL:
     sub = F[(F.frame == "예측") & (F.strain == s)]
     if not len(sub): continue
     print(f"\n  [{s}]  " + "  ".join(f"{t} {len(sub[sub.tier==t])}"
-                                     for t in ["핵심", "주변", "폴드만"]))
+                                     for t in ["TM>=0.9", "TM 0.7-0.9", "TM 0.5-0.7"]))
     print(sub.sort_values("tm", ascending=False)
              .head(12)[["protein", "tm", "fident", "tier"]].to_string(index=False))
 ```
@@ -899,7 +900,7 @@ if not _mgf.exists() and (TBL/"cooc_fold_MG1655.csv").exists():
 if _mgf.exists() and "MG1655" not in set(F.strain):
     m = pd.read_csv(_mgf)
     m = m.rename(columns={"alntmscore": "tm", "prot": "protein", "stem": "protein"})
-    m["tier"] = ["핵심" if v >= 0.90 else "주변" if v >= 0.70 else "폴드만" for v in m.tm]
+    m["tier"] = ["TM>=0.9" if v >= 0.90 else "TM 0.7-0.9" if v >= 0.70 else "TM 0.5-0.7" for v in m.tm]
     F = pd.concat([F, m[["frame", "strain", "protein", "tm", "fident", "qcov", "tier"]]],
                   ignore_index=True)
     print(f"  MG1655 {len(m)}행 합침")
@@ -913,18 +914,19 @@ for st in ["BL21", "MG1655", "Y19"]:
         sub = F[(F.strain == st) & (F.frame == fr)]
         if not len(sub):
             if fr == "예측":
-                rows.append({"Strain": LABEL[st], "Frame": "AFDB", "Fold hits": None,
-                             "Core >=0.90": None, "Near 0.70-0.90": None,
-                             "Fold-only 0.50-0.70": None, "Top hit": "no structure DB",
-                             "TM": None})
+                rows.append({"Strain": LABEL[st], "Frame": "AFDB", "TM>=0.5": None,
+                             "TM>=0.7": None, "TM>=0.9": None,
+                             "Top hit": "no structure DB", "Top TM": None})
             continue
         top = sub.sort_values("tm", ascending=False).iloc[0]
+        # 열 이름을 한 방식으로 통일한다. 전부 **누적** 기준이고 표기도 하나다.
+        # 앞서 Fold hits / >=0.3 / Near 0.70-0.90 / Core >=0.90 이 섞여 있어
+        # 열 이름만 보고는 무슨 기준인지 알 수 없었다.
         rows.append({"Strain": LABEL[st], "Frame": "AFDB" if fr == "예측" else "Crystal",
-                     "Fold hits": len(sub),
-                     "Core >=0.90":          int((sub.tm >= 0.90).sum()),
-                     "Near 0.70-0.90":       int(((sub.tm >= 0.70) & (sub.tm < 0.90)).sum()),
-                     "Fold-only 0.50-0.70":  int(((sub.tm >= 0.50) & (sub.tm < 0.70)).sum()),
-                     "Top hit": top.protein, "TM": round(float(top.tm), 3)})
+                     "TM>=0.5": len(sub),
+                     "TM>=0.7": int((sub.tm >= 0.70).sum()),
+                     "TM>=0.9": int((sub.tm >= 0.90).sum()),
+                     "Top hit": top.protein, "Top TM": round(float(top.tm), 3)})
 T1 = pd.DataFrame(rows)
 
 # 필터 전 매칭 수(cooc_fold_counts.csv)를 같은 표에 합친다.
@@ -934,15 +936,16 @@ if _cp.exists():
     C0 = pd.read_csv(_cp)
     C0["Strain"] = C0.strain.map(LABEL)
     C0["Frame"]  = C0.frame.map({"예측": "AFDB", "결정": "Crystal"})
-    C0 = C0.rename(columns={"정렬총수": "Total aln", "프로테옴": "Proteome",
-                            "비율(≥0.5)": "per proteome %"})
-    keep = ["Strain", "Frame", "Total aln", "≥0.3", "≥0.4", "≥0.7",
-            "Proteome", "per proteome %"]
+    C0 = C0.rename(columns={"정렬총수": "Total", "프로테옴": "Proteome",
+                            "≥0.3": "TM>=0.3", "≥0.4": "TM>=0.4",
+                            "비율(≥0.5)": "%proteome"})
+    keep = ["Strain", "Frame", "Proteome", "Total", "TM>=0.3", "TM>=0.4", "%proteome"]
     T1 = T1.merge(C0[[c for c in keep if c in C0.columns]],
                   on=["Strain", "Frame"], how="left")
-    ORD = ["Strain", "Frame", "Proteome", "Total aln", "≥0.3", "≥0.4",
-           "Fold hits", "per proteome %", "Near 0.70-0.90", "Core >=0.90",
-           "Fold-only 0.50-0.70", "Top hit", "TM"]
+    # 왼쪽에서 오른쪽으로 컷이 조여지는 순서. 전부 누적.
+    ORD = ["Strain", "Frame", "Proteome", "Total",
+           "TM>=0.3", "TM>=0.4", "TM>=0.5", "TM>=0.7", "TM>=0.9",
+           "%proteome", "Top hit", "Top TM"]
     T1 = T1[[c for c in ORD if c in T1.columns] +
             [c for c in T1.columns if c not in ORD]]
 else:
@@ -951,9 +954,9 @@ else:
 T1.to_csv(SLIDE/"table1_fold_counts.csv", index=False, encoding="utf-8-sig")
 print("=" * 96); print("### 표1 — 폴드 검색 결과 (필터 전후 합본)"); print("=" * 96)
 print(T1.to_string(index=False))
-print("\n  'Fold hits' 가 ≥0.5 통과 수다. Total aln 은 -e 10 --max-seqs 2000 으로")
-print("  되돌아온 전부라 그 자체에 의미는 없고, ≥0.3 / ≥0.4 와 같이 봐야")
-print("  '어디서 신호가 갈리는가' 가 보인다.")
+print("\n  열은 전부 **누적** 기준이다 — TM>=0.5 는 0.5 이상 전부(0.7, 0.9 포함).")
+print("  Total 은 -e 10 --max-seqs 2000 으로 되돌아온 정렬 전부라 그 자체에")
+print("  의미는 없다. %proteome 은 TM>=0.5 를 프로테옴 크기로 나눈 값이다.")
 
 C = pd.read_csv(TBL/"cooc_fold_mg1655.csv")
 NOTE = {".": "", "~": "annotation gap", "O": "ABSENT in MG1655"}
@@ -1159,7 +1162,7 @@ for tag, pat, outname in SWEEPS:
         print("  tm ≥ 0.50 인 것이 없다"); continue
     S = pd.DataFrame(rows).sort_values("tm", ascending=False) \
           .drop_duplicates(["strain", "protein"])       # 단백질당 최고 seed 1건
-    S["tier"] = ["핵심" if v >= 0.90 else "주변" if v >= 0.70 else "폴드만" for v in S.tm]
+    S["tier"] = ["TM>=0.9" if v >= 0.90 else "TM 0.7-0.9" if v >= 0.70 else "TM 0.5-0.7" for v in S.tm]
     out = TBL/f"{outname}_exact.csv"
     S.to_csv(out, index=False, encoding="utf-8-sig")
     print(f"  tm 최대 {S.tm.max():.3f}  (1.0 초과 {int((S.tm > 1.0).sum())}개 — 0 이어야 정상)")
