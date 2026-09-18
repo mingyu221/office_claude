@@ -555,8 +555,17 @@ else:
     print(f"\n  ⚠ {_old.name} 없음 — 눈금 비교 없이 간다")
 
 # ---- Boltz 입력: 후보 단독 + Ni ----
-import yaml as _y
-BIN = BASE/"result"/"boltz"/"inputs_seqmotif"; BIN.mkdir(parents=True, exist_ok=True)
+#   ★ 폴더를 먼저 비운다. 안 비우면 이전 실행에서 상위 400 에 들었다가
+#     이번에 빠진 단백질의 YAML 이 그대로 남아 같이 돌아간다.
+#     (실제로 그래서 어느 버전이 만든 입력인지 알 수 없게 됐다)
+import yaml as _y, json, shutil, datetime
+BIN = BASE/"result"/"boltz"/"inputs_seqmotif"
+if BIN.exists() and any(BIN.glob("*.yaml")):
+    stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    old_dir = BIN.parent/f"inputs_seqmotif.old_{stamp}"
+    shutil.move(str(BIN), str(old_dir))
+    print(f"  기존 입력 {len(list(old_dir.glob('*.yaml')))}개를 {old_dir.name} 로 옮겼다")
+BIN.mkdir(parents=True, exist_ok=True)
 MAXLEN = 1200
 sel_ids = list(dict.fromkeys(list(D.head(TOPN).protein) + CAL))
 LEN = dict(zip(D.protein, D.len))
@@ -572,7 +581,18 @@ for pidv in sel_ids:
     (BIN/f"{pidv.replace('|','_')}.yaml").write_text(_y.safe_dump(doc, sort_keys=False))
     wrote.append(pidv); n += 1
 TOTRES = sum(len(SEQ["BL21"][k]) for k in wrote)
+# 어떤 설정으로 만든 입력인지 남긴다. 나중에 '이거 어느 버전이지' 를 없앤다
+(BIN/"_manifest.json").write_text(json.dumps({
+    "made_at": datetime.datetime.now().isoformat(timespec="seconds"),
+    "TOPN": TOPN, "MAXLEN": MAXLEN,
+    "n_written": n, "n_skipped_len": skip,
+    "calibration": CAL,
+    "mobile_aware": bool("mobile" in D.columns and D.mobile.notna().any()),
+    "score_rule": "Cys4(+3) XOR CXC/CXXC(+2) / MG없음 비프로파지(+3) / 폴드(+2) / 소형(+1) / pLDDT(±)",
+    "proteins": sorted(wrote),
+}, ensure_ascii=False, indent=1), encoding="utf-8")
 print(f"\n  Boltz 입력 {n}개 생성 (상위 {TOPN} + 눈금 {len(CAL)}, 길이 초과 제외 {skip})")
+print(f"  설정 기록: {BIN/'_manifest.json'}")
 print(f"  → {BIN}")
 print(f"  총 잔기 {TOTRES:,} — 기존 방식이면 여기에 630×{n} = {630*n:,} 이 더 붙는다")
 print(f"\n  ※ --use_msa_server 로 {n}건의 MSA 를 원격에서 받는다. 속도 제한이 걸리면")
@@ -600,8 +620,14 @@ print("    나눠 돌리거나 로컬 MSA 로 바꿀 것. 예측 자체보다 �
 #     · 2 × 길이가 토큰 상한 안
 #   여기에 폴드·균주·길이를 가중치로 얹어 정렬한다.
 # =============================================================================
-import yaml as _y
-DIN  = BASE/"result"/"boltz"/"inputs_cooclike"; DIN.mkdir(parents=True, exist_ok=True)
+import yaml as _y, json, shutil, datetime
+DIN = BASE/"result"/"boltz"/"inputs_cooclike"
+if DIN.exists() and any(DIN.glob("*.yaml")):
+    stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    old_dir = DIN.parent/f"inputs_cooclike.old_{stamp}"
+    shutil.move(str(DIN), str(old_dir))
+    print(f"  기존 입력 {len(list(old_dir.glob('*.yaml')))}개를 {old_dir.name} 로 옮겼다")
+DIN.mkdir(parents=True, exist_ok=True)
 MAXTOK, TOPD = 1200, 200
 
 CL = D[( (D.n_CXC.fillna(0) > 0) | (D.n_CXXC.fillna(0) > 0) ) &
@@ -685,7 +711,14 @@ if CRY.exists():
               f"(CXC 없음, {len(ns)} 잔기 ×2)")
         print("    이게 A 로 나오면 Boltz 가 Ni 을 아무 데나 넣는다는 뜻이다.")
 
+(DIN/"_manifest.json").write_text(json.dumps({
+    "made_at": datetime.datetime.now().isoformat(timespec="seconds"),
+    "TOPD": TOPD, "MAXTOK": MAXTOK, "n_written": n, "n_skipped_len": skip,
+    "선정": "CXC/CXXC 보유 + cys4_win < 4 (혼자서는 Cys4 를 못 만드는 것)",
+    "대조군": [f.name for f in DIN.glob("CTRL-*.yaml")] + [f.name for f in DIN.glob("NEG-*.yaml")],
+}, ensure_ascii=False, indent=1), encoding="utf-8")
 print(f"\n  이량체 입력 {n}개 (2×길이 > {MAXTOK} 제외 {skip}) + 대조군  → {DIN}")
+print(f"  설정 기록: {DIN/'_manifest.json'}")
 print(f"""
 cd "{BASE/'result'/'boltz'}"
 CUDA_VISIBLE_DEVICES=0 boltz predict inputs_cooclike \\
@@ -862,7 +895,15 @@ def running():
     except Exception: return None
     return pid if Path(f"/proc/{pid}").exists() else None
 
-n_in  = len(list((BOLTZ_ROOT/IN_DIR).glob("*.yaml")))
+n_in  = len([f for f in (BOLTZ_ROOT/IN_DIR).glob("*.yaml")])
+_man = BOLTZ_ROOT/IN_DIR/"_manifest.json"
+if _man.exists():
+    import json as _j
+    _m = _j.loads(_man.read_text())
+    print(f"  입력 생성 시각 {_m.get('made_at')}  (TOPN {_m.get('TOPN')}, "
+          f"mobile 반영 {_m.get('mobile_aware')})")
+else:
+    print("  ⚠ _manifest.json 없음 — 어느 설정으로 만든 입력인지 알 수 없다. Q5 를 다시 돌릴 것")
 n_out = len(glob.glob(str(BOLTZ_ROOT/OUT_DIR/"**"/"*_model_0.cif"), recursive=True))
 print("=" * 96); print("### 상태"); print("=" * 96)
 print(f"  입력  {BOLTZ_ROOT/IN_DIR}  {n_in}개")
