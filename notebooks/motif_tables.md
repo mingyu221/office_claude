@@ -43,7 +43,15 @@ STRUCT = {"BL21": TOOLS/"database"/"bacteriaDB"/"structures_UP000503272",
 
 SETS    = {"metal": "metal_run01_{s}.tsv", "atp": "atp_run02_{s}.tsv"}
 STRAINS = ["BL21", "MG1655", "Y19"]
+# 구조 DB 에 이름 규칙이 두 가지 섞여 있다.
+#   AF-{UniProt}-F1-model_v6.cif   AlphaFold DB
+#   cf_{UniParc}.pdb               AlphaFold DB 에 없어 자체 예측한 것
+# accession 만 뽑으면 후자가 통째로 빠진다 (BL21 66개, Y19 15개).
+# 그러므로 키는 파일명 stem 으로 잡고, accession 은 UniProt 조회용으로만 쓴다.
 ACC_RE  = re.compile(r"AF-([A-Za-z0-9]+)-F1")
+def stem_of(tid):  return Path(str(tid)).stem
+def acc_of(tid):
+    m = ACC_RE.search(str(tid));  return m.group(1) if m else None
 
 print("=" * 96); print("### 경로 점검"); print("=" * 96)
 ok = True
@@ -67,11 +75,12 @@ if not ok:
 
 ```python
 # =============================================================================
-# CELL M2 | TSV 를 단백질 단위로 정리하고, 각 accession 에 이름을 붙인다
-#   ATP TSV 는 한 단백질이 여러 행으로 나온다 (매치가 여럿). 집합 연산은
-#   단백질 단위로 해야 하므로 행 수와 단백질 수를 둘 다 들고 간다.
-#   이름은 crosswalk -> 프로테옴 FASTA -> UniProt 순으로 찾고,
-#   UniProt 조회 결과는 캐시에 저장해 두 번 묻지 않는다.
+# CELL M2 | TSV 를 구조 단위로 정리하고 이름을 붙인다
+#   한 행이 한 구조이고 한 단백질이다 — 중복은 없다. 다만 구조 파일 이름이
+#   AF-*(AlphaFold DB) 와 cf_*(자체 예측) 두 가지라, accession 으로 키를 잡으면
+#   후자가 조용히 빠진다. 키는 stem 으로 잡고 둘을 각각 세어 표에 남긴다.
+#   이름은 crosswalk -> 프로테옴 FASTA -> UniProt 순으로 찾고, 조회 결과는
+#   캐시에 저장해 두 번 묻지 않는다.
 # =============================================================================
 def read_set(kind, strain):
     p = FDD/SETS[kind].format(s=strain)
@@ -79,20 +88,24 @@ def read_set(kind, strain):
     d = pd.read_csv(p, sep="\t")
     d.columns = [c.strip().lstrip("#") for c in d.columns]
     n_rows = len(d)
-    d["acc"] = d.tid.astype(str).map(
-        lambda t: (ACC_RE.search(t).group(1) if ACC_RE.search(t) else None))
-    d = d.dropna(subset=["acc"])
+    d["stem"] = d.tid.map(stem_of)
+    d["acc"]  = d.tid.map(acc_of)
+    d["src"]  = d.acc.notna().map({True: "AF", False: "cf"})
     if "idf" in d: d = d.sort_values("idf", ascending=False)
-    return d.drop_duplicates("acc").set_index("acc"), n_rows
+    return d.drop_duplicates("stem").set_index("stem"), n_rows
 
 DATA, NROW = {}, {}
 print("=" * 96); print("### 원본"); print("=" * 96)
 for k in SETS:
     for s in STRAINS:
         DATA[(k, s)], NROW[(k, s)] = read_set(k, s)
-        t = DATA[(k, s)]
-        print(f"  {k:6s} {s:8s} " + ("없음" if t is None else
-              f"{NROW[(k,s)]:5d}행 / {len(t):5d}단백질"))
+        d = DATA[(k, s)]
+        if d is None: print(f"  {k:6s} {s:8s} 없음"); continue
+        c = d.src.value_counts().to_dict()
+        print(f"  {k:6s} {s:8s} {NROW[(k,s)]:5d}행 / {len(d):5d}구조  "
+              f"(AlphaFold {c.get('AF',0)}, 자체예측 {c.get('cf',0)})")
+        if NROW[(k, s)] != len(d):
+            print(f"      ⚠ 행 {NROW[(k,s)]} ≠ 구조 {len(d)} — 같은 구조가 두 번 나왔다")
 assert all(DATA[(k, s)] is not None for k in SETS for s in STRAINS), "TSV 누락 — M1 점검"
 
 # ---- 프로테옴 크기 ----
@@ -112,13 +125,12 @@ for s in STRAINS:
             h = l[1:].rstrip(); k = h.split()[0]
             HDR[k] = h[len(k):].strip()
 
-XW = {}
+XW = {}       # stem -> GenBank protein ID
 _x = TBL/"id_crosswalk_struct_to_genbank.csv"
 if _x.exists():
     d = pd.read_csv(_x).dropna(subset=["protein"])
     for k, v in d.set_index("tid")["protein"].to_dict().items():
-        m = ACC_RE.search(str(k))
-        if m: XW[m.group(1)] = str(v).split(",")[0]
+        XW[stem_of(k)] = str(v).split(",")[0]
 print(f"  crosswalk {len(XW)}건, FASTA 헤더 {len(HDR)}건")
 
 UNI = {}
@@ -128,8 +140,11 @@ if CACHE.exists():
     UNI.update(dict(zip(d.acc.astype(str), d.name.astype(str))))
     print(f"  이름 캐시 {len(UNI)}건 재사용")
 
-NEED = sorted({a for s in STRAINS for a in DATA[("metal", s)].index
-               if a not in XW and a not in UNI})
+# crosswalk 로 이름이 안 붙은 것만 UniProt 에 묻는다 (AF 형식만 accession 이 있다)
+NEED = sorted({DATA[("metal", s)].loc[k, "acc"] for s in STRAINS
+               for k in DATA[("metal", s)].index
+               if k not in XW and pd.notna(DATA[("metal", s)].loc[k, "acc"])
+               and DATA[("metal", s)].loc[k, "acc"] not in UNI})
 if NEED:
     import urllib.request, urllib.parse, time
     print(f"\n  UniProt 조회 {len(NEED)}개")
@@ -160,13 +175,16 @@ if NEED:
                      ).to_csv(CACHE, sep="\t", index=False)
         print(f"  캐시 저장: {CACHE}")
 
-def name_of(acc):
-    pid = XW.get(acc)
+def name_of(stem, acc=None):
+    """stem 으로 crosswalk -> FASTA, 없으면 accession 으로 UniProt."""
+    pid = XW.get(stem)
     if pid and pid in HDR: return pid, HDR[pid]
-    if acc in UNI:         return pid or acc, UNI[acc]
-    return pid or acc, ""
+    if acc and acc in UNI: return pid or acc, UNI[acc]
+    if pid:                return pid, ""
+    return acc or stem, ""
 
-_n = sum(1 for s in STRAINS for a in DATA[("metal", s)].index if name_of(a)[1])
+_n = sum(1 for s in STRAINS for k in DATA[("metal", s)].index
+         if name_of(k, DATA[("metal", s)].loc[k, "acc"])[1])
 print(f"\n  metal 히트 중 이름이 붙은 것 {_n} / "
       f"{sum(len(DATA[('metal', s)]) for s in STRAINS)}")
 ```
@@ -188,17 +206,20 @@ TBL.mkdir(parents=True, exist_ok=True)
 
 # ---------------------------- 표 1 ----------------------------
 print("=" * 96); print("### 표 1 — 균주별 모티프 매칭"); print("=" * 96)
-T1 = pd.DataFrame([{
-    "균주": s,
-    "metal 행": NROW[("metal", s)], "metal 단백질": len(DATA[("metal", s)]),
-    "ATP 행": NROW[("atp", s)],     "ATP 단백질": len(DATA[("atp", s)]),
-    "프로테옴": NPROT[s],
-    "metal %": round(100*len(DATA[("metal", s)])/NPROT[s], 2),
-    "ATP %":   round(100*len(DATA[("atp", s)])/NPROT[s], 2),
-} for s in STRAINS])
+def _cnt(k, s):
+    d = DATA[(k, s)]; c = d.src.value_counts().to_dict()
+    return len(d), c.get("AF", 0), c.get("cf", 0)
+rows = []
+for s in STRAINS:
+    m, m_af, m_cf = _cnt("metal", s); a, a_af, a_cf = _cnt("atp", s)
+    rows.append({"균주": s, "metal": m, "metal(AF/cf)": f"{m_af}/{m_cf}",
+                 "ATP": a, "ATP(AF/cf)": f"{a_af}/{a_cf}", "프로테옴": NPROT[s],
+                 "metal %": round(100*m/NPROT[s], 2), "ATP %": round(100*a/NPROT[s], 2)})
+T1 = pd.DataFrame(rows)
 print(T1.to_string(index=False))
 T1.to_csv(TBL/"motif_counts_by_strain.csv", index=False, encoding="utf-8-sig")
-print("\n  ATP 는 행 수 ≠ 단백질 수다. 집합 연산에는 단백질 수를 쓴다.")
+print("\n  한 행이 한 구조이고 한 단백질이다. AF/cf 는 구조 출처가 둘이라는 뜻이고")
+print("  (AlphaFold DB / 자체 예측), accession 으로 키를 잡으면 cf 쪽이 빠진다.")
 print("  ATP 보유율이 20%대면 그 축은 선별력이 없다.")
 
 # ---------------------------- 표 2 ----------------------------
@@ -208,8 +229,8 @@ for s in STRAINS:
     M_, A_ = DATA[("metal", s)], DATA[("atp", s)]
     for a in sorted(set(M_.index) & set(A_.index),
                     key=lambda x: -float(M_.loc[x, "idf"])):
-        pid, desc = name_of(a)
-        rows.append({"strain": s, "acc": a, "protein": pid,
+        pid, desc = name_of(a, M_.loc[a, "acc"])
+        rows.append({"strain": s, "struct": a, "protein": pid,
                      "nres": M_.loc[a, "nres"], "plddt": M_.loc[a, "plddt"],
                      "metal_rmsd": M_.loc[a, "min_rmsd"],
                      "metal_res": M_.loc[a, "matching_residues"],
@@ -231,7 +252,7 @@ for k in sorted(shared):
 only = T2[(~T2._key.isin(shared)) & (T2.strain == "BL21")]
 print(f"\n  ★ BL21 에만 남는 것 {len(only)}개 — 여기가 볼 자리다")
 if len(only):
-    print(only[["acc", "protein", "nres", "plddt", "metal_res", "desc"]].to_string(index=False))
+    print(only[["struct", "protein", "nres", "plddt", "metal_res", "desc"]].to_string(index=False))
 T2.drop(columns=["_key"]).to_csv(TBL/"motif_metal_and_atp.csv",
                                  index=False, encoding="utf-8-sig")
 
@@ -248,12 +269,12 @@ rows = []
 for s in STRAINS:
     M_ = DATA[("metal", s)]; atp_hit = set(DATA[("atp", s)].index)
     for a in M_.index:
-        pid, desc = name_of(a)
+        pid, desc = name_of(a, M_.loc[a, "acc"])
         cat, ev = "해당 없음", ""
         for label, pat in NTP_RULES:
             m = re.search(pat, desc, re.I)
             if m: cat, ev = label, m.group(0); break
-        rows.append({"strain": s, "acc": a, "protein": pid, "ntp": cat,
+        rows.append({"strain": s, "struct": a, "protein": pid, "ntp": cat,
                      "evidence": ev, "ATP모티프": "O" if a in atp_hit else ".",
                      "nres": M_.loc[a, "nres"], "plddt": M_.loc[a, "plddt"],
                      "metal_rmsd": M_.loc[a, "min_rmsd"], "desc": desc[:70]})
@@ -269,7 +290,7 @@ print("\n  분류 x 균주")
 print(pd.crosstab(T3.ntp, T3.strain).reindex(list(ORD)).fillna(0).astype(int).to_string())
 hot = T3[T3.ntp != "해당 없음"]
 print(f"\n  NTP 소모로 분류된 {len(hot)}개")
-print(hot[["strain", "acc", "protein", "ntp", "evidence", "ATP모티프",
+print(hot[["strain", "struct", "protein", "ntp", "evidence", "ATP모티프",
            "nres", "plddt", "desc"]].to_string(index=False) if len(hot) else "  없음")
 T3.to_csv(TBL/"motif_metal_ntp.csv", index=False, encoding="utf-8-sig")
 
