@@ -1232,39 +1232,47 @@ print("    안 붙이면 근사값이라 1.0 을 넘고, tier 경계 근처 개�
 
 ---
 
-## CELL F12 — 접근번호에 통용되는 이름을 붙인다
+## CELL F12 — 접근번호에 이름을 붙이고 표를 정리한다
 
 ```python
 # =============================================================================
-# CELL F12 | AAC74259.1 / P37655 만 있으면 아무도 못 알아본다
+# CELL F12 | AAC75234.1 과 P33030 이 같은 단백질임을 표에서 읽히게 한다
 #
-#   두 출처에서 로컬로 긁는다. 네트워크 불필요.
-#     (1) GenBank 접근번호 (AAC*/AAT*/QJZ*/AKE*) → 프로테옴 FASTA 헤더
-#         NCBI 형식이면 [gene=...] [locus_tag=b####] [protein=...] 가 들어 있고,
-#         아니면 헤더 뒤쪽 설명문을 그대로 쓴다
-#     (2) UniProt 접근번호 (P37655 등) → AlphaFold CIF 의 _struct.title
-#         AFDB 모델 파일은 단백질 이름을 제목으로 달고 있다
+#   ID 체계가 셋이다 — BL21/Y19 는 GenBank, MG1655 구조는 UniProt.
+#   번호로는 대조가 안 되므로 **이름을 붙여 나란히 놓는다.**
 #
-#   그래도 못 찾으면 빈칸으로 두고 몇 개인지 찍는다. 추측해 채우지 않는다.
+#   구조
+#     1. 이름 사전을 한 번 만든다   프로테옴 FASTA(GenBank) + 구조 파일(UniProt)
+#     2. 표1·2·3 에 같은 방식으로 붙인다
+#     3. 표4  서열 답 vs 구조 답 대조
+#     4. 표5  BL21 8 vs MG1655 7 이 진짜 차이인지 검증
+#     5. 감사  각 표에서 이름을 못 찾은 접근번호를 전부 보고한다
+#
+#   전제: F6(표1 원본) · F7(표2 원본) · F9(슬라이드 표) · F10(표3) 이 끝나 있을 것.
+#   없는 표는 건너뛰고 무엇이 없는지 찍는다.
 # =============================================================================
 import re
-NAME, GENE, LOCUS = {}, {}, {}
+SLIDE = TBL/"slide_foldseek"; SLIDE.mkdir(parents=True, exist_ok=True)
 
-# ---- (1) 프로테옴 FASTA 헤더 ----
+# =============================================================================
+# 1. 이름 사전
+# =============================================================================
 FAA = {"BL21":   TOOLS/"database"/"bacteriaDB"/"inhouseDB"/"bl21_db_match_qjz.faa",
        "MG1655": TOOLS/"database"/"protein_list"/"mg1655_protein.faa",
        "Y19":    TOOLS/"database"/"bacteriaDB"/"inhouseDB"/"y19_db_match.faa"}
-print("=" * 100); print("### 헤더 형식 확인"); print("=" * 100)
-for st, p in FAA.items():
-    if not p.exists(): print(f"  X  {st}: {p}"); continue
-    with open(p, errors="ignore") as fh:
-        for l in fh:
-            if l.startswith(">"): print(f"  {st:8s} {l.rstrip()[:130]}"); break
-    for l in open(p, errors="ignore"):
+NAME, GENE, LOCUS = {}, {}, {}
+
+print("=" * 110); print("### 1. 이름 사전"); print("=" * 110)
+for st, fp in FAA.items():
+    if not fp.exists():
+        print(f"  X  {st:8s} FASTA 없음: {fp}"); continue
+    n0 = len(NAME)
+    first = None
+    for l in open(fp, errors="ignore"):
         if not l.startswith(">"): continue
         h = l[1:].rstrip()
-        acc = re.search(r"\b((?:AAC|AAT|AAN|QJZ|AKE|AGE|AHZ)\w*\.\d+)", h)
-        acc = acc.group(1) if acc else h.split()[0]
+        if first is None: first = h
+        acc = h.split()[0]
         g  = re.search(r"\[gene=([^\]]+)\]", h)
         lt = re.search(r"\[locus_tag=([^\]]+)\]", h)
         pr = re.search(r"\[protein=([^\]]+)\]", h)
@@ -1272,22 +1280,18 @@ for st, p in FAA.items():
         if lt: LOCUS[acc] = lt.group(1)
         if pr: NAME[acc]  = pr.group(1)
         else:
-            # NCBI 대괄호 형식이 아니면 접근번호 뒤 ~ 종명 앞까지를 이름으로
             txt = re.sub(r"^\S+\s*", "", h)
-            txt = re.split(r"\s*\[(?:Escherichia|Citrobacter)", txt)[0]
-            if txt and acc not in NAME: NAME[acc] = txt.strip()[:70]
-print(f"\n  FASTA 에서 이름 {len(NAME)} · 유전자명 {len(GENE)} · 로커스 {len(LOCUS)}")
-print("  (헤더가 NCBI 대괄호 형식이 아니라 gene/locus_tag 는 0 이다 — 설명문만 쓴다)")
-for s, d in STRUCT_ALL.items():
-    fs_ = [f for f in Path(d).iterdir() if f.suffix.lower() in (".cif", ".pdb")][:1]
-    print(f"  {s:8s} 구조 파일 예: {fs_[0].name if fs_ else '없음'}")
+            txt = re.split(r"\s*\[(?:Escherichia|Citrobacter|Carboxydothermus)", txt)[0]
+            if txt.strip(): NAME[acc] = txt.strip()[:70]
+    print(f"  O  {st:8s} +{len(NAME)-n0:5d}개   예: {str(first)[:95]}")
+print(f"\n  GenBank 이름 {len(NAME)} · gene= {len(GENE)} · locus_tag= {len(LOCUS)}")
+if not GENE:
+    print("  (헤더가 NCBI 대괄호 형식이 아니라 gene/locus_tag 는 없다 — 설명문을 쓴다)")
 
-# ---- (2) AlphaFold CIF 의 _struct.title ----
 def struct_title(path):
-    """AFDB 모델 파일에서 단백질 이름을 꺼낸다.
-         .cif  →  _struct.title 'Zinc-binding GTPase YeiR'
-         .pdb  →  TITLE  ALPHAFOLD MONOMER V2.0 PREDICTION FOR ... (P0AAN3)
-       앞서 .cif 만 찾아서 .pdb 로 받아 둔 프로테옴에서는 전부 빈칸이 나왔다."""
+    """AFDB 모델에서 단백질 이름.
+         .cif → _struct.title 'Zinc-binding GTPase YeiR'
+         .pdb → TITLE  ALPHAFOLD MONOMER V2.0 PREDICTION FOR ... (P0AAN3)"""
     try:
         txt = open(path, errors="ignore").read(8000)
     except Exception:
@@ -1299,191 +1303,227 @@ def struct_title(path):
     if ttl:
         m = re.search(r"PREDICTION FOR\s+(.*)", ttl, re.I)
         s = (m.group(1) if m else ttl).strip()
-        s = re.sub(r"\s*\([A-Z0-9]+\)\s*$", "", s)          # 끝의 (P0AAN3) 제거
+        s = re.sub(r"\s*\([A-Z0-9]+\)\s*$", "", s)
         return s.strip() or None
     return None
 
-UNI_TITLE = {}
+print("\n  구조 DB (UniProt 이름은 여기서 읽는다)")
+for s, d in STRUCT_ALL.items():
+    fs_ = [f for f in Path(d).iterdir() if f.suffix.lower() in (".cif", ".pdb")][:1]
+    ex = fs_[0] if fs_ else None
+    print(f"    {s:8s} {Path(d).name:28s} 예: {ex.name if ex else '없음'}"
+          + (f"  →  {struct_title(ex)}" if ex else ""))
+
+UNI = {}
 def uniprot_name(acc):
-    if acc in UNI_TITLE: return UNI_TITLE[acc]
+    if acc in UNI: return UNI[acc]
     for d in STRUCT_ALL.values():
         for pat in (f"AF-{acc}-F1-model_v*.cif", f"AF-{acc}-F1-model_v*.pdb",
-                    f"AF-{acc}-*.cif", f"AF-{acc}-*.pdb", f"*{acc}*"):
+                    f"AF-{acc}-*.cif", f"AF-{acc}-*.pdb"):
             for f in Path(d).glob(pat):
-                if f.suffix.lower() not in (".cif", ".pdb"): continue
                 n = struct_title(f)
-                if n: UNI_TITLE[acc] = n; return n
-    UNI_TITLE[acc] = None; return None
+                if n: UNI[acc] = n; return n
+    UNI[acc] = None; return None
+
+ACC_GB  = re.compile(r"^[A-Z]{3}\d+\.\d+$")               # AAC75234.1 / QJZ12719.1
+ACC_UNI = re.compile(r"^[A-NR-Z][0-9][A-Z0-9]{3}[0-9]$|^[OPQ][0-9][A-Z0-9]{3}[0-9]$")
 
 def label(acc):
-    """접근번호 하나를 사람이 읽는 이름으로."""
+    """접근번호 하나 → 사람이 읽는 이름. 못 찾으면 빈 문자열."""
     a = str(acc).strip()
-    if re.fullmatch(r"[A-NR-Z][0-9][A-Z0-9]{3}[0-9]", a) or re.fullmatch(r"[A-Z0-9]{6,10}", a):
-        n = uniprot_name(a)
-        if n: return n
-    parts = []
-    if a in GENE:  parts.append(GENE[a])
-    if a in LOCUS: parts.append(f"({LOCUS[a]})")
-    if a in NAME:  parts.append(NAME[a])
-    return " ".join(parts) if parts else ""
+    if not a or a.lower() in ("nan", "none", "genome only", "absent", ""): return ""
+    if ACC_GB.match(a):
+        parts = [GENE[a]] if a in GENE else []
+        if a in LOCUS: parts.append(f"({LOCUS[a]})")
+        if a in NAME:  parts.append(NAME[a])
+        return " ".join(parts)
+    if ACC_UNI.match(a) or re.fullmatch(r"[A-Z0-9]{6,10}", a):
+        return uniprot_name(a) or ""
+    return NAME.get(a, "")
 
-# ---- 표2 에 이름 열 붙이기 ----
-C = pd.read_csv(TBL/"cooc_fold_mg1655.csv")
-C["BL21_name"]   = [label(p) for p in C.protein]
-def _mg_acc(v, g):
-    """근거 문장에서 MG1655 접근번호를 꺼낸다.
-       '게놈에만 있음 fident 0.987' 도 '있음 (\\S+)' 에 걸려 'fident' 를 잡았다.
-       판정 기호를 먼저 보고, 접근번호처럼 생긴 것만 받는다."""
-    if v == "~": return "genome only"
-    if v == "O": return "absent"
-    m = re.search(r"있음\s+([A-Z]{3}\d+\.\d+)", str(g))
-    return m.group(1) if m else ""
-C["MG1655_acc"] = [_mg_acc(v, g) for v, g in zip(C.MG1655, C["근거"])]
-C["MG1655_name"] = [label(a) for a in C.MG1655_acc]
-C["fident"]      = [ (re.search(r"fident ([\d.]+)", str(g)).group(1)
-                      if re.search(r"fident ([\d.]+)", str(g)) else None)
-                     for g in C["근거"] ]
-T2 = C[["protein", "BL21_name", "tm_CooC", "MG1655_acc", "MG1655_name", "fident"]] \
-       .rename(columns={"protein": "BL21_acc", "tm_CooC": "TM_to_CooC1"}) \
-       .sort_values("TM_to_CooC1", ascending=False)
-T2.to_csv(SLIDE/"table2_bl21_family_vs_MG1655.csv", index=False, encoding="utf-8-sig")
-print("\n" + "=" * 100); print("### 표2 — 이름 붙임"); print("=" * 100)
-print(T2.to_string(index=False))
+# =============================================================================
+# 2. 표에 이름 붙이기 — 접근번호 열 바로 뒤에 넣는다
+# =============================================================================
+def annotate(df, acc_cols):
+    """acc_cols 각각의 바로 뒤에 <col>_name 을 끼워 넣는다."""
+    out = df.copy()
+    for c in acc_cols:
+        if c not in out.columns: continue
+        out[f"{c}_name"] = [label(a) for a in out[c]]
+    order = []
+    for c in out.columns:
+        if c.endswith("_name"): continue
+        order.append(c)
+        if f"{c}_name" in out.columns: order.append(f"{c}_name")
+    return out[order]
 
-# ---- 표3 에도 이름을 붙인다 (GenBank 쪽과 UniProt 쪽을 나란히) ----
-_t3p = SLIDE/"table3_family_correspondence.csv"
-if _t3p.exists():
-    X3n = pd.read_csv(_t3p)
-    if "BL21" in X3n.columns:
-        X3n["BL21_name"] = [label(a) for a in X3n.BL21]
-    for s in ["MG1655", "Y19"]:
-        if f"{s}_hit" in X3n.columns:
-            X3n[f"{s}_name"] = [label(a) for a in X3n[f"{s}_hit"]]
-    # 이름이 바로 옆에 오도록 열 순서를 짠다
-    ORD3 = ["BL21", "BL21_name", "TM_to_CooC1"]
-    for s in ["MG1655", "Y19"]:
-        ORD3 += [f"{s}_hit", f"{s}_name", f"{s}_TM"]
-    X3n = X3n[[c for c in ORD3 if c in X3n.columns] +
-              [c for c in X3n.columns if c not in ORD3]]
-    X3n.to_csv(_t3p, index=False, encoding="utf-8-sig")
-    print("\n" + "=" * 110); print("### 표3 — 이름 붙임"); print("=" * 110)
-    print(X3n.to_string(index=False))
-    print("\n  같은 행의 BL21_name / MG1655_name / Y19_name 이 같은 단백질을 가리키면")
-    print("  GenBank 와 UniProt 로 ID 체계가 달라도 같은 것임이 이름으로 확인된다.")
+def audit(df, acc_cols, tag):
+    miss = set()
+    for c in acc_cols:
+        if c not in df.columns: continue
+        for a in df[c]:
+            s = str(a).strip()
+            if s and s.lower() not in ("nan", "none", "genome only", "absent") \
+               and not label(s): miss.add(s)
+    AUDIT[tag] = sorted(miss)
+AUDIT = {}
 
-# ---- 표1 의 Top hit 에도 ----
-T1p = SLIDE/"table1_fold_counts.csv"
-if T1p.exists():
-    T1 = pd.read_csv(T1p)
-    T1["Top hit name"] = [label(h) for h in T1["Top hit"]]
-    T1.to_csv(T1p, index=False, encoding="utf-8-sig")
-    print("\n" + "=" * 100); print("### 표1 — Top hit 이름"); print("=" * 100)
-    print(T1[["Strain", "Frame", "Top hit", "Top hit name", "Top TM"]].to_string(index=False))
+print("\n" + "=" * 110); print("### 2. 표에 이름 붙이기"); print("=" * 110)
 
-# ---- 못 찾은 것 ----
-miss = [a for a in list(T2.BL21_acc) + list(T2.MG1655_acc)
-        if a not in ("genome only", "absent") and not label(a)]
-print(f"\n  이름 못 찾은 접근번호 {len(miss)}개" + (f": {miss}" if miss else ""))
-if miss:
-    print("  → FASTA 헤더에 설명이 없는 경우다. NCBI/UniProt 에서 직접 확인할 것:")
-    for a in miss[:5]:
-        print(f"     https://www.ncbi.nlm.nih.gov/protein/{a}")
-print(f"\n저장: {SLIDE/'table2_bl21_family_vs_MG1655.csv'}")
-
-# ---- 표4: 서열(mmseqs) 과 구조(Foldseek) 가 같은 상대를 가리키는가 ----
-#   표3 은 F10 이 만든다. 이 블록은 F12 에 둔다 — 표2 의 이름·접근번호 열이
-#   여기서 만들어지기 때문이다 (F10 에 두면 아직 없어서 KeyError 가 난다).
-_t3 = SLIDE/"table3_family_correspondence.csv"
-if not _t3.exists():
-    print(f"\n  표4 건너뜀 — {_t3.name} 이 없다. CELL F10 을 먼저 돌릴 것")
+# ---- 표1 ----
+P1 = SLIDE/"table1_fold_counts.csv"
+if P1.exists():
+    T1 = pd.read_csv(P1)
+    T1 = annotate(T1, ["Top hit"])
+    T1.to_csv(P1, index=False, encoding="utf-8-sig"); audit(T1, ["Top hit"], "표1")
+    print("\n[표1]")
+    print(T1[[c for c in ["Strain","Frame","TM>=0.5","Top hit","Top hit_name","Top TM"]
+              if c in T1.columns]].to_string(index=False))
 else:
-    X3 = pd.read_csv(_t3)
-    need = {"BL21", "MG1655_hit", "MG1655_TM"} - set(X3.columns)
-    if need:
-        print(f"\n  표4 건너뜀 — 표3 에 {need} 열이 없다. F10 을 최신 코드로 다시 돌릴 것")
-    else:
-        CMP2 = X3.merge(T2[["BL21_acc", "MG1655_acc", "MG1655_name", "fident"]]
-                          .rename(columns={"BL21_acc": "BL21",
-                                           "MG1655_acc": "서열_상대",
-                                           "MG1655_name": "서열_상대_이름"}),
-                        on="BL21", how="left")
-        CMP2["구조_상대_이름"] = [label(a) for a in CMP2.MG1655_hit]
-        CMP2 = CMP2.rename(columns={"MG1655_hit": "구조_상대", "MG1655_TM": "구조_TM"})
-        COLS = ["BL21", "TM_to_CooC1", "서열_상대", "서열_상대_이름", "fident",
-                "구조_상대", "구조_상대_이름", "구조_TM"]
-        CMP2 = CMP2[[c for c in COLS if c in CMP2.columns]]
-        print("\n" + "=" * 110)
-        print("### 표4 — 서열(mmseqs) 과 구조(Foldseek) 가 같은 상대를 가리키는가")
-        print("=" * 110)
-        print(CMP2.to_string(index=False))
-        # ID 체계가 달라(GenBank vs UniProt) 접근번호로는 대조가 안 된다. 이름으로 본다.
-        def _same(a, b):
-            a, b = str(a).lower(), str(b).lower()
-            if not a.strip() or not b.strip(): return None
-            ta = {w for w in re.findall(r"[a-z]{3,}", a)} - {"protein", "family", "putative"}
-            tb = {w for w in re.findall(r"[a-z]{3,}", b)} - {"protein", "family", "putative"}
-            return bool(ta & tb)
-        CMP2["일치"] = [("O" if _same(a, b) else "." if _same(a, b) is False else "?")
-                       for a, b in zip(CMP2.get("서열_상대_이름", []),
-                                       CMP2.get("구조_상대_이름", []))]
-        diff = CMP2[CMP2["일치"] == "."]
-        print(f"\n  이름이 겹치는 행 {int((CMP2['일치']=='O').sum())} / {len(CMP2)}")
-        if len(diff):
-            print(f"\n  ★ 서열과 구조가 다른 단백질을 가리키는 행 {len(diff)}개 —")
-            print("    구조 검색이 도메인만 닮은 다른 단백질을 집었을 수 있다.")
-            print(diff[[c for c in ["BL21", "서열_상대_이름", "구조_상대_이름",
-                                    "구조_TM"] if c in diff.columns]].to_string(index=False))
-        CMP2.to_csv(SLIDE/"table4_seq_vs_struct.csv", index=False, encoding="utf-8-sig")
-        print(f"\n저장: {SLIDE/'table4_seq_vs_struct.csv'}")
+    print(f"\n[표1] 없음 — CELL F9 를 먼저 ({P1.name})")
 
-        # ---- 8 vs 7 의 정체: 진짜 차이인가, 컷 0.5 의 경계 효과인가 ----
-        #   BL21 8개 각각의 MG1655 상대가 MG1655 목록(TM>=0.5)에 있는지 보고,
-        #   없으면 **그 상대의 실제 TM** 을 원본 m8 에서 찾아 얼마나 모자라는지 잰다.
-        #   0.49 같은 값이면 그건 균주 차이가 아니라 컷에 걸린 것이다.
-        print("\n" + "=" * 110)
-        print("### BL21 8개 vs MG1655 7개 — 어디서 갈렸나")
-        print("=" * 110)
-        MGLIST = set(F[(F.frame == "예측") & (F.strain == "MG1655")].protein)
-        print(f"  MG1655 목록(TM>=0.5): {sorted(MGLIST)}")
+# ---- 표2 ----
+P2src = TBL/"cooc_fold_mg1655.csv"
+T2 = None
+if P2src.exists():
+    C = pd.read_csv(P2src)
+    def mg_acc(v, g):
+        if v == "~": return "genome only"
+        if v == "O": return "absent"
+        m = re.search(r"있음\s+([A-Z]{3}\d+\.\d+)", str(g))
+        return m.group(1) if m else ""
+    def mg_fid(g):
+        m = re.search(r"fident ([\d.]+)", str(g)); return m.group(1) if m else None
+    T2 = pd.DataFrame({
+        "BL21_acc":    C.protein,
+        "TM_to_CooC1": C.tm_CooC,
+        "MG1655_acc":  [mg_acc(v, g) for v, g in zip(C.MG1655, C["근거"])],
+        "fident":      [mg_fid(g) for g in C["근거"]],
+        "MG1655_판정": C.MG1655,
+    })
+    T2 = annotate(T2, ["BL21_acc", "MG1655_acc"]).sort_values("TM_to_CooC1",
+                                                              ascending=False)
+    T2.to_csv(SLIDE/"table2_bl21_family_vs_MG1655.csv", index=False,
+              encoding="utf-8-sig")
+    audit(T2, ["BL21_acc", "MG1655_acc"], "표2")
+    print("\n[표2] 서열(mmseqs) 기준")
+    print(T2.to_string(index=False))
+else:
+    print(f"\n[표2] 없음 — CELL F7 을 먼저 ({P2src.name})")
 
-        raw = FSD/f"af_vs_MG1655_{Path(STRUCT_ALL['MG1655']).name}.m8"
-        TMALL = {}
-        if raw.exists() and raw.stat().st_size:
-            d_ = pd.read_csv(raw, sep="\t", names=FFMT.split(","))
-            d_["prot"] = d_.target.apply(lambda x: Path(str(x)).stem) \
-                          .str.replace(r"_[A-Za-z0-9]$", "", regex=True)
-            d_ = d_.sort_values("alntmscore", ascending=False).drop_duplicates("prot")
-            TMALL = {pid(k): float(v) for k, v in zip(d_.prot, d_.alntmscore)}
+# ---- 표3 ----
+P3 = SLIDE/"table3_family_correspondence.csv"
+T3 = None
+if P3.exists():
+    T3 = pd.read_csv(P3)
+    T3 = annotate(T3, [c for c in ["BL21", "MG1655_hit", "Y19_hit"] if c in T3.columns])
+    T3.to_csv(P3, index=False, encoding="utf-8-sig")
+    audit(T3, ["BL21", "MG1655_hit", "Y19_hit"], "표3")
+    print("\n[표3] 구조(Foldseek) 기준")
+    print(T3.to_string(index=False))
+else:
+    print(f"\n[표3] 없음 — CELL F10 을 먼저 ({P3.name})")
 
-        rows2 = []
-        for _, r in CMP2.iterrows():
-            h = str(r.get("구조_상대", ""))
-            rows2.append({"BL21": r.BL21, "BL21_TM": r.TM_to_CooC1,
-                          "MG1655_상대": h,
-                          "목록에있나": "O" if h in MGLIST else ".",
-                          "MG1655_TM": round(TMALL[h], 3) if h in TMALL else None})
-        Z = pd.DataFrame(rows2)
-        print()
-        print(Z.to_string(index=False))
+# =============================================================================
+# 3. 표4 — 서열 답과 구조 답이 같은 단백질을 가리키는가
+# =============================================================================
+def same_protein(a, b):
+    """이름으로 같은 단백질인지. 대소문자·수식어를 걷어내고 겹치는 낱말을 본다."""
+    STOP = {"protein", "family", "putative", "domain", "containing", "uncharacterized",
+            "predicted", "probable", "type", "subunit"}
+    ta = {w for w in re.findall(r"[a-z]{3,}", str(a).lower())} - STOP
+    tb = {w for w in re.findall(r"[a-z]{3,}", str(b).lower())} - STOP
+    if not ta or not tb: return None
+    return bool(ta & tb)
 
-        out_ = Z[Z.목록에있나 == "."]
-        dup_ = Z[Z.MG1655_상대.duplicated(keep=False) & (Z.MG1655_상대 != "")]
-        print(f"\n  MG1655 상대가 목록 밖인 것: {len(out_)}개")
-        for _, r in out_.iterrows():
-            v = r.MG1655_TM
-            if v is not None:
-                print(f"    {r.BL21}: BL21 {r.BL21_TM:.3f} / MG1655 {v:.3f}"
-                      + ("   ← 컷 0.5 바로 아래. 균주 차이가 아니라 경계 효과다"
-                         if 0.40 <= v < 0.50 else ""))
-            else:
-                print(f"    {r.BL21}: MG1655 쪽 TM 을 원본에서 못 찾았다")
-        if len(dup_):
-            print(f"\n  서로 다른 BL21 단백질이 **같은 MG1655 상대**를 가리키는 경우: "
-                  f"{dup_.MG1655_상대.nunique()}개 상대에 {len(dup_)}행")
-            print(dup_.to_string(index=False))
-            print("    이것도 8 vs 7 의 차이를 만든다 — 8개가 7개로 접힌 것이다")
-        print("\n  ★ 슬라이드에 '8 vs 7' 을 차이로 쓰지 말 것.")
-        print("    같은 단백질이 컷 0.5 를 한쪽만 넘었거나, 둘이 한 상대로 접힌 결과다.")
-        Z.to_csv(SLIDE/"table5_8vs7.csv", index=False, encoding="utf-8-sig")
-        print(f"\n저장: {SLIDE/'table5_8vs7.csv'}")
+if T2 is not None and T3 is not None and "BL21" in T3.columns:
+    T4 = T3.merge(T2[["BL21_acc", "MG1655_acc", "MG1655_acc_name", "fident"]]
+                    .rename(columns={"BL21_acc": "BL21",
+                                     "MG1655_acc": "서열_상대",
+                                     "MG1655_acc_name": "서열_상대_이름"}),
+                  on="BL21", how="left")
+    T4 = T4.rename(columns={"MG1655_hit": "구조_상대",
+                            "MG1655_hit_name": "구조_상대_이름",
+                            "MG1655_TM": "구조_TM"})
+    T4["일치"] = [{True: "O", False: ".", None: "?"}[same_protein(a, b)]
+                 for a, b in zip(T4.get("서열_상대_이름", ""),
+                                 T4.get("구조_상대_이름", ""))]
+    COLS4 = ["BL21", "BL21_name", "TM_to_CooC1",
+             "서열_상대", "서열_상대_이름", "fident",
+             "구조_상대", "구조_상대_이름", "구조_TM", "일치"]
+    T4 = T4[[c for c in COLS4 if c in T4.columns]]
+    T4.to_csv(SLIDE/"table4_seq_vs_struct.csv", index=False, encoding="utf-8-sig")
+    print("\n" + "=" * 110); print("### 3. 표4 — 서열 답 vs 구조 답"); print("=" * 110)
+    print(T4.to_string(index=False))
+    nO, nX, nQ = (int((T4.일치 == v).sum()) for v in ("O", ".", "?"))
+    print(f"\n  같은 단백질 {nO} · 다른 단백질 {nX} · 판정불가(이름 없음) {nQ} / {len(T4)}")
+    if nX:
+        print("\n  ★ 서열과 구조가 다른 단백질을 가리키는 행 — 구조가 도메인만 닮은")
+        print("    다른 단백질을 집었을 수 있다. 발표 표에 쓰면 각주가 필요하다.")
+        print(T4[T4.일치 == "."][["BL21", "서열_상대_이름", "구조_상대_이름",
+                                 "구조_TM"]].to_string(index=False))
+else:
+    print("\n[표4] 건너뜀 — 표2·표3 이 둘 다 있어야 한다")
+
+# =============================================================================
+# 4. 표5 — BL21 8 vs MG1655 7 이 진짜 차이인가
+# =============================================================================
+if T3 is not None and "구조_상대" in (T4.columns if T2 is not None and T3 is not None else []):
+    MGLIST = set(F[(F.frame == "예측") & (F.strain == "MG1655")].protein)
+    raw = FSD/f"af_vs_MG1655_{Path(STRUCT_ALL['MG1655']).name}.m8"
+    TMALL = {}
+    if raw.exists() and raw.stat().st_size:
+        d_ = pd.read_csv(raw, sep="\t", names=FFMT.split(","))
+        d_["prot"] = d_.target.apply(lambda x: Path(str(x)).stem) \
+                      .str.replace(r"_[A-Za-z0-9]$", "", regex=True)
+        d_ = d_.sort_values("alntmscore", ascending=False).drop_duplicates("prot")
+        TMALL = {pid(k): float(v) for k, v in zip(d_.prot, d_.alntmscore)}
+
+    T5 = pd.DataFrame([{
+        "BL21": r.BL21, "BL21_name": r.get("BL21_name", ""),
+        "BL21_TM": r.TM_to_CooC1,
+        "MG1655_상대": r.구조_상대, "MG1655_이름": r.get("구조_상대_이름", ""),
+        "목록에있나": "O" if r.구조_상대 in MGLIST else ".",
+        "MG1655_TM": round(TMALL[r.구조_상대], 3) if r.구조_상대 in TMALL else None,
+    } for _, r in T4.iterrows()])
+    T5.to_csv(SLIDE/"table5_8vs7.csv", index=False, encoding="utf-8-sig")
+
+    print("\n" + "=" * 110); print("### 4. 표5 — BL21 8 vs MG1655 7 의 정체"); print("=" * 110)
+    print(f"  MG1655 목록(TM>=0.5) {len(MGLIST)}개: {sorted(MGLIST)}")
+    print()
+    print(T5.to_string(index=False))
+
+    out_ = T5[T5.목록에있나 == "."]
+    dup_ = T5[T5.MG1655_상대.duplicated(keep=False) & (T5.MG1655_상대.astype(str) != "")]
+    print(f"\n  (a) MG1655 상대가 목록 밖 : {len(out_)}개")
+    for _, r in out_.iterrows():
+        v = r.MG1655_TM
+        note = ("   ← 컷 0.5 바로 아래. 균주 차이가 아니라 경계 효과"
+                if v is not None and 0.40 <= v < 0.50 else "")
+        print(f"      {r.BL21} {r.BL21_name[:34]:34s} BL21 {r.BL21_TM:.3f}"
+              f" / MG1655 {v if v is None else f'{v:.3f}'}{note}")
+    print(f"  (b) 둘 이상이 같은 상대로 접힘 : {len(dup_)}행")
+    if len(dup_): print(dup_[["BL21", "BL21_name", "MG1655_상대"]].to_string(index=False))
+    print("\n  ★ 8 vs 7 을 균주 차이로 쓰지 말 것. (a)+(b) 로 설명되면 같은 집합이다.")
+else:
+    print("\n[표5] 건너뜀 — 표4 가 있어야 한다")
+
+# =============================================================================
+# 5. 감사 — 이름을 못 찾은 접근번호
+# =============================================================================
+print("\n" + "=" * 110); print("### 5. 감사"); print("=" * 110)
+tot = 0
+for k, v in AUDIT.items():
+    print(f"  {k}: 이름 못 찾은 접근번호 {len(v)}개" + (f"  {v[:8]}" if v else ""))
+    tot += len(v)
+if tot:
+    print("\n  추측해 채우지 않는다. 직접 확인할 것:")
+    for a in sorted({x for v in AUDIT.values() for x in v})[:5]:
+        url = ("https://www.uniprot.org/uniprotkb/" if not ACC_GB.match(a)
+               else "https://www.ncbi.nlm.nih.gov/protein/")
+        print(f"    {url}{a}")
+else:
+    print("  전부 이름을 찾았다.")
+print(f"\n저장 위치: {SLIDE}")
+for f in sorted(SLIDE.glob("table*.csv")): print(f"    {f.name}")
 ```
