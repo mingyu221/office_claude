@@ -248,7 +248,15 @@ if Y19_FILE.exists():
     for a, b in pairs:
         pa, pb = sg_of(Y19_FILE, None, a), sg_of(Y19_FILE, None, b)
         if pa and pb:
-            print(f"  Y19 CooC {a}–{b}          SG–SG {math.dist(pa, pb):6.2f} Å")
+            D_Y19 = math.dist(pa, pb)
+            print(f"  Y19 CooC {a}–{b}          SG–SG {D_Y19:6.2f} Å")
+
+# 질의가 대조군에 닿으려면 허용폭이 얼마여야 하는가 — 실측에서 바로 나온다
+GAP = abs(D_Y19 - d_af) if "D_Y19" in dir() else None
+if GAP:
+    print(f"\n  ※ 예측 프레임 질의와 Y19 CooC 의 간격: {GAP:.2f} Å")
+    print(f"    (결정 프레임이었을 때는 {abs(D_Y19 - d_cry):.2f} Å 이었다)")
+    print(f"    → 이 질의로 대조군을 잡으려면 -d 를 최소 {GAP:.1f} 이상 줘야 한다.")
 
 print("\n  읽는 법")
 print("    예측 모델도 벌어져 있으면 → AF 가 이 자리를 열린 상태로 예측한다는 것이")
@@ -288,7 +296,15 @@ def query(tag, qpath, qres, strain, d=0.5, a=5.0):
     dd = pd.read_csv(o, sep="\t"); dd.columns = [c.strip().lstrip("#") for c in dd.columns]
     return set(dd.tid.astype(str)), o
 
-GRID = [(0.5, 5.0), (1.0, 10.0), (1.5, 15.0)]
+# F3 에서 잰 간격 너머까지 반드시 훑는다. 앞서 1.5 에서 끊어 놓고
+# "안 잡힌다" 로 읽은 적이 있다 — 실제 간격은 2.86 Å 이었다.
+GRID = [(0.5, 5.0), (1.0, 10.0), (1.5, 15.0), (2.0, 20.0), (3.0, 30.0), (4.0, 40.0)]
+try:
+    if GAP and max(d for d, _ in GRID) < GAP + 1.0:
+        GRID.append((round(GAP + 1.0, 1), round((GAP + 1.0) * 10, 1)))
+        print(f"  간격 {GAP:.2f} Å 를 넘기려고 -d {GRID[-1][0]} 를 추가했다")
+except NameError:
+    pass
 rows, HITS = [], {}
 for d_, a_ in GRID:
     for tag, qp, qr in [("cry", CRYSTAL, QCRY), ("af", AF_PATH, QAF)]:
@@ -314,15 +330,23 @@ PASS = [(d_, a_) for d_, a_ in GRID
 if PASS:
     d_, a_ = PASS[0]
     print(f"  ★ 예측 프레임 질의가 Y19 CooC 를 잡는다 — 처음 잡히는 설정 -d {d_} -a {a_}")
-    print(f"    그때 히트 BL21 {len(HITS[('af',d_,a_,'BL21')])} / "
-          f"MG1655 {len(HITS[('af',d_,a_,'MG1655')])} / Y19 {len(HITS[('af',d_,a_,'Y19')])}")
-    print("    → Track C 가 살아난다. F5 로 기존 목록과 비교할 것.")
+    nb, nm, ny = (len(HITS[('af', d_, a_, s)]) for s in ("BL21", "MG1655", "Y19"))
+    print(f"    그때 히트 BL21 {nb} / MG1655 {nm} / Y19 {ny}")
+    base = len(HITS[("af", 0.5, 5.0, "BL21")]) or 1
+    print(f"    기본(0.5/5.0) 대비 {nb/base:.1f}배")
+    if d_ >= 2.0:
+        print("\n    ★ 단, 이 허용폭은 매우 느슨하다. -d 3.0 이면 사실상")
+        print("      'Cys 두 개가 2.4~8.4 Å 안에 있다' 를 묻는 것이다. 대조군을")
+        print("      통과해도 모티프로서의 변별력은 거의 없다고 봐야 한다.")
+        print("      F5 의 균주 비율이 세 균주 모두 같게 나오면 그 확인이다.")
+    print("    → F5 로 기존 목록과 비교할 것.")
     BEST = (d_, a_)
 else:
-    print("  예측 프레임으로도 Y19 CooC 가 안 잡힌다.")
-    print("    F3 의 거리를 다시 볼 것 — 예측 모델끼리도 SG–SG 가 많이 다르면")
-    print("    이 자리는 2잔기 기하로는 종간 비교가 안 되는 것이다.")
-    print("    그때는 Foldseek(폴드) 축으로 가는 것이 맞다.")
+    print("  넓힌 범위 전체에서도 Y19 CooC 가 안 잡힌다.")
+    print("    프레임을 맞춰도 안 되면 원인은 리간드 상태가 아니다.")
+    print("    예측 모델끼리도 이 자리의 기하가 보존되지 않는다는 뜻이고,")
+    print("    그러면 2잔기 거리 모티프로는 종간 비교가 원리상 성립하지 않는다.")
+    print("    → F6 의 Foldseek(폴드 전체) 축으로 간다.")
     BEST = None
 ```
 
@@ -374,4 +398,193 @@ else:
     print("  'CooC 같은 자리' 가 아니라 'AF 가 우연히 닫아 예측한 자리' 를 세고")
     print("  있었기 때문이다. 예측 프레임에서도 비율이 같으면 균주 변별력은")
     print("  여전히 없는 것이고, 갈리면 그때 처음으로 의미 있는 차이다.")
+```
+
+---
+
+## CELL F6 — Foldseek 으로 같은 질문을 던진다
+
+```python
+# =============================================================================
+# CELL F6 | 모티프가 안 되면 폴드로 간다
+#
+#   Folddisco 는 잔기 2~4개의 국소 기하를 본다. 그래서 리간드 유무로 그 자리가
+#   열리고 닫히는 것에 그대로 휘둘린다. Foldseek 은 구조 전체를 정렬하므로
+#   그 자리가 조금 벌어져도 폴드는 같게 잡는다.
+#   실제로 대조군을 통과한 것은 Foldseek 뿐이었다 (CooC1 → Y19 CooC tm 0.938).
+#
+#   여기서 두 가지를 같이 본다.
+#     (1) 결정 프레임 / 예측 프레임 질의가 Foldseek 에서도 갈리는가.
+#         안 갈리면 — 그것이 Foldseek 을 쓰는 이유의 증거다.
+#     (2) 세 균주에서 CooC 과(科)에 드는 것이 무엇인가. 이게 Track C 를
+#         대신할 후보 목록이다.
+#
+#   ※ MG1655 는 구조 디렉터리가 없고 folddisco 인덱스만 있다. 없으면 건너뛰고
+#     F7 에서 서열로 묻는다.
+# =============================================================================
+FFMT = "query,target,fident,alnlen,qcov,tcov,evalue,bits,prob,alntmscore,lddt"
+TM_FOLD, TM_NEAR, TM_CORE = 0.50, 0.70, 0.90
+FSD = OUT/"foldseek"; FSD.mkdir(parents=True, exist_ok=True)
+
+# 결정구조는 A 사슬만 떼어 질의로 쓴다 (B 사슬·리간드가 섞이면 정렬이 흐려진다)
+CRY_A = OUT/"3kji_chainA.pdb"
+if not CRY_A.exists():
+    with open(CRYSTAL, errors="ignore") as fh, open(CRY_A, "w") as o:
+        for l in fh:
+            if l.startswith(("ATOM", "HETATM")) and l[21] == CRY_CHAIN: o.write(l)
+        o.write("END\n")
+print(f"  결정 질의 {CRY_A.name} / 예측 질의 {AF_PATH.name}")
+
+STRUCT_ALL = dict(STRUCT)
+_mg = TOOLS/"database"/"protein_list"/"structures_MG1655"
+for cand in [_mg, TOOLS/"database"/"structures_mg1655",
+             TOOLS/"database"/"bacteriaDB"/"structures_MG1655"]:
+    if cand.is_dir(): STRUCT_ALL["MG1655"] = cand; break
+print(f"  구조 DB: {', '.join(STRUCT_ALL)}"
+      + ("" if "MG1655" in STRUCT_ALL else "   (MG1655 구조 없음 → F7 에서 서열로)"))
+
+def fs(tag, qpath, strain):
+    o = FSD/f"{tag}_vs_{strain}.m8"
+    if not (o.exists() and o.stat().st_size):
+        sh(f'"{FS}" easy-search "{qpath}" "{STRUCT_ALL[strain]}" "{o}" "{FSD}/tmp_{strain}" '
+           f'--format-output "{FFMT}" -e 10 --max-seqs 2000 --exact-tmscore 1 '
+           f'--threads {THREADS}', quiet=True)
+    if not (o.exists() and o.stat().st_size): return pd.DataFrame()
+    d = pd.read_csv(o, sep="\t", names=FFMT.split(","))
+    d["stem"] = d.target.apply(lambda x: Path(str(x)).stem)
+    return d.sort_values("alntmscore", ascending=False).drop_duplicates("stem")
+
+xw = pd.read_csv(TBL/"id_crosswalk_struct_to_genbank.csv") \
+     if (TBL/"id_crosswalk_struct_to_genbank.csv").exists() else pd.DataFrame()
+XW = ({Path(str(k)).stem: str(v).split(",")[0]
+       for k, v in xw.set_index("tid")["protein"].to_dict().items()} if len(xw) else {})
+def pid(stem): return XW.get(stem, stem)
+
+RES_FS, SETS = [], {}
+for tag, qp in [("cry", CRY_A), ("af", AF_PATH)]:
+    for s in STRUCT_ALL:
+        d = fs(tag, qp, s)
+        if not len(d):
+            print(f"  {tag:3s} → {s:8s} 결과 없음"); continue
+        fold = d[d.alntmscore >= TM_FOLD]
+        SETS[(tag, s)] = {pid(x) for x in fold.stem}
+        top = d.iloc[0]
+        ctrl = ""
+        if s == "Y19":
+            hit = d[d.stem.str.contains(Y19_UNI, na=False)]
+            ctrl = (f"   대조군 {Y19_GB} tm {hit.iloc[0].alntmscore:.3f}"
+                    if len(hit) else "   ★ 대조군 없음")
+        print(f"  {tag:3s} → {s:8s} 폴드(≥{TM_FOLD}) {len(fold):4d}개   "
+              f"최고 {pid(top.stem)} tm {top.alntmscore:.3f}{ctrl}")
+        for _, r in fold.iterrows():
+            RES_FS.append({"frame": "결정" if tag == "cry" else "예측", "strain": s,
+                           "protein": pid(r.stem), "tm": round(float(r.alntmscore), 3),
+                           "fident": round(float(r.fident), 3), "qcov": round(float(r.qcov), 3),
+                           "tier": ("핵심" if r.alntmscore >= TM_CORE else
+                                    "주변" if r.alntmscore >= TM_NEAR else "폴드만")})
+
+F = pd.DataFrame(RES_FS)
+F.to_csv(TBL/"cooc_fold_afframe.csv", index=False, encoding="utf-8-sig")
+print(f"\n저장: {TBL/'cooc_fold_afframe.csv'}")
+
+print("\n" + "=" * 96); print("### (1) 두 프레임이 Foldseek 에서 갈리는가"); print("=" * 96)
+for s in STRUCT_ALL:
+    a, b = SETS.get(("cry", s), set()), SETS.get(("af", s), set())
+    if not a and not b: continue
+    j = len(a & b) / max(len(a | b), 1)
+    print(f"  {s:8s} 결정 {len(a):4d}  예측 {len(b):4d}  교집합 {len(a&b):4d}  자카드 {j:.3f}")
+print("\n  자카드가 높으면 → Foldseek 은 리간드 유무에 휘둘리지 않는다.")
+print("    Folddisco 가 0 이었던 것과 대비되는 지점이고, 축을 바꾸는 근거가 된다.")
+
+print("\n" + "=" * 96); print("### (2) CooC 과 구성원 (예측 프레임, tier 별)"); print("=" * 96)
+for s in STRUCT_ALL:
+    sub = F[(F.frame == "예측") & (F.strain == s)]
+    if not len(sub): continue
+    print(f"\n  [{s}]  " + "  ".join(f"{t} {len(sub[sub.tier==t])}"
+                                     for t in ["핵심", "주변", "폴드만"]))
+    print(sub.sort_values("tm", ascending=False)
+             .head(12)[["protein", "tm", "fident", "tier"]].to_string(index=False))
+```
+
+---
+
+## CELL F7 — 찾아낸 과 구성원에게 MG1655 를 묻는다
+
+```python
+# =============================================================================
+# CELL F7 | Foldseek 이 뽑은 BL21 구성원이 MG1655 에도 있는가
+#   MG1655 는 구조 DB 가 없으므로 구조로는 못 묻는다. 서열로 묻는다.
+#   프로테옴에 없으면 게놈까지 — 앞서 어노테이션 누락에 두 번 속았다.
+# =============================================================================
+import tempfile
+FAA_BL21 = TOOLS/"database"/"bacteriaDB"/"inhouseDB"/"bl21_db_match_qjz.faa"
+FAA_MG   = TOOLS/"database"/"protein_list"/"mg1655_protein.faa"
+GEN_MG   = BASE/"input"/"external"/"MG1655_U00096.3.fna"
+SRCH     = BASE/"result"/"search"; SRCH.mkdir(parents=True, exist_ok=True)
+MFMT = "query,target,fident,alnlen,evalue,bits,qlen,tlen,qcov,tcov,qstart,qend"
+
+def read_faa(p):
+    s, k = {}, None
+    for l in open(p):
+        if l.startswith(">"): k = l[1:].split()[0]; s[k] = []
+        elif k: s[k].append(l.strip())
+    return {k: "".join(v) for k, v in s.items()}
+
+SEQB = read_faa(FAA_BL21) if FAA_BL21.exists() else {}
+MEM  = sorted({p for p in F[(F.frame == "예측") & (F.strain == "BL21")].protein
+               if p in SEQB})
+print(f"  BL21 과 구성원 {len(MEM)}개에게 묻는다 (FASTA 에 있는 것만)")
+
+QF = SRCH/"coocfold_bl21.faa"
+QF.write_text("".join(f">{k}\n{SEQB[k]}\n" for k in MEM))
+
+def msearch(q, tgt, out, extra=""):
+    if not (out.exists() and out.stat().st_size):
+        with tempfile.TemporaryDirectory() as td:
+            sh(f'mmseqs easy-search "{q}" "{tgt}" "{out}" "{td}" '
+               f'--format-output "{MFMT}" -s 7.5 -e 1e-3 --max-seqs 5 '
+               f'--threads {THREADS} {extra}', quiet=True)
+    if not (out.exists() and out.stat().st_size): return pd.DataFrame()
+    return pd.read_csv(out, sep="\t", names=MFMT.split(","))
+
+d = msearch(QF, FAA_MG, SRCH/"coocfold_vs_MG1655.m8")
+PH = {}
+if len(d):
+    d = d[d.qcov >= 0.70].sort_values("bits", ascending=False).drop_duplicates("query")
+    PH = {str(r.query): (float(r.fident), str(r.target)) for _, r in d.iterrows()}
+print(f"  프로테옴 히트(qcov≥0.70) {len(PH)} / {len(MEM)}")
+
+NOHIT = [m for m in MEM if m not in PH]
+GH = {}
+if NOHIT:
+    gf = SRCH/"coocfold_nohit.faa"
+    gf.write_text("".join(f">{k}\n{SEQB[k]}\n" for k in NOHIT))
+    g = msearch(gf, GEN_MG, SRCH/"coocfold_vs_MG1655genome.m8", "--search-type 2")
+    if len(g):
+        # --search-type 2 의 alnlen 은 염기 단위다. 커버리지는 qstart/qend 로 낸다
+        g["qcov2"] = (g.qend - g.qstart + 1) / g.qlen
+        g = g[(g.fident >= 0.80) & (g.qcov2 >= 0.70)] \
+              .sort_values("bits", ascending=False).drop_duplicates("query")
+        GH = {str(r.query): float(r.fident) for _, r in g.iterrows()}
+print(f"  프로테옴 미검출 {len(NOHIT)} 중 게놈에 있는 것 {len(GH)}")
+
+TMX = F[(F.frame == "예측") & (F.strain == "BL21")].set_index("protein")["tm"].to_dict()
+rows = []
+for m in MEM:
+    if m in PH:   v, why = ".", f"MG1655 에 있음 {PH[m][1]} fident {PH[m][0]:.3f}"
+    elif m in GH: v, why = "~", f"게놈에만 있음 fident {GH[m]:.3f}"
+    else:         v, why = "O", "프로테옴·게놈 둘 다 없음"
+    rows.append({"protein": m, "tm_CooC": TMX.get(m), "MG1655": v, "근거": why})
+C = pd.DataFrame(rows).sort_values(["MG1655", "tm_CooC"], ascending=[True, False])
+C.to_csv(TBL/"cooc_fold_mg1655.csv", index=False, encoding="utf-8-sig")
+
+print("\n" + "=" * 96); print("### CooC 폴드 × MG1655 부재"); print("=" * 96)
+print(C.to_string(index=False))
+print(f"\n저장: {TBL/'cooc_fold_mg1655.csv'}")
+print("\n  O   폴드는 CooC 인데 MG1655 에 없다  ← 가장 강한 조합")
+print("  ~   어노테이션 누락")
+print("  .   MG1655 에도 있다")
+print("\n  ※ BL21 에는 tm 0.9 이상의 진짜 CooC 이 없다는 것이 이미 확인됐다")
+print("    (최고 ApbC tm 0.690). 그러니 여기서 O 가 나와도 'CooC 자체' 가 아니라")
+print("    'CooC 과에 드는 BL21 단백질' 이다. 그 구분을 표에 유지할 것.")
 ```
