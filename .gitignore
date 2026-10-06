@@ -1,0 +1,20 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ipynb_checkpoints/
+*.egg-info/
+
+# Caches and run outputs. Field matrices are large and reproducible from
+# the structures; keep them out of git.
+*.npz
+*.npy
+*.dx
+qsar_cache/
+fit_report/
+contours/
+
+# Project data lives on epel-af2 under CODHQSAR_BASE, never in the repo.
+*.pdb
+*.pdbqt
+*.map
+*.dlg
