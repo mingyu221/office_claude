@@ -43,6 +43,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import locale
+import math
 import os
 import re
 import shutil
@@ -53,6 +55,50 @@ import traceback
 import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
+
+# ---------------------------------------------------------------------------
+# 인코딩 — 산출물을 잃지 않기 위해 가장 먼저 한다.
+#
+# epel-af2 는 EL(Enterprise Linux) 계열로 보인다. 그 계열 일부에는 `C.UTF-8`
+# 로케일이 없어서 LC_ALL=C 또는 LANG 미설정 상태로 들어오면 PEP 538 강제 변환이
+# 실패하고 파이썬의 기본 인코딩이 ASCII 가 된다. 그러면
+#   (1) 이 스크립트의 한국어 print 가 첫 줄부터 UnicodeEncodeError 로 죽고
+#   (2) env_probe.md / params.json 쓰기(write_text)도 같은 이유로 죽는다.
+# common.write_params 는 encoding 을 지정하지 않으므로 파일 단위 처방으로는
+# 막을 수 없다. 프로세스 전체를 UTF-8 모드로 올려야 하고, 그것은 인터프리터
+# 시작 전에만 켤 수 있으므로 한 번만 재실행한다(환경변수로 루프 방지).
+# ---------------------------------------------------------------------------
+_UTF8_GUARD = "CHCODH2_ENV_PROBE_UTF8"
+
+
+def _ensure_utf8_process() -> None:
+    try:
+        enc = (locale.getpreferredencoding(False) or "").lower().replace("-", "").replace("_", "")
+    except Exception:  # noqa: BLE001  로케일 조회 자체가 실패할 수 있다
+        enc = ""
+    if enc.startswith("utf"):
+        return
+    if os.environ.get(_UTF8_GUARD) == "1" or getattr(sys.flags, "utf8_mode", 0) or not sys.executable:
+        return  # 이미 시도했거나 재실행이 불가능하다 — 아래 reconfigure 로 버틴다
+    os.environ[_UTF8_GUARD] = "1"
+    os.environ["PYTHONUTF8"] = "1"
+    # 이 알림만 ASCII 로 적는다. 아직 한국어를 쓸 수 없는 상태다.
+    sys.stderr.write(
+        f"[00_env_probe] locale encoding={enc or 'unknown'} is not UTF-8; "
+        "re-executing with PYTHONUTF8=1 so Korean output and params.json survive\n"
+    )
+    try:
+        os.execv(sys.executable, [sys.executable, *sys.argv])
+    except OSError as e:
+        sys.stderr.write(f"[00_env_probe] re-exec failed ({e}); continuing with errors='replace'\n")
+
+
+_ensure_utf8_process()
+for _stream in (sys.stdout, sys.stderr):
+    try:  # 재실행이 안 된 경우에도 한국어 print 로 죽지 않게 한다
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:  # noqa: BLE001
+        pass
 
 # ---------------------------------------------------------------------------
 # common 임포트 — 레포 구조 pipeline/stages/00_env_probe.py 기준 ../lib
@@ -105,11 +151,13 @@ CAP = dict(
     ipython_rows=200_000,     # IPython sqlite 행 수
     candidates_json=200,      # env_probe.json 에 남길 후보 수
     candidates_md=10,         # env_probe.md 에 남길 후보 수
+    also_seen_in=20,          # 후보 하나에 기록할 '같은 명령의 다른 출처' 수
     tmp_dirs=60,              # tmp 잔여물 개수
     tmp_du_entries=200_000,   # tmp 용량 계산 시 훑을 엔트리 수
     conda_list_envs=12,       # `conda list -n <env>` 를 돌릴 환경 수
     cmd_output_chars=8000,    # 외부 명령 출력 저장 길이
     cand_text_chars=2000,     # 후보 텍스트 저장 길이
+    cand_seq_paths=8,         # 후보 하나에 기록할 서열 파일 경로 수
 )
 
 SKIP_DIR_NAMES = {".git", "__pycache__", "node_modules", "site-packages", ".cache", ".mypy_cache"}
@@ -121,6 +169,62 @@ TEXT_EXTS = {".sh", ".log", ".txt", ".py", ".out", ".err"}
 # ===========================================================================
 def now_utc() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _finite(x, ndigits: int = 6):
+    """nan/inf 를 None 으로 바꾼다.
+
+    nan·inf 는 표준 JSON 토큰이 아니다. json.dumps 가 기본값으로 `NaN` 을 쓰면
+    jq·JS·R 등이 **파일 전체**를 못 읽는다 (파이썬 json 만 읽힌다).
+    ARI 는 교집합이 한 클러스터뿐일 때 실제로 nan 이 된다 — 계산불가를 nan 대신
+    None 으로 적고, 그 사실을 불일치 목록에도 남긴다.
+    """
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(v):
+        return None
+    return round(v, ndigits)
+
+
+def _na(v, label: str = "계산불가") -> str:
+    """사람이 읽는 출력에서 None 을 'None' 이 아니라 사유로 보여준다."""
+    return label if v is None else str(v)
+
+
+def json_safe(obj):
+    """nan/inf 를 None 으로 치환한 복사본. 산출 JSON 이 표준 JSON 이도록 보장한다."""
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    if isinstance(obj, dict):
+        return {k: json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [json_safe(v) for v in obj]
+    if isinstance(obj, (int, str, bool)) or obj is None:
+        return obj
+    # numpy 스칼라 등 — float 로 볼 수 있으면 유한성 검사를 한다
+    try:
+        f = float(obj)
+    except (TypeError, ValueError):
+        return obj
+    return obj if math.isfinite(f) else None
+
+
+def blank_mask(s: pd.Series) -> pd.Series:
+    """결측·공백을 모두 '빈 값' 으로 보는 마스크.
+
+    read_tsv(dtype=str) 로 읽으면 빈 칸이 NaN 또는 '' 로 들어온다. 이것을 그대로
+    common.norm_acc 에 넣으면 `'float' object has no attribute 'split'` 같은
+    정체불명 예외가 난다. 세어서 보고하고, 조인 키가 비면 명확한 예외를 던진다.
+    """
+    out = []
+    for v in s.astype("object").tolist():
+        if v is None or (isinstance(v, float) and v != v):
+            out.append(True)
+            continue
+        out.append(str(v).strip().lower() in ("", "nan", "none", "<na>", "na"))
+    return pd.Series(out, index=s.index, dtype=bool)
 
 
 def probe_cmd(cmd, *, timeout=120, dry_run=False, log_dir=None, label=None) -> dict:
@@ -161,7 +265,8 @@ def probe_cmd(cmd, *, timeout=120, dry_run=False, log_dir=None, label=None) -> d
                 name = re.sub(r"[^\w.-]+", "_", label or Path(cmd[0]).name)[:80]
                 (log_dir / f"{name}.log").write_text(
                     f"$ {rec['cmd_str']}\nrc={r.returncode}\n\n"
-                    f"--- stdout ---\n{out}\n--- stderr ---\n{err}\n"
+                    f"--- stdout ---\n{out}\n--- stderr ---\n{err}\n",
+                    encoding="utf-8",
                 )
             except OSError:
                 pass
@@ -196,7 +301,7 @@ def read_text_capped(path: Path, max_bytes: int):
     if size > max_bytes:
         return None, f"크기 초과 ({size/1e6:.1f} MB > {max_bytes/1e6:.0f} MB)"
     try:
-        return path.read_text(errors="replace"), None
+        return path.read_text(encoding="utf-8", errors="replace"), None
     except OSError as e:
         return None, f"읽기 실패: {e}"
 
@@ -272,12 +377,12 @@ def infer_install_method(binary: Path, ldd_rec: dict, file_rec: dict) -> dict:
 
     # 소스 빌드 흔적
     try:
-        for up in [binary.parent, *binary.parents[:4]]:
+        for up in [binary.parent, *list(binary.parents)[:4]]:
             if (up / "CMakeCache.txt").is_file():
                 guesses.append("소스빌드")
                 evidence.append(f"CMakeCache.txt 발견: {up/'CMakeCache.txt'}")
                 break
-    except (OSError, IndexError):
+    except (OSError, IndexError, TypeError):
         pass
 
     if not guesses:
@@ -588,7 +693,17 @@ def detect_resources(args, log_dir: Path) -> dict:
 # ===========================================================================
 def _read_cluster_tsv(path: Path) -> pd.DataFrame:
     """mmseqs _cluster.tsv — 헤더 없는 2열. 헤더 추정에 맡기면 첫 줄을 잃는다."""
-    df = pd.read_csv(path, sep="\t", header=None, dtype=str)
+    try:
+        df = pd.read_csv(path, sep="\t", header=None, dtype=str)
+    except pd.errors.EmptyDataError as e:
+        # easy-cluster 가 rc=0 으로 끝났는데 빈 파일을 남긴 경우. pandas 의
+        # EmptyDataError 원문은 원인을 전혀 알려주지 않으므로 바꿔 던진다.
+        raise ValueError(
+            f"{path} 가 비어 있다 (0 행) — easy-cluster 가 rc=0 으로 끝났지만 클러스터를 "
+            "하나도 쓰지 않았다. logs/mmseqs_easy_cluster.log 와 입력 FASTA 를 확인할 것."
+        ) from e
+    if len(df) == 0:
+        raise ValueError(f"{path} 에 데이터 행이 없다 — easy-cluster 산출물이 비정상이다.")
     if df.shape[1] != 2:
         raise ValueError(
             f"{path} 는 2열이어야 한다 (대표\\t멤버). 실제 {df.shape[1]}열 — "
@@ -694,17 +809,44 @@ def compare_with_master(args, new: pd.DataFrame, disc: list) -> dict:
     cols = common.resolve_columns(old_raw, ["accession", "cluster"], required=("accession", "cluster"))
     old = old_raw[[cols["accession"], cols["cluster"]]].copy()
     old.columns = ["accession", "cluster_old"]
-    old["accession"] = common.norm_acc(old["accession"])
-    old["cluster_old"] = common.norm_acc(old["cluster_old"])
 
-    nw = new.copy()
-    nw["accession"] = common.norm_acc(nw["accession"])
-    nw["cluster_new"] = common.norm_acc(nw["cluster"])
-    nw = nw[["accession", "cluster_new"]]
+    nw = new.rename(columns={"cluster": "cluster_new"})[["accession", "cluster_new"]].copy()
 
     cmp["master_columns_used"] = cols
     cmp["n_master_rows"] = int(len(old))
     cmp["n_new_rows"] = int(len(nw))
+
+    # --- 결측 처리. 빈 칸을 그대로 정규화에 넣으면 정체불명 예외가 나거나
+    #     (더 나쁘게) NaN 이 '한쪽에만 있는 accession' 으로 집계되어 조인율이 조용히 틀어진다.
+    miss = {}
+    for frame, col, label in ((old, "accession", "master.accession"),
+                              (old, "cluster_old", "master.cluster"),
+                              (nw, "accession", "신규.accession"),
+                              (nw, "cluster_new", "신규.cluster")):
+        miss[label] = int(blank_mask(frame[col]).sum())
+    cmp["n_missing"] = miss
+    key_missing = miss["master.accession"] + miss["신규.accession"]
+    if key_missing:
+        # 조인 키가 비면 모든 숫자가 틀어진다 — 조용히 넘기지 않는다(규칙 6)
+        raise ValueError(
+            f"조인 키 accession 에 빈 값이 있다: master {miss['master.accession']} 건 / "
+            f"신규 {miss['신규.accession']} 건. master_1827.tsv 의 "
+            f"'{cols['accession']}' 컬럼을 확인할 것 — 이 상태로 조인하면 행 수와 "
+            "조인율이 모두 틀어진다."
+        )
+    n_dropped_missing_label = miss["master.cluster"] + miss["신규.cluster"]
+    if n_dropped_missing_label:
+        disc.append(
+            f"클러스터 라벨이 빈 행: master {miss['master.cluster']} / 신규 {miss['신규.cluster']} "
+            "— 분할 대조에서 제외했다(제외 수는 params.json 의 n_rows_dropped_for_join 에 포함)"
+        )
+        old = old[~blank_mask(old["cluster_old"])].copy()
+        nw = nw[~blank_mask(nw["cluster_new"])].copy()
+
+    old["accession"] = common.norm_acc(old["accession"])
+    old["cluster_old"] = common.norm_acc(old["cluster_old"])
+    nw["accession"] = common.norm_acc(nw["accession"])
+    nw["cluster_new"] = common.norm_acc(nw["cluster_new"])
 
     # 중복은 조인 행 수를 부풀려 조용히 숫자를 망친다 — 세고, 버린 수를 보고한다
     d_old = int(old["accession"].duplicated().sum())
@@ -715,9 +857,12 @@ def compare_with_master(args, new: pd.DataFrame, disc: list) -> dict:
         disc.append(f"accession 중복: master {d_old} 건 / 신규 {d_new} 건 — 조인 전 첫 행만 남겼다")
         old = old.drop_duplicates("accession", keep="first")
         nw = nw.drop_duplicates("accession", keep="first")
-    cmp["n_rows_dropped_for_join"] = d_old + d_new
+    cmp["n_rows_dropped_for_join"] = d_old + d_new + n_dropped_missing_label
+    cmp["n_rows_dropped_missing_label"] = n_dropped_missing_label
 
-    j = old.merge(nw, on="accession", how="outer")
+    # validate — 위에서 중복을 제거했으므로 1:1 이어야 한다. 아니면 조인이 행을
+    # 복제해 숫자를 부풀린다는 뜻이므로 조용히 넘기지 않고 예외로 올린다(규칙 6).
+    j = old.merge(nw, on="accession", how="outer", validate="one_to_one")
     total = int(len(j))
     matched = j.dropna(subset=["cluster_old", "cluster_new"])
     cmp.update(
@@ -743,8 +888,14 @@ def compare_with_master(args, new: pd.DataFrame, disc: list) -> dict:
 
     cm = common.crosstab_mapping(matched["cluster_old"], matched["cluster_new"])
     cmp["crosstab"] = cm
-    cmp["ari"] = round(common.adjusted_rand_index(matched["cluster_old"], matched["cluster_new"]), 6)
-    cmp["nmi"] = round(common.normalized_mutual_info(matched["cluster_old"], matched["cluster_new"]), 6)
+    cmp["ari"] = _finite(common.adjusted_rand_index(matched["cluster_old"], matched["cluster_new"]))
+    cmp["nmi"] = _finite(common.normalized_mutual_info(matched["cluster_old"], matched["cluster_new"]))
+    if cmp["ari"] is None or cmp["nmi"] is None:
+        # 교집합이 한 클러스터뿐이면 ARI 는 수학적으로 정의되지 않는다. nan 을 그대로
+        # 흘리면 JSON 이 비표준이 되고 '0 에 가깝다' 로 오독된다 — 계산불가로 적는다.
+        disc.append(f"ARI/NMI 를 계산할 수 없다 (ARI={_na(cmp['ari'])}, NMI={_na(cmp['nmi'])}) "
+                    f"— 교집합 {len(matched)} 행이 퇴화 분할(클러스터 1개 또는 원소 1개)이다. "
+                    "쪼개짐·합쳐짐 수와 '분할 1:1 동일' 로 판단할 것")
     # 분할이 같다 = 쪼개짐도 합쳐짐도 없고 클러스터 개수가 같다 (대표 ID 와 무관)
     cmp["partition_identical"] = bool(
         cm["n_split"] == 0 and cm["n_merged"] == 0 and cm["n_old"] == cm["n_new"]
@@ -754,7 +905,8 @@ def compare_with_master(args, new: pd.DataFrame, disc: list) -> dict:
     cmp["status"] = "ok"
     if not cmp["partition_identical"]:
         disc.append(f"분할이 달라졌다: 쪼개진 클러스터 {cm['n_split']} / 합쳐진 클러스터 "
-                    f"{cm['n_merged']} / old {cm['n_old']} vs new {cm['n_new']} (ARI={cmp['ari']})")
+                    f"{cm['n_merged']} / 교집합 기준 old {cm['n_old']} vs new {cm['n_new']} "
+                    f"(ARI={_na(cmp['ari'])}, 교집합 {len(matched)}/{total} 행)")
     return cmp
 
 
@@ -894,7 +1046,9 @@ def scan_notebook(path: Path, cands: list, stats: dict, alias_log: list) -> None
         if isinstance(src, list):
             src = "".join(src)
         exec_cnt = cell.get("execution_count", cell.get("prompt_number"))
-        loc = f"cell {idx}" + (f" (exec {exec_cnt})" if exec_cnt not in (None, "") else "")
+        # 0-based 인덱스를 그대로 적으면 사람이 '1번째 셀' 로 읽는다. 둘 다 적는다.
+        loc = (f"cell #{idx + 1}(0-based {idx})"
+               + (f" exec {exec_cnt}" if exec_cnt not in (None, "") else ""))
         if src:
             _scan_unit(src.splitlines(), path, "notebook_cell", loc, cands,
                        aliases, unit_has_mmseqs)
@@ -1047,10 +1201,14 @@ def score_candidate(c: dict, acols: dict) -> None:
         score += 5
         reasons.append(f"출처가 노트북 ({c['locator']})")
 
-    paths = RE_PATHISH.findall(blob)
+    paths = sorted(set(RE_PATHISH.findall(blob)))
     if paths:
-        c["seq_paths"] = sorted(set(RE_PATHISH.findall(blob)))[:8]
-        reasons.append(f"서열 파일 경로 후보 {len(set(c['seq_paths']))} 개")
+        c["seq_paths"] = paths[: CAP["cand_seq_paths"]]
+        c["n_seq_paths_total"] = len(paths)
+        c["seq_paths_capped"] = len(paths) > CAP["cand_seq_paths"]
+        note = (f" (상위 {CAP['cand_seq_paths']}개만 기록, {len(paths) - CAP['cand_seq_paths']}개 버림)"
+                if c["seq_paths_capped"] else "")
+        reasons.append(f"서열 파일 경로 후보 {len(paths)} 개{note}")
 
     c["score"] = score
     c["confidence"] = "높음" if score >= 60 else ("중간" if score >= 35 else "낮음")
@@ -1127,12 +1285,20 @@ def recover_search(args, acols: dict, disc: list) -> dict:
     # --- 채점·정렬·중복 제거
     for c in cands:
         score_candidate(c, acols)
-    seen, uniq = set(), []
+    # 중복 제거 — 같은 명령이 여러 곳에 있으면 한 건으로 합치되, 버린 쪽의 출처를
+    # 잃어버리지 않는다. 요구사항 (c) 는 '출처 파일과 셀 번호' 를 요구한다.
+    seen, uniq = {}, []
     for c in sorted(cands, key=lambda x: (-x["score"], x["source"], x["line_no"] or 0)):
         key = (re.sub(r"\s+", " ", c["text"]).strip().lower(), c["source_kind"])
         if key in seen:
+            kept = seen[key]
+            kept.setdefault("also_seen_in", [])
+            kept["n_also_seen"] = kept.get("n_also_seen", 0) + 1
+            if len(kept["also_seen_in"]) < CAP["also_seen_in"]:
+                kept["also_seen_in"].append(
+                    dict(source=c["source"], locator=c["locator"], line_no=c["line_no"]))
             continue
-        seen.add(key)
+        seen[key] = c
         uniq.append(c)
     # mmseqs 를 담은 변수 대입 줄 — 당시 쓴 절대경로가 여기 남아 있을 수 있다
     seen_alias = set()
@@ -1155,6 +1321,19 @@ def recover_search(args, acols: dict, disc: list) -> dict:
     out["candidates"] = uniq[: CAP["candidates_json"]]
     out["n_high"] = sum(1 for c in uniq if c["confidence"] == "높음")
     out["n_mid"] = sum(1 for c in uniq if c["confidence"] == "중간")
+    n_unread = (len(stats["notebooks_json_error"]) + len(stats["notebooks_skipped"])
+                + len(stats["text_skipped"]))
+    n_part = len(stats["text_truncated"])
+    n_capped = stats["n_notebooks_dropped_by_cap"] + stats["n_text_dropped_by_cap"]
+    out["n_sources_unread"] = n_unread
+    out["n_sources_partial"] = n_part
+    out["n_sources_dropped_by_cap"] = n_capped
+    if n_unread or n_part or n_capped:
+        # 2절 명령이 바로 그 파일에 있을 수 있다 — 조용히 넘어가지 않는다
+        disc.append(
+            f"복원 스캔에서 끝까지 못 읽은 원본: 실패/건너뜀 {n_unread} 개 · 꼬리만 읽음 "
+            f"{n_part} 개 · 상한으로 버림 {n_capped} 개 — env_probe.md 6절 목록을 "
+            "직접 `grep -n mmseqs` 할 것")
     out["status"] = "ok" if uniq else "후보 없음"
     if not uniq:
         disc.append("search 명령 후보를 하나도 찾지 못했다 — 2절의 명령은 여전히 미복원이다")
@@ -1228,9 +1407,16 @@ def build_blank_block(res: dict) -> str:
 
     best = sr["candidates"][0] if sr.get("candidates") else None
     if best:
-        cmd_line1 = re.sub(r"\s+", " ", best["text"]).strip()[:300]
+        # 여기서 자르면 안 된다. 예전 구현은 300자에서 잘라 `-s 7.5` 가 `-s 7` 로
+        # 바뀐 명령을 '붙여쓰기용' 블록에 넣었다 — 조용히 틀린 숫자의 전형이다.
+        cmd_line1 = re.sub(r"\s+", " ", best["text"]).strip()
+        if best.get("text_truncated"):
+            cmd_line1 += (f"  ⟪주의: 후보 본문이 {CAP['cand_text_chars']}자 상한에서 잘렸다 — "
+                          f"원본 {best['source']} 를 직접 볼 것⟫")
         cmd_line2 = (f"출처: {best['source']} / {best['locator']} "
-                     f"(줄 {best['line_no']}) · 신뢰도 {best['confidence']}(점수 {best['score']})")
+                     f"(줄 {best['line_no']}) · 신뢰도 {best['confidence']}(점수 {best['score']})"
+                     + (f" · 같은 명령이 다른 {best['n_also_seen']} 곳에도 있다"
+                        if best.get("n_also_seen") else ""))
     else:
         cmd_line1 = _fill(None, sr.get("status") or "후보 없음")
         cmd_line2 = f"스캔: 노트북 {sr['stats']['n_notebooks_parsed']}개 / 텍스트·히스토리 {sr['stats']['n_text_scanned']}개"
@@ -1247,7 +1433,7 @@ def build_blank_block(res: dict) -> str:
         if c.get("status") == "ok":
             verdict += (f" · 대표 ID 동일 {c['n_same_rep_id']}/{c['n_join_rows']}"
                         f" · 분할 1:1 {'동일' if c['partition_identical'] else '다름'}"
-                        f" (ARI={c['ari']})")
+                        f" (ARI={_na(c['ari'])})")
         elif c.get("status"):
             verdict += f" · 멤버십 대조: {c['status']}"
         repro_line = verdict
@@ -1424,8 +1610,13 @@ def render_md(res: dict, disc: list) -> str:
             A(f"| **대표 ID 동일** | {c['n_same_rep_id']} / {c['n_join_rows']} ({c['same_rep_id_rate']:.4f}) |")
             A(f"| **분할 1:1 동일** | {'예 — 실질적으로 같은 분할' if c['partition_identical'] else '아니오'} |")
             A(f"| 쪼개짐 / 합쳐짐 | {c['crosstab']['n_split']} / {c['crosstab']['n_merged']} |")
-            A(f"| ARI / NMI | {c['ari']} / {c['nmi']} |")
-            A(f"| 중복 제거로 버린 행 | {c['n_rows_dropped_for_join']} |")
+            A(f"| ARI / NMI | {_na(c['ari'], '계산불가(퇴화 분할)')} / "
+              f"{_na(c['nmi'], '계산불가(퇴화 분할)')} |")
+            A(f"| 조인 전 버린 행 (중복+라벨 결측) | {c['n_rows_dropped_for_join']}"
+              f" (라벨 결측 {c.get('n_rows_dropped_missing_label', 0)}) |")
+            A("| 결측 칸 수 | "
+              + (" · ".join(f"{k} {v}" for k, v in (c.get("n_missing") or {}).items()) or UNKNOWN)
+              + " |")
             A("")
             A("> **대표 ID 가 달라도 분할이 1:1 이면 동일하다.** 위 두 줄을 혼동하지 말 것 "
               "— mmseqs 가 어느 멤버를 대표로 고르는지는 버전에 따라 달라진다(인계문서 7절).")
@@ -1458,6 +1649,9 @@ def render_md(res: dict, disc: list) -> str:
     A(f"| 매칭 경로 | 직접 {tiers.get('직접', 0)} · 별칭 {tiers.get('별칭', 0)}"
       f" · 전용옵션 {tiers.get('전용옵션', 0)} |")
     A(f"| mmseqs 별칭 대입 줄 | {sr.get('n_alias_assignments', 0)} 건 |")
+    A(f"| 끝까지 못 읽은 원본 | 실패·건너뜀 {sr.get('n_sources_unread', 0)}"
+      f" · 꼬리만 {sr.get('n_sources_partial', 0)}"
+      f" · 상한으로 버림 {sr.get('n_sources_dropped_by_cap', 0)} |")
     ac = sr["align_columns"]
     A(f"| 채점 기준 파일 | `{ac['path']}` — {ac['status']}"
       f"{' (' + str(ac['n_cols']) + '열: ' + ', '.join(map(str, (ac['columns'] or [])[:12])) + ')' if ac.get('columns') else ''} |")
@@ -1510,7 +1704,13 @@ def render_md(res: dict, disc: list) -> str:
             for r in c["reasons"]:
                 A(f"- {r}")
             if c.get("seq_paths"):
-                A(f"- 서열 경로 후보: {', '.join('`'+p+'`' for p in c['seq_paths'])}")
+                cap = (f" (전체 {c.get('n_seq_paths_total')} 개 중 {len(c['seq_paths'])} 개)"
+                       if c.get("seq_paths_capped") else "")
+                A(f"- 서열 경로 후보{cap}: {', '.join('`'+p+'`' for p in c['seq_paths'])}")
+            if c.get("also_seen_in"):
+                A(f"- 같은 명령이 나온 다른 곳 {c.get('n_also_seen')} 건:")
+                for a_ in c["also_seen_in"]:
+                    A(f"  - `{a_['source']}` / {a_['locator']} / 줄 {a_['line_no']}")
             A("")
             A("<details><summary>문맥</summary>")
             A("")
@@ -1564,6 +1764,7 @@ def _empty_recovery(acols, status, reason, **extra) -> dict:
                 candidates=[], n_candidates=0, n_candidates_raw=0,
                 n_candidates_dropped_by_cap=0, n_duplicates_merged=0, n_high=0, n_mid=0,
                 n_by_tier={}, alias_assignments=[], n_alias_assignments=0,
+                n_sources_unread=0, n_sources_partial=0, n_sources_dropped_by_cap=0,
                 key_notebooks={}, scan_dirs=[], history_files=[], align_columns=acols,
                 query_source_guess=None,
                 stats=dict(n_notebooks_found=0, n_notebooks_parsed=0, n_text_files_found=0,
@@ -1686,10 +1887,11 @@ def main(argv=None) -> int:
                 print(f"[대조] 조인 {c['n_matched']}/{c['n_join_rows']} ({c['join_rate']:.4f}) · "
                       f"대표 ID 동일 {c['n_same_rep_id']} ({c['same_rep_id_rate']:.4f}) · "
                       f"분할 1:1 동일 {'예' if c['partition_identical'] else '아니오'} "
-                      f"(ARI={c['ari']}, 쪼개짐 {c['crosstab']['n_split']}, 합쳐짐 {c['crosstab']['n_merged']})")
+                      f"(ARI={_na(c['ari'])}, 쪼개짐 {c['crosstab']['n_split']}, "
+                      f"합쳐짐 {c['crosstab']['n_merged']})")
             else:
                 print(f"[대조] {c.get('status')} — {c.get('reason', '')}")
-        else:
+        elif stage_exc is None:  # 예외는 위 except 에서 이미 한 번 출력했다
             print(f"[재현] {rep['status']} — {rep['reason']}")
     else:
         rep = dict(requested=False, status="요청 안 함", reason="--reproduce 미지정",
@@ -1699,18 +1901,21 @@ def main(argv=None) -> int:
         print("[재현] 건너뜀 (--reproduce 미지정)")
 
     # --- (c) search 명령 복원
+    # (c) 는 (b) 와 입력이 겹치지 않는다. 인계문서 10절이 (c) 를 가장 중요하다고
+    # 적었으므로, master_1827.tsv 의 빈 칸 하나나 빈 _cluster.tsv 때문에 복원이
+    # 통째로 건너뛰어지면 안 된다. 예외는 마지막에 그대로 다시 올린다.
     acols = align_columns(args)
     if not args.recover_search:
         sr = _empty_recovery(acols, "요청 안 함", "--no-recover-search")
         print("[복원] 건너뜀 (--no-recover-search)")
-    elif stage_exc is not None:
-        sr = _empty_recovery(acols, "건너뜀", "앞 단계에서 예외가 발생해 중단했다")
-        print("[복원] 건너뜀 — 앞 단계 예외로 중단 (산출물은 기록한다)")
     else:
+        if stage_exc is not None:
+            print("[복원] 앞 단계(219 재현)에서 예외가 났지만 복원은 독립이므로 그대로 진행한다")
         try:
             sr = recover_search(args, acols, disc)
         except Exception as e:  # noqa: BLE001
-            stage_exc = e
+            if stage_exc is None:  # 앞 단계 예외를 덮어쓰지 않는다 (둘 다 disc·json 에 남는다)
+                stage_exc = e
             sr = _empty_recovery(acols, "예외", f"{type(e).__name__}: {e}",
                                  traceback=traceback.format_exc())
             disc.append(f"search 복원 중 예외: {type(e).__name__}: {e}")
@@ -1786,9 +1991,11 @@ def main(argv=None) -> int:
     res["counts"] = counts
 
     json_path = outdir / "env_probe.json"
-    json_path.write_text(json.dumps(res, indent=2, ensure_ascii=False, default=str))
+    json_path.write_text(
+        json.dumps(json_safe(res), indent=2, ensure_ascii=False, default=str, allow_nan=False),
+        encoding="utf-8")
     md_path = outdir / "env_probe.md"
-    md_path.write_text(render_md(res, disc))
+    md_path.write_text(render_md(res, disc), encoding="utf-8")
 
     commands = [mm.get("version_cmd", {}).get("cmd_str"), (cd.get("env_list") or {}).get("cmd_str"),
                 (jp.get("kernelspec") or {}).get("cmd_str"), (rep.get("run") or {}).get("cmd_str")]
@@ -1797,7 +2004,7 @@ def main(argv=None) -> int:
         inputs=[args.ipr_fasta, args.master_tsv, args.align_tsv],
         outputs=[json_path, md_path],
         commands=[c for c in commands if c],
-        counts=counts,
+        counts=json_safe(counts),
         discrepancies=disc,
         caps=CAP,
         mmseqs_path=mm["path"], mmseqs_version=mm["version"],

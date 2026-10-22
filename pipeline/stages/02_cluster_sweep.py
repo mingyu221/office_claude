@@ -63,6 +63,12 @@
                        **계층이 정상이면 0 이다.** 0 이 아니면 포함관계가 깨졌다는 신호.
   is_mm_rep@XX         이 스크립트는 따로 쓰지 않는다. (cluster@XX == accession) 으로 유도하라
                        (인계문서 1절 규칙).
+  ari_degenerate       양쪽 분할이 **전부 한 클러스터** 이거나 **전부 싱글턴** 이라 ARI 공식이
+                       정의되지 않는(0/0) 쌍. 그 두 경우는 두 분할이 완전히 동일하므로 ARI 를
+                       1.0 으로 적고 이 플래그를 세운다 (sklearn 과 같은 규약).
+                       **이때의 '안정' 은 '분할이 똑같다' 는 뜻일 뿐 해상도가 유용하다는 뜻이
+                       아니다.** 클러스터 수(n_clusters)를 반드시 같이 볼 것 —
+                       0.10 쪽은 1개, 0.90 쪽은 서열 수만큼일 수 있다.
 
 실행 환경
   대상은 epel-af2 워크스테이션(conda base, 사용자 unsit). 의존성은 pandas + numpy + 표준
@@ -133,7 +139,8 @@ ADJACENT_COLUMNS = [
     "label_low", "label_high", "min_seq_id_low", "min_seq_id_high", "n_common",
     "ari", "nmi", "n_clusters_coarser", "n_clusters_finer", "delta_n_clusters",
     "finer_maps_to_one", "coarser_maps_to_one", "one_to_one", "n_finer_split",
-    "n_coarser_merged", "is_stable", "ref_jaccard", "ref_n_added", "ref_n_removed",
+    "n_coarser_merged", "is_stable", "ari_degenerate", "ref_jaccard",
+    "ref_n_added", "ref_n_removed",
     "ref_n_source_clusters", "ref_merged_from", "ref_merged_truncated",
 ]
 # cluster.tsv 는 헤더가 없는 2열 파일이다. 사람이 만든 파일에 헤더가 붙은 경우만 걸러낸다.
@@ -543,6 +550,34 @@ def discover_existing(from_dir: Path, thresholds_requested: list[float] | None) 
                     n_ignored_extra=0)
     if not records:
         raise FileNotFoundError(f"{search_dir} 에서 쓸 수 있는 cluster.tsv 가 없다.")
+
+    # mmseqs 경로는 make_labels 가 라벨 충돌·왕복을 검사하지만 이 경로는 라벨이 **파일 이름에서**
+    # 오므로 그 검사를 거치지 않는다. 서로 다른 이름이 같은 임계값으로 해석되는 일이 실제로
+    # 생긴다 (id7_cluster.tsv 와 id07_cluster.tsv 는 둘 다 0.07 이다). 그대로 두면
+    #   ① 폭이 0 인 인접 쌍(0.07 ↔ 0.07)이 ARI 1.0 으로 '안정 스텝' 에 섞여 안정 구간을 부풀리고
+    #   ② 같은 임계값의 cluster@07 / cluster@7 열이 둘 생겨 뒤 단계 조인이 꼬인다.
+    # 조용히 틀린 숫자가 되므로 여기서 끊는다.
+    by_thr: dict[float, list[str]] = {}
+    for r in records:
+        by_thr.setdefault(round(r["min_seq_id"], 6), []).append(r["label"])
+    collide = {t: lbs for t, lbs in by_thr.items() if len(lbs) > 1}
+    if collide:
+        raise ValueError(
+            f"{search_dir} 에서 서로 다른 파일이 같은 임계값으로 해석된다: "
+            f"{ {t: sorted(lbs) for t, lbs in collide.items()} }. "
+            f"폭이 0 인 인접 쌍이 안정 구간을 부풀리고 같은 임계값의 cluster@XX 열이 중복되므로 "
+            f"중단한다. 한쪽 파일을 치우거나 이름을 threshold_label 규칙(id70 / id12p5)으로 맞출 것.")
+
+    col_seen: dict[str, str] = {}
+    for r in records:
+        col = column_name(r["label"])
+        if col in col_seen:
+            raise ValueError(
+                f"{search_dir} 의 {col_seen[col]} 과 {r['label']} 이 같은 열 이름 {col!r} 을 쓴다. "
+                f"와이드 테이블에서 조용히 덮어쓰기가 나므로 중단한다.")
+        col_seen[col] = r["label"]
+
+    meta["n_thresholds_used"] = len(records)
     return records, meta
 
 
@@ -610,11 +645,27 @@ def compare_partitions(a: pd.Series, b: pd.Series) -> dict:
                common_frac_a=float(n_common / len(a)) if len(a) else float("nan"),
                common_frac_b=float(n_common / len(b)) if len(b) else float("nan"))
     if n_common < 2:
-        out.update(ari=float("nan"), nmi=float("nan"))
+        out.update(ari=float("nan"), nmi=float("nan"), ari_degenerate=False)
         return out
     la = a.reindex(common_idx).astype(str).tolist()
     lb = b.reindex(common_idx).astype(str).tolist()
-    out.update(ari=common.adjusted_rand_index(la, lb),
+    ari = common.adjusted_rand_index(la, lb)
+
+    # ARI 의 퇴화 사례 보정. common.adjusted_rand_index 는 기대값과 최대값이 같아지면 NaN 을
+    # 돌려주는데, 그런 경우가 정확히 둘이고 **둘 다 두 분할이 완전히 동일한 상황**이다.
+    #   ① 양쪽이 전부 한 클러스터      (낮은 min-seq-id 에서 전부 한 묶음으로 뭉친다)
+    #   ② 양쪽이 전부 싱글턴           (높은 min-seq-id 에서 아무것도 묶이지 않는다)
+    # 동일한 분할의 ARI 는 1.0 이 맞다 (sklearn.adjusted_rand_score 도 이 두 경우를 1.0 으로
+    # 특수 처리한다). 보정하지 않으면 is_stable 이 False 가 되어 **분할이 전혀 바뀌지 않은
+    # 구간이 '경계(급격히 재편됨)' 로 뒤집혀 보고된다.** 기본 스윕 0.10~0.90 의 양쪽 끝이
+    # 바로 그 구간이므로, 이 단계의 결론("안정 구간이 있다")이 정반대로 나온다.
+    # 보정 사실은 숨기지 않고 ari_degenerate 컬럼으로 산출물에 남긴다.
+    n_a, n_b = len(set(la)), len(set(lb))
+    degenerate = (n_a == n_b == 1) or (n_a == n_b == n_common)
+    if degenerate:
+        ari = 1.0
+
+    out.update(ari=ari, ari_degenerate=degenerate,
                nmi=common.normalized_mutual_info(la, lb),
                **common.crosstab_mapping(la, lb))
     return out
@@ -695,6 +746,7 @@ def adjacent_table(partitions: dict[str, pd.Series], order: list[str], *,
             n_finer_split=c.get("n_split", 0),
             n_coarser_merged=c.get("n_merged", 0),
             is_stable=bool(not np.isnan(c["ari"]) and c["ari"] >= stable_ari),
+            ari_degenerate=bool(c.get("ari_degenerate", False)),
         )
         # ChCODH2 클러스터의 변화 — 높은 임계값에서 낮은 임계값으로 내려갈 때
         m_hi = cluster_members(fine, ref_acc)
@@ -751,12 +803,24 @@ def consecutive_runs(flags: list[bool]) -> list[tuple[int, int]]:
 def interpret_adjacent(df: pd.DataFrame, order: list[str], *, stable_ari: float) -> dict:
     """ARI 가 유지되는 '안정 구간' 과 급락하는 '경계' 를 뽑는다. 요약 md 의 해석 재료."""
     out = dict(stable_ari=stable_ari, n_pairs=int(len(df)))
+    # 임계값 목록에서 바로 나오는 값이므로 인접 쌍이 없어도(임계값 1개) 정확히 적는다.
+    # df.empty 분기에서 빠뜨리면 '0.70 하나만 돌린' 실행이 요약 1절에 「0.70 포함: 아니오」로 적힌다.
+    thr = [label_to_threshold(lb) for lb in order]
+    out["reference_threshold"] = REFERENCE_THRESHOLD
+    out["reference_threshold_present"] = any(
+        abs(t - REFERENCE_THRESHOLD) < 1e-9 for t in thr)
+
     if df.empty:
         out.update(stable_intervals=[], boundaries=[], ari_median=None, ari_min=None,
-                   reference_in_stable_interval=None, ref_membership_intervals=[])
+                   ari_max=None, reference_in_stable_interval=None,
+                   reference_in_stable_interval_at_edge=None, ref_merge_steps=[],
+                   n_ari_nan=0, n_ari_degenerate=0, ref_membership_intervals=[])
         return out
 
-    thr = [label_to_threshold(lb) for lb in order]
+    # 중앙값·최솟값은 NaN 을 건너뛴 값이다. 몇 쌍이 NaN 이었는지 같이 적지 않으면
+    # "n_pairs 쌍의 중앙값" 으로 오독된다.
+    out["n_ari_nan"] = int(df["ari"].isna().sum())
+    out["n_ari_degenerate"] = int(df["ari_degenerate"].sum()) if "ari_degenerate" in df.columns else 0
     out["ari_median"] = float(df["ari"].median())
     out["ari_min"] = float(df["ari"].min())
     out["ari_max"] = float(df["ari"].max())
@@ -781,6 +845,10 @@ def interpret_adjacent(df: pd.DataFrame, order: list[str], *, stable_ari: float)
     out["reference_threshold"] = ref
     out["reference_in_stable_interval"] = hit[0] if hit else None
     out["reference_threshold_present"] = any(abs(t - ref) < 1e-9 for t in thr)
+    # 0.70 이 구간의 **끝점**이면 한쪽으로 한 스텝만 움직여도 분할이 바뀐다.
+    # "구간 어디를 골라도 같다" 는 주장과 의미가 다르므로 구분해서 적는다.
+    out["reference_in_stable_interval_at_edge"] = (
+        bool(abs(hit[0]["low"] - ref) < 1e-9 or abs(hit[0]["high"] - ref) < 1e-9) if hit else None)
 
     # ChCODH2 클러스터 멤버가 전혀 바뀌지 않는 구간
     if "ref_jaccard" in df.columns:
@@ -991,7 +1059,14 @@ def write_summary(path: Path, metrics: pd.DataFrame, adjacent: pd.DataFrame,
         L.append("- 임계값이 하나뿐이라 인접 비교가 없다.\n")
     else:
         L.append(f"- 인접 ARI 중앙값 **{fnum(interp['ari_median'])}** · "
-                 f"최솟값 {fnum(interp['ari_min'])} · 최댓값 {fnum(interp['ari_max'])}.")
+                 f"최솟값 {fnum(interp['ari_min'])} · 최댓값 {fnum(interp['ari_max'])} "
+                 f"(쌍 {interp['n_pairs']}개 중 NaN {interp.get('n_ari_nan', 0)}개 제외).")
+        if interp.get("n_ari_degenerate"):
+            L.append(f"- 쌍 {interp['n_ari_degenerate']}개는 양쪽이 전부 한 클러스터이거나 전부 "
+                     f"싱글턴인 **퇴화 분할**이라 ARI 공식이 정의되지 않는다. 두 분할이 완전히 "
+                     f"동일한 경우이므로 ARI 를 1.0 으로 적었다 (`ari_degenerate` 열로 표시). "
+                     f"이 구간의 '안정' 은 '분할이 똑같다' 는 뜻이지 '해상도가 유용하다' 는 뜻이 "
+                     f"아니다 — 클러스터 수를 함께 볼 것.")
         if interp["stable_intervals"]:
             for iv in interp["stable_intervals"]:
                 L.append(f"- 안정 구간 **{fnum(iv['low'], 2)}–{fnum(iv['high'], 2)}** "
@@ -1011,9 +1086,15 @@ def write_summary(path: Path, metrics: pd.DataFrame, adjacent: pd.DataFrame,
         if not interp.get("reference_threshold_present"):
             L.append(f"- ⚠ 운용 임계값 {REFERENCE_THRESHOLD:.2f} 가 이번 스윕에 없다. "
                      f"219 분할과의 직접 비교가 불가능하다.")
+        elif hit and interp.get("reference_in_stable_interval_at_edge"):
+            L.append(f"- 운용 임계값 {REFERENCE_THRESHOLD:.2f} 는 안정 구간 "
+                     f"{fnum(hit['low'], 2)}–{fnum(hit['high'], 2)} 안에 있지만 **구간의 끝점**이다. "
+                     f"구간 안쪽으로는 임계값을 흔들어도 분할이 거의 같지만, 반대쪽으로 한 스텝 "
+                     f"움직이면 경계를 넘는다. 「0.70 에 의존하지 않는다」를 주장하려면 그 방향의 "
+                     f"재편을 같이 보고해야 한다 (3절 표의 해당 행).")
         elif hit:
             L.append(f"- **운용 임계값 {REFERENCE_THRESHOLD:.2f} 는 안정 구간 "
-                     f"{fnum(hit['low'], 2)}–{fnum(hit['high'], 2)} 안에 있다.** "
+                     f"{fnum(hit['low'], 2)}–{fnum(hit['high'], 2)} 의 내부에 있다.** "
                      f"0.70 에서 얻은 분할은 그 구간 어디를 골라도 거의 같으므로, "
                      f"결론이 0.70 이라는 한 점에 의존하지 않는다.")
         else:
@@ -1241,7 +1322,10 @@ def run(args) -> dict:
     if args.from_existing:
         mode = "from-existing"
         print(f"=== 단계 2 클러스터 스윕 ({mode}) — mmseqs 를 부르지 않는다 ===")
-        explicit = args.thresholds if args.thresholds_explicit else None
+        # parse_thresholds 가 정규화(중복 제거·0.70 강제 추가)한 목록을 쓴다. args.thresholds
+        # 원본을 쓰면 바로 위에서 "0.70 을 자동 추가했다" 고 찍은 뒤 그 0.70 을 필터에서
+        # 빠뜨려, 화면 메시지와 실제 사용 임계값이 어긋난다.
+        explicit = list(thresholds) if args.thresholds_explicit else None
         run_records, existing_meta = discover_existing(Path(args.from_existing), explicit)
         order = [r["label"] for r in run_records]
         thresholds = [r["min_seq_id"] for r in run_records]
@@ -1328,6 +1412,20 @@ def run(args) -> dict:
                    f"easy-cluster 는 모든 입력 서열을 배정하므로 입력이 다른 파일일 가능성이 높다.")
             if args.allow_incomplete:
                 note(msg + " (--allow-incomplete 로 계속하며 해당 칸은 빈 문자열로 둔다)")
+            else:
+                raise ValueError(msg + " 의도한 것이면 --allow-incomplete 를 줄 것.")
+
+        # 반대 방향 — cluster.tsv 에 있는데 universe 에 없는 accession. 이 쪽은 빈 칸으로
+        # 남는 게 아니라 **와이드 테이블에서 행 자체가 사라진다.** 절대규칙 3(서열을 지우지
+        # 않는다)을 깨는 조용한 행 손실이므로 결측 방향과 똑같이 기본은 예외로 막는다.
+        # 전형적인 발생 경로: --from-existing 의 cluster.tsv 를 만든 FASTA 와 --fasta 가 다름.
+        extra = int(len(partitions[label].index.difference(uni_idx)))
+        if extra:
+            msg = (f"{label}: cluster.tsv 의 accession {extra}개가 universe({len(universe)}개, "
+                   f"출처 {uni_meta['source']}) 에 없다. 이 서열들은 sweep_assignments.tsv 에서 "
+                   f"행째로 빠진다 — cluster.tsv 를 만든 FASTA 와 --fasta 가 다를 가능성이 높다.")
+            if args.allow_incomplete:
+                note(msg + " (--allow-incomplete 로 계속하며 해당 서열은 와이드 테이블에서 제외된다)")
             else:
                 raise ValueError(msg + " 의도한 것이면 --allow-incomplete 를 줄 것.")
 
@@ -1419,6 +1517,26 @@ def run(args) -> dict:
     adjacent, interp = adjacent_table(partitions, order, stable_ari=args.stable_ari,
                                       ref_acc=ref_acc, max_list=args.max_list)
 
+    # n_finer_split > 0 은 높은 임계값의 클러스터 하나가 낮은 임계값에서 여러 클러스터로
+    # 흩어졌다는 뜻 — min-seq-id 를 내리면 묶음은 합쳐지기만 해야 하므로 포함관계가 깨진 것이다
+    # (이 파일 상단 「지표의 정의」 참조). 표에만 적고 넘어가면 아무도 안 본다.
+    if len(adjacent):
+        broken = adjacent[adjacent["n_finer_split"] > 0]
+        if len(broken):
+            pairs = ", ".join(f"{r.label_low}↔{r.label_high}(split {int(r.n_finer_split)})"
+                              for r in broken.itertuples())
+            note(f"계층 포함관계가 깨진 인접 쌍 {len(broken)}개 — n_finer_split > 0: {pairs}. "
+                 f"min-seq-id 를 내리면 클러스터는 합쳐지기만 해야 한다. "
+                 f"-c/--cov-mode/-s 가 임계값마다 달랐는지, cluster.tsv 들이 같은 입력에서 나왔는지 확인할 것.")
+        n_nan = int(adjacent["ari"].isna().sum())
+        if n_nan:
+            note(f"인접 쌍 {len(adjacent)}개 중 {n_nan}개의 ARI 가 NaN 이다 "
+                 f"(공통 accession 2개 미만). 중앙값·최솟값은 나머지 {len(adjacent) - n_nan}개로만 계산됐다.")
+        if interp.get("n_ari_degenerate"):
+            print(f"[주의] 인접 쌍 {interp['n_ari_degenerate']}개가 퇴화 분할(양쪽 전부 한 클러스터 "
+                  f"또는 전부 싱글턴)이라 ARI 를 1.0 으로 보정했다 — sweep_adjacent.tsv 의 "
+                  f"ari_degenerate 열 참조.")
+
     # master 쪽 cluster 열을 와이드 테이블에 함께 둔다 (뒤 단계의 조인 편의)
     if master is not None:
         wide.insert(1, "master_cluster", master.reindex(pd.Index(universe)).fillna("").astype(str))
@@ -1433,8 +1551,10 @@ def run(args) -> dict:
               f"안정 구간 {len(interp['stable_intervals'])}개 · 경계 {len(interp['boundaries'])}개")
         hit = interp["reference_in_stable_interval"]
         if hit:
+            edge = " ※ 구간의 끝점이다 — 반대쪽 한 스텝은 경계" if \
+                interp.get("reference_in_stable_interval_at_edge") else " (내부)"
             print(f"            0.70 은 안정 구간 {hit['low']:.2f}–{hit['high']:.2f} 안에 있다 "
-                  f"(최소 ARI {hit['min_ari']:.4f})")
+                  f"(최소 ARI {hit['min_ari']:.4f}){edge}")
         elif interp.get("reference_threshold_present"):
             print("            0.70 이 안정 구간 밖이다 — 요약 md 3절 해석 참조")
 

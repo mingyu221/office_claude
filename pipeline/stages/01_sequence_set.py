@@ -26,6 +26,16 @@
      (FASTA 에 없는 것은 예외가 아니다. --require-reference 로 강제할 수 있다.)
   5. 위치 번호는 전부 ChCODH2 서열 번호(Met1 = 1, 636 aa). 이 단계는 위치를 직접 다루지
      않지만 common.verify_known_positions() 로 번호 체계를 매 실행 점검한다.
+  6. 아래 네 가지는 '조용히 틀린 숫자'로 끝나므로 전부 예외다.
+     a. FASTA 첫 줄이 '>' 가 아니거나 UTF-8 BOM 으로 시작  — common.read_fasta 가 첫 '>' 앞의
+        줄을 조용히 버려 레코드가 통째로 사라진다(1827 -> 1826). assert_fasta_header_first().
+     b. --len-core-min > --len-core-max  — core 밴드가 사라져 qc_pass 가 전부 False 가 된다.
+     c. --min-join-rate > 0 인데 master 파일이 없음  — 조인을 안 하면 게이트가 조용히 통과된다.
+     d. master 의 is_mm_rep 컬럼이 참 토큰 0개인데 (cluster == accession) 인 행은 있음
+        — 토큰 어휘 불일치로 is_mm_rep 이 전부 False 가 된다. 실제 값 분포를 예외에 적는다.
+  7. TSV 안전성. 탭/개행/수직탭이 든 **모든 문자열 셀**을 공백으로 치환하고 치환한 셀 수와
+     행 수를 보고한다. raw_header 만 막으면 source_organism(원본 헤더에서 뽑으므로 탭이
+     남을 수 있다) 때문에 cut/awk 에서 컬럼이 한 칸 밀린다.
 
 컬럼 정의 (출력 순서대로)
   accession          common.parse_accession(header). master 조인 키.
@@ -55,8 +65,10 @@
   is_dup_rep         dup_group 대표 여부. **중복이 없는 서열도 True** 이므로
                      df[df.is_dup_rep] 가 곧 유일 서열 집합이다.
                      대표 선정 규칙: is_reference 우선 → accession 사전순 → 등장 순서.
-  is_dup_accession   같은 accession 이 FASTA 에 2회 이상 등장
-  accession_count    그 accession 의 FASTA 등장 횟수
+  is_dup_accession   같은 accession 이 FASTA 에 2회 이상 등장. **빈 accession 은 제외**
+                     (빈값끼리 묶어 세면 중복 수가 부풀려진다 — 빈 행은 n_empty_accession 으로
+                      따로 보고한다).
+  accession_count    그 accession 의 FASTA 등장 횟수. 빈 accession 행은 1 로 둔다.
   source_organism    헤더의 'OS=...' 또는 말미 '[...]' 에서만 추출. 못 뽑으면 빈값.
                      (UniProt 엔트리 니모닉 'CODH2_CARHZ' 의 _CARHZ 는 쓰지 않는다 —
                       전체 학명과 섞이면 조용히 틀린 집계가 되기 때문)
@@ -144,6 +156,56 @@ _STATUS_RE = re.compile(r"\bstatus=([A-Za-z]+)")
 _DB_BY_PREFIX = {"sp": "UniProtKB/Swiss-Prot", "tr": "UniProtKB/TrEMBL",
                  "ref": "RefSeq", "gi": "NCBI", "up": "UniParc"}
 
+# TSV 를 깨뜨리는 문자. 탭이 든 셀은 pandas 가 따옴표로 감싸 주지만
+# awk / cut / sort 로 읽으면 컬럼이 한 칸 밀린다 (인계문서 7절이 cut -f 를 쓴다).
+_TSV_UNSAFE = re.compile(r"[\t\r\n\v\f]")
+
+
+# --------------------------------------------------------------------------
+# 입력 인자 검증 — 잘못된 임계값은 '조용히 틀린 숫자'로 끝나므로 예외로 막는다
+# --------------------------------------------------------------------------
+def validate_args(args) -> None:
+    if args.len_core_min > args.len_core_max:
+        raise ValueError(
+            f"--len-core-min({args.len_core_min}) 이 --len-core-max({args.len_core_max}) 보다 크다. "
+            f"이대로 돌리면 core 밴드가 한 행도 없이 사라져 qc_pass 가 전부 False 가 되고 "
+            f"is_putative_fusion 이 {args.len_core_max} aa 초과에서 켜진다 — 두 값을 바꿔 쓴 것이 "
+            f"아닌지 확인할 것")
+    if args.len_core_min < 1:
+        raise ValueError(f"--len-core-min 은 1 이상이어야 한다 (받은 값 {args.len_core_min})")
+    if args.unmatched_examples < 0:
+        raise ValueError(
+            f"--unmatched-examples 는 0 이상이어야 한다 (받은 값 {args.unmatched_examples}). "
+            f"음수는 파이썬 슬라이스가 뒤에서 잘라내므로 예시 목록이 조용히 엉뚱해진다")
+    if not (0.0 <= args.min_join_rate <= 1.0):
+        raise ValueError(f"--min-join-rate 는 0.0~1.0 이어야 한다 (받은 값 {args.min_join_rate})")
+    if args.expect_n < 0:
+        raise ValueError(f"--expect-n 은 0(검사 끄기) 이상이어야 한다 (받은 값 {args.expect_n})")
+
+
+# --------------------------------------------------------------------------
+# FASTA 머리 검사 — common.read_fasta 는 첫 '>' 앞의 줄을 조용히 버린다.
+# BOM 한 바이트 때문에 첫 레코드가 통째로 사라지는 경로를 예외로 바꾼다.
+# --------------------------------------------------------------------------
+def assert_fasta_header_first(path: Path) -> None:
+    with open(path, "rb") as fh:
+        head = fh.read(1 << 16)
+    if not head.strip():
+        raise ValueError(f"FASTA 가 비어 있거나 공백뿐이다: {path}")
+    if head.startswith(b"\xef\xbb\xbf"):
+        raise ValueError(
+            f"FASTA 가 UTF-8 BOM 으로 시작한다: {path}\n"
+            "  common.read_fasta 는 BOM 이 붙은 첫 줄을 '>' 헤더로 보지 않으므로 "
+            "**첫 레코드가 조용히 사라진다** (1827 -> 1826).\n"
+            "  제거: sed -i '1s/^\\xEF\\xBB\\xBF//' <fasta>")
+    first = next(line for line in head.split(b"\n") if line.strip())
+    if not first.startswith(b">"):
+        raise ValueError(
+            f"FASTA 첫 줄이 '>' 로 시작하지 않는다: {path}\n"
+            f"  첫 줄={first[:80]!r}\n"
+            "  common.read_fasta 는 첫 '>' 앞의 모든 줄을 조용히 버리므로 레코드가 "
+            "통째로 사라진다. 머리쓰레기를 지우고 다시 돌릴 것")
+
 
 # --------------------------------------------------------------------------
 # accession 정규화 — common.parse_accession 은 빈 문자열에서 IndexError 를 낸다.
@@ -195,8 +257,11 @@ def parse_header_meta(header: str) -> dict:
 # --------------------------------------------------------------------------
 def build_records(fasta_path: Path, *, core_min: int, core_max: int) -> tuple[pd.DataFrame, dict]:
     """FASTA 를 한 번 훑어 행 하나씩 만든다. 삭제·병합 없음."""
+    assert_fasta_header_first(fasta_path)
     rows = []
     n_tab_sanitized = 0
+    n_cells_sanitized = 0
+    n_rows_cells_sanitized = 0
     for header, raw_seq in common.read_fasta(fasta_path):
         seq = re.sub(r"\s+", "", raw_seq)          # 공백/개행은 서열이 아니다
         up = seq.upper()
@@ -204,7 +269,7 @@ def build_records(fasta_path: Path, *, core_min: int, core_max: int) -> tuple[pd
         nonstd = sorted(chars - STANDARD_AA)
         length = len(seq)
 
-        safe_header = header.replace("\t", " ")
+        safe_header = _TSV_UNSAFE.sub(" ", header)
         if safe_header != header:
             n_tab_sanitized += 1
 
@@ -232,6 +297,17 @@ def build_records(fasta_path: Path, *, core_min: int, core_max: int) -> tuple[pd
             seq=seq,
         )
         rec.update(parse_header_meta(header))
+        # parse_header_meta 는 '원본' 헤더에서 뽑으므로 source_organism 에 탭이 남을 수 있다.
+        # raw_header 만 막아 두면 TSV 가 cut/awk 에서 한 칸 밀린다 — 모든 문자열 셀을 같은
+        # 규칙으로 정리하고 몇 셀을 고쳤는지 센다 (절대 규칙 7).
+        n_bad = 0
+        for k, v in rec.items():
+            if isinstance(v, str) and _TSV_UNSAFE.search(v):
+                rec[k] = _TSV_UNSAFE.sub(" ", v).strip()
+                n_bad += 1
+        if n_bad:
+            n_cells_sanitized += n_bad
+            n_rows_cells_sanitized += 1
         rows.append(rec)
 
     if not rows:
@@ -242,14 +318,23 @@ def build_records(fasta_path: Path, *, core_min: int, core_max: int) -> tuple[pd
     # accession 중복 — 조인 자체는 보존되지만 하위 단계가 조용히 틀릴 수 있어 플래그로 남긴다
     acc_counts = df["accession"].value_counts()
     df["accession_count"] = df["accession"].map(acc_counts).astype(int)
-    df["is_dup_accession"] = df["accession_count"] > 1
+    # 빈 accession 은 '같은 accession' 이 아니라 '없는 accession' 이다. 빈값끼리 묶어 세면
+    # 중복 accession 수가 조용히 부풀려진다 — 빈 행은 n_empty_accession 으로만 보고한다.
+    empty_acc = df["accession"] == ""
+    df.loc[empty_acc, "accession_count"] = 1
+    df["is_dup_accession"] = (df["accession_count"] > 1) & ~empty_acc
 
+    n_empty_acc = int(empty_acc.sum())
     meta = dict(
         n_records=int(len(df)),
-        n_empty_accession=int((df["accession"] == "").sum()),
-        n_unique_accession=int(df["accession"].nunique()),
+        n_empty_accession=n_empty_acc,
+        # 빈값을 뺀 실제 accession 종 수. nunique() 는 "" 도 한 종으로 센다.
+        n_unique_accession=int(df.loc[~empty_acc, "accession"].nunique()),
+        n_unique_accession_incl_empty=int(df["accession"].nunique()),
         n_unique_sequence=int(df["seq_sha256"].nunique()),
         n_header_tab_sanitized=int(n_tab_sanitized),
+        n_tsv_cells_sanitized=int(n_cells_sanitized),
+        n_rows_tsv_cells_sanitized=int(n_rows_cells_sanitized),
         n_empty_sequence=int((df["seq_len"] == 0).sum()),
         n_rows_with_lowercase=int((df["n_lowercase"] > 0).sum()),
     )
@@ -374,12 +459,21 @@ def join_master(df: pd.DataFrame, master_path: Path, *, n_examples: int = 10,
     info = dict(master_path=str(master_path), master_exists=bool(Path(master_path).exists()))
 
     if not Path(master_path).exists():
+        # --min-join-rate 를 요구했는데 조인을 아예 하지 않으면 그 게이트는 조용히 통과된다.
+        # 사용자가 명시적으로 건 검사이므로 예외로 막는다.
+        if min_join_rate > 0:
+            raise FileNotFoundError(
+                f"--min-join-rate {min_join_rate} 를 요구했는데 master 파일이 없다: {master_path}\n"
+                "  조인을 하지 않으면 조인율을 확인할 수 없고 cluster/is_mm_rep 이 전부 빈값이 된다.\n"
+                "  --master 로 올바른 경로를 주거나, --min-join-rate 0 으로 검사를 명시적으로 끌 것")
         df["cluster"] = ""
         df["cluster_raw"] = ""
         df["is_mm_rep"] = False
         df["joined_master"] = False
         print(f"[주의] master 파일이 없어 cluster/is_mm_rep 을 비워 둔다: {master_path}")
-        info.update(join_rate=None, n_matched=0, n_unmatched=n_before, skipped=True)
+        print(f"       조인율 해당없음 · 결측률 100.00% ({n_before}/{n_before} 행이 cluster 없음)")
+        info.update(join_rate=None, missing_rate=1.0, n_matched=0, n_unmatched=n_before,
+                    n_clusters=0, n_is_mm_rep=0, skipped=True)
         return info
 
     m = common.read_tsv(master_path)
@@ -418,6 +512,23 @@ def join_master(df: pd.DataFrame, master_path: Path, *, n_examples: int = 10,
         raw = m[rep_col].astype("object").fillna("").astype(str).str.strip().str.lower()
         mm["is_mm_rep"] = raw.isin(TRUE_TOKENS)
         info["is_mm_rep_source"] = f"master 컬럼 '{rep_col}'"
+        info["is_mm_rep_raw_value_counts"] = {str(k): int(v) for k, v in
+                                              raw.value_counts().head(10).items()}
+        # 토큰 어휘가 어긋나면 is_mm_rep 이 전부 False 가 되고도 아무 일 없이 끝난다.
+        # mmseqs 분할에는 반드시 대표가 있으므로(cluster == accession 인 행) 그 모순을 예외로 막는다.
+        n_parsed_true = int(mm["is_mm_rep"].sum())
+        n_derived_true = int((mm["cluster"] == mm["accession"]).sum())
+        info["n_is_mm_rep_parsed_true"] = n_parsed_true
+        info["n_is_mm_rep_derived_true"] = n_derived_true
+        if n_parsed_true == 0 and n_derived_true > 0:
+            raise ValueError(
+                f"master 의 '{rep_col}' 컬럼에서 참으로 해석된 행이 0개인데 "
+                f"(cluster == accession) 인 행은 {n_derived_true}개다. 참 토큰 어휘가 어긋났다는 "
+                f"뜻이며, 이대로면 is_mm_rep 이 조용히 전부 False 가 되어 하위 단계의 대표 선정이 "
+                f"무효가 된다.\n"
+                f"  실제 값 분포(상위 10) = {info['is_mm_rep_raw_value_counts']}\n"
+                f"  인식하는 참 토큰 = {sorted(TRUE_TOKENS)}\n"
+                f"  master 를 고치거나 스크립트의 TRUE_TOKENS 를 넓힐 것")
     else:
         mm["is_mm_rep"] = mm["cluster"] == mm["accession"]
         info["is_mm_rep_source"] = "유도: cluster == accession (인계문서 1절)"
@@ -552,13 +663,24 @@ def write_summary(path: Path, df: pd.DataFrame, stats: dict) -> None:
         ["FASTA sha256", (fasta_rec.get("sha256") or "")[:16]],
         ["행 수 (= FASTA 레코드 수)", n],
         ["기대 행 수 (--expect-n)", stats["expect_n"] or "검사 안 함"],
-        ["유일 accession", fasta_rec["n_unique_accession"]],
+        ["유일 accession (빈값 제외)", fasta_rec["n_unique_accession"]],
+        ["**accession 을 못 뽑은 행**", fasta_rec["n_empty_accession"]],
         ["유일 서열 (대문자 기준)", fasta_rec["n_unique_sequence"]],
         ["빈 서열 행", fasta_rec["n_empty_sequence"]],
         ["소문자 포함 행", fasta_rec["n_rows_with_lowercase"]],
-        ["헤더 탭 치환 행", fasta_rec["n_header_tab_sanitized"]],
+        ["헤더 탭/개행 치환 행", fasta_rec["n_header_tab_sanitized"]],
+        ["문자열 셀 탭/개행 치환 (셀 / 행)",
+         f"{fasta_rec['n_tsv_cells_sanitized']} / {fasta_rec['n_rows_tsv_cells_sanitized']}"],
         ["길이 밴드 경계", f"short &lt; {stats['core_min']} ≤ core ≤ {stats['core_max']} &lt; long"],
     ]) + "\n")
+    if fasta_rec["n_empty_accession"]:
+        parts.append(f"⚠ accession 을 못 뽑은 행이 {fasta_rec['n_empty_accession']}개다. "
+                     "이 행들은 master 조인에서 **반드시 실패**하므로 조인율을 그만큼 끌어내린다. "
+                     "헤더 형식을 확인할 것.\n")
+    parts.append("※ `sequence_set.tsv` 의 빈 셀(`cluster` · `dup_group` · `source_organism` 등)은 "
+                 "`common.read_tsv`(= `dtype=str`, `keep_default_na` 기본값)로 다시 읽으면 "
+                 "**빈 문자열이 아니라 NaN** 이 된다. 하위 단계에서 `!= \"\"` 로 거르면 조용히 "
+                 "틀린다 — `.fillna(\"\")` 를 먼저 하거나 `.notna()` 를 쓸 것.\n")
 
     parts.append("## 2. 길이 분포\n")
     parts.append(md_table(["통계", "값 (aa)"], [
@@ -619,6 +741,11 @@ def write_summary(path: Path, df: pd.DataFrame, stats: dict) -> None:
     if jn.get("skipped"):
         parts.append(f"master 파일이 없어 건너뜀: `{jn['master_path']}` — "
                      "`cluster` / `is_mm_rep` 은 빈값/False 다.\n")
+        parts.append(md_table(["항목", "값"], [
+            ["조인 성공률", "해당없음 (조인 미수행)"],
+            ["결측률", f"100.00% ({n}/{n} 행이 cluster 없음)"],
+            ["클러스터 수", 0],
+        ]) + "\n")
     else:
         parts.append(md_table(["항목", "값"], [
             ["master 경로", f"`{jn['master_path']}`"],
@@ -671,6 +798,7 @@ def write_summary(path: Path, df: pd.DataFrame, stats: dict) -> None:
 # 본체
 # --------------------------------------------------------------------------
 def run(args) -> dict:
+    validate_args(args)
     fasta = Path(args.fasta)
     master = Path(args.master)
     outdir = Path(args.outdir)
@@ -703,9 +831,14 @@ def run(args) -> dict:
         raise ValueError(
             f"FASTA 레코드 수가 {fmeta['n_records']} — 기대값 {args.expect_n} 과 다르다. "
             f"입력이 바뀌었으면 --expect-n 을 명시적으로 고치고, 0 을 주면 검사를 끈다.")
-    if fmeta["n_unique_accession"] != fmeta["n_records"]:
-        print(f"[주의] 중복 accession 존재: 행 {fmeta['n_records']} vs 유일 "
-              f"{fmeta['n_unique_accession']} — is_dup_accession 플래그 참조")
+    n_dup_acc_rows = int(df["is_dup_accession"].sum())
+    if n_dup_acc_rows:
+        print(f"[주의] 중복 accession 행 {n_dup_acc_rows}개: 행 {fmeta['n_records']} vs 유일 "
+              f"{fmeta['n_unique_accession']}(빈값 제외) — is_dup_accession 플래그 참조")
+    if fmeta["n_tsv_cells_sanitized"]:
+        print(f"[주의] 탭/개행이 든 문자열 셀 {fmeta['n_tsv_cells_sanitized']}개"
+              f"({fmeta['n_rows_tsv_cells_sanitized']}행)를 공백으로 치환했다 — "
+              f"TSV 컬럼이 밀리는 것을 막기 위함")
     if fmeta["n_empty_sequence"]:
         print(f"[주의] 빈 서열 {fmeta['n_empty_sequence']}행 (삭제하지 않고 short 밴드로 둔다)")
     if fmeta["n_empty_accession"]:
@@ -922,6 +1055,113 @@ def self_test(dirpath: Path, base_args) -> None:
                    sum(1 for _ in open(Path(args.outdir) / "sequence_set.tsv")) == syn["n_records"] + 1))
     checks.append(("요약 md 존재", (Path(args.outdir) / "sequence_set_summary.md").exists()))
     checks.append(("params.json 존재", (Path(args.outdir) / "params.json").exists()))
+
+    checks.append(("문자열 셀 탭 치환 집계 존재",
+                   "n_tsv_cells_sanitized" in res["fasta"]))
+
+    # ---------------- 음성 경로 (예외가 떠야 하는 것들) ----------------
+    # 전부 '조용히 틀린 숫자'로 끝나던 경로다. 되돌아가면 여기서 잡힌다.
+    neg_dir = dirpath / "neg"
+    neg_dir.mkdir(parents=True, exist_ok=True)
+
+    def must_raise(name, mutate, exc=Exception):
+        a = argparse.Namespace(**vars(args))
+        a.outdir = str(neg_dir / name)
+        mutate(a)
+        try:
+            run(a)
+        except exc as e:
+            print(f"  (음성경로) {name} -> {type(e).__name__}: {str(e).splitlines()[0][:110]}")
+            return True
+        except Exception as e:  # noqa: BLE001
+            print(f"  (음성경로) {name} -> 예상과 다른 예외 {type(e).__name__}: {e}")
+            return False
+        return False
+
+    def _inverted(a):
+        a.len_core_min, a.len_core_max = 700, 620
+    checks.append(("밴드 역전은 예외", must_raise("inverted_bands", _inverted, ValueError)))
+
+    def _neg_examples(a):
+        a.unmatched_examples = -1
+    checks.append(("음수 --unmatched-examples 는 예외",
+                   must_raise("neg_examples", _neg_examples, ValueError)))
+
+    def _bad_rate(a):
+        a.min_join_rate = 2.0
+    checks.append(("범위 밖 --min-join-rate 는 예외",
+                   must_raise("bad_rate", _bad_rate, ValueError)))
+
+    def _gate_without_master(a):
+        a.master = str(neg_dir / "does_not_exist.tsv")
+        a.min_join_rate = 1.0
+    checks.append(("master 없는데 --min-join-rate 요구하면 예외",
+                   must_raise("gate_no_master", _gate_without_master, FileNotFoundError)))
+
+    bom = neg_dir / "bom.fasta"
+    bom.write_bytes(b"\xef\xbb\xbf" + Path(syn["fasta"]).read_bytes())
+
+    def _bom(a):
+        a.fasta = str(bom)
+        a.expect_n = 0
+    checks.append(("BOM FASTA 는 예외 (첫 레코드 조용히 소실 방지)",
+                   must_raise("bom", _bom, ValueError)))
+
+    junk = neg_dir / "junk.fasta"
+    junk.write_bytes(b"# comment line\n" + Path(syn["fasta"]).read_bytes())
+
+    def _junk(a):
+        a.fasta = str(junk)
+        a.expect_n = 0
+    checks.append(("'>' 아닌 머리줄은 예외", must_raise("junk_head", _junk, ValueError)))
+
+    # master 의 is_mm_rep 토큰이 참으로 해석되지 않는 경우
+    bad_master = neg_dir / "master_bad_rep.tsv"
+    src = Path(syn["master"]).read_text().splitlines()
+    with open(bad_master, "wt") as fh:
+        fh.write(src[0] + "\n")
+        for line in src[1:]:
+            a_, c_, _r = line.split("\t")
+            fh.write(f"{a_}\t{c_}\t{c_}\n")      # 참 토큰 대신 대표 accession 문자열
+
+    def _bad_rep(a):
+        a.master = str(bad_master)
+    checks.append(("is_mm_rep 참 토큰 0개는 예외", must_raise("bad_rep_token", _bad_rep, ValueError)))
+
+    # 탭이 든 헤더 -> source_organism 까지 치환되는지 (TSV 컬럼 밀림 방지)
+    tabf = neg_dir / "tab_header.fasta"
+    with open(tabf, "wt") as fh:
+        fh.write(">tr|TAB001|T_ORG OS=Organismus\talpha OX=1\n" + "M" * 640 + "\n")
+    a2 = argparse.Namespace(**vars(args))
+    a2.fasta, a2.expect_n = str(tabf), 0
+    a2.master = str(neg_dir / "does_not_exist.tsv")
+    a2.min_join_rate = 0.0
+    a2.outdir = str(neg_dir / "tab_out")
+    r2 = run(a2)
+    tab_line = (Path(a2.outdir) / "sequence_set.tsv").read_text().splitlines()[1]
+    hdr_line = (Path(a2.outdir) / "sequence_set.tsv").read_text().splitlines()[0]
+    checks.append(("탭 헤더: 출력 TSV 필드 수가 헤더와 같다",
+                   tab_line.count("\t") == hdr_line.count("\t")))
+    checks.append(("탭 헤더: source_organism 에 탭이 남지 않는다",
+                   "\t" not in str(r2["dataframe"].iloc[0]["source_organism"])))
+    checks.append(("탭 헤더: 치환 셀 수 보고됨", r2["fasta"]["n_tsv_cells_sanitized"] >= 1))
+
+    # 빈 accession 은 중복 accession 으로 세지 않는다
+    emptyf = neg_dir / "empty_acc.fasta"
+    with open(emptyf, "wt") as fh:
+        for i in range(3):
+            fh.write(">\n" + "M" + "A" * (630 + i) + "\n")
+    a3 = argparse.Namespace(**vars(args))
+    a3.fasta, a3.expect_n = str(emptyf), 0
+    a3.master = str(neg_dir / "does_not_exist.tsv")
+    a3.min_join_rate = 0.0
+    a3.outdir = str(neg_dir / "empty_acc_out")
+    r3 = run(a3)
+    checks.append(("빈 accession 3행은 is_dup_accession 0",
+                   int(r3["dataframe"]["is_dup_accession"].sum()) == 0
+                   and r3["fasta"]["n_empty_accession"] == 3))
+    checks.append(("빈 accession 은 유일 accession 수에서 제외",
+                   r3["fasta"]["n_unique_accession"] == 0))
 
     print("\n=== 자기검증 결과 ===")
     bad = []

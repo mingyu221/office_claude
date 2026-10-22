@@ -292,11 +292,19 @@ def contingency(labels_a, labels_b):
 
 
 def adjusted_rand_index(labels_a, labels_b) -> float:
-    """ARI. 두 분할이 같으면 1, 무작위면 0 근처."""
+    """ARI. 두 분할이 같으면 1, 무작위면 0 근처.
+
+    퇴화 분할 주의 — 양쪽 모두 한 덩어리이거나 양쪽 모두 싱글턴이면 두 분할은 **완전히 같은데도**
+    공식이 0/0 이 된다. sklearn 과 같은 규약으로 1.0 을 돌려준다. 이것을 NaN 으로 두면
+    스윕에서 "분할이 전혀 바뀌지 않은 구간"이 "경계(급격히 재편됨)"로 뒤집혀 보고된다.
+    """
     n = contingency(labels_a, labels_b)
     total = n.sum()
     if total < 2:
         return float("nan")
+    n_a, n_b = n.shape
+    if (n_a == n_b == 1) or (n_a == n_b == total):
+        return 1.0
     comb2 = lambda x: x * (x - 1) / 2.0  # noqa: E731
     sum_ij = comb2(n).sum()
     sum_i = comb2(n.sum(axis=1)).sum()
