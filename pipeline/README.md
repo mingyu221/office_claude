@@ -99,12 +99,21 @@ chcodh2_alignment.tsv ─[3]→ equiv_map ──┴─→ residue_matrix.tsv (18
 
 임계값별 클러스터 변화를 보는 것이 지금 단계의 목표라면 이것부터.
 
+작업 폴더는 `/mnt/af2results/mingyu/workspace/ipr010047_mmseqs/{input,script,result,tmp}`.
+처음 한 번만 터미널에서:
+
 ```bash
+BASE=/mnt/af2results/mingyu/workspace/ipr010047_mmseqs
+mkdir -p $BASE/{input,script,result,tmp}
+ln -s /mnt/af2results/mingyu/chcodh2/protein-matching-IPR010047.fasta $BASE/input/
+ln -s /mnt/af2results/mingyu/workspace/docking_simulation/result/homolog_split/master_1827.tsv $BASE/input/
+
 cd ~/office_claude && git pull
-jupyter lab pipeline/notebooks/cluster_sweep.ipynb
+cp pipeline/notebooks/cluster_sweep.ipynb $BASE/script/
+jupyter lab $BASE/script/cluster_sweep.ipynb
 ```
 
-첫 셀의 `REPO` 와 `MNT` 두 줄만 환경에 맞게 고치면 된다. 로직은 `02_cluster_sweep.py` 를
+첫 셀의 `REPO` 와 `BASE` 두 줄만 환경에 맞게 고치면 된다. 로직은 `02_cluster_sweep.py` 를
 `import` 해서 쓰므로 노트북은 호출과 표시만 한다.
 
 **4절(시험 실행)을 반드시 먼저 돌릴 것.** 전체 스윕은 mmseqs 를 17회 돌리는데 1회 비용을
