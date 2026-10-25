@@ -1065,6 +1065,77 @@ def alignment_coverage(align_df: pd.DataFrame, universe, *, max_examples: int = 
     )
 
 
+def assert_alignment_usable(align_df: pd.DataFrame, meta: dict, coverage: dict, *,
+                            ref_acc: str = CHCODH2_ACC,
+                            min_reference_fident: float = 0.99,
+                            max_outside_frac: float = 0.01,
+                            max_near_identical_frac: float = 0.01) -> list[str]:
+    """정렬 파일이 **정말 ChCODH2 대비 fident 인지** 못 박는다. 어긋나면 경고가 아니라 예외.
+
+    헤더도 --columns 도 없는 파일에서 열이 한 칸 밀리면, fident 자리에 qcov(0.95)나
+    qstart(1) 가 들어와도 0~1 범위라 척도 판정을 그냥 통과한다. 그러면 identity 기반
+    세트가 전부 universe 전체가 되는데 표만 보면 멀쩡해 보인다 — 가장 나쁜 실패다.
+    그래서 easy-search 가 반드시 만족하는 것만 골라 검사한다.
+      ① 자기 히트(ChCODH2 vs ChCODH2) 의 fident 는 1.0 이다.
+      ② 1,827 서열의 fident 가 전부 같은 값일 수는 없다 (01번: 중앙 0.379, 연속 분포).
+      ③ 이 정렬은 그 FASTA 를 DB 로 돌린 것이므로 universe 밖 target 이 나올 수 없다.
+         나오면 절단이 아니라 **accession 정규화 불일치**다 (조인이 조용히 비는 경로).
+      ④ ChCODH2 와 사실상 동일한(>=0.999) 서열이 여럿일 수는 없다. 자기 히트 1건이 정상.
+    ①②④ 가 깨지면 열이 밀린 것이고, ③ 이 깨지면 조인 키가 어긋난 것이다. 어느 쪽이든
+    아래 숫자 전부가 틀리므로 여기서 멈춘다. 임계값은 전부 키워드로 열어 두었다.
+    """
+    lines: list[str] = []
+    hint = ("columns=cs.ALIGN_FORMAT_OUTPUT 를 1절 ALIGN_COLUMNS 에 넣어 열 순서를 "
+            "직접 주거나, 실제 --format-output 순서를 확인할 것.")
+
+    if not meta.get("reference_in_alignment"):
+        raise ValueError(
+            f"{ref_acc} 자기 히트가 정렬 결과에 없다. 질의가 ChCODH2 가 아니거나 "
+            f"target 열이 어긋났다. {hint}")
+    ref_fid = meta.get("reference_fident")
+    if ref_fid is None or float(ref_fid) < min_reference_fident:
+        raise ValueError(
+            f"{ref_acc} 자기 히트의 fident 가 {ref_fid} 다. easy-search 자기 히트는 1.0 "
+            f"이어야 하므로 fident 열이 아닌 것을 읽고 있다 "
+            f"(열 이름 출처: {meta.get('column_source')}). {hint}")
+    lines.append(f"자기 히트 fident {float(ref_fid):.4f} — 1.0 이어야 한다 (통과)")
+
+    fmin, fmax = meta.get("fident_min"), meta.get("fident_max")
+    if fmin is None or fmax is None:
+        raise ValueError("fident 값이 하나도 없다 — 정렬 파일을 다시 확인할 것.")
+    if float(fmax) - float(fmin) < 1e-9:
+        raise ValueError(
+            f"fident 가 전부 {float(fmin)} 로 같다. 1,827 서열의 ChCODH2 대비 identity 가 "
+            f"상수일 수는 없으므로 qcov/tcov/qstart 같은 다른 열을 읽고 있다 "
+            f"(열 이름 출처: {meta.get('column_source')}). {hint}")
+    lines.append(f"fident 범위 {float(fmin):.4f}~{float(fmax):.4f} — 상수가 아니다 (통과)")
+
+    n_aln = int(coverage.get("n_aligned") or 0)
+    n_out = int(coverage.get("n_aligned_outside_universe") or 0)
+    out_cap = max(1, int(max_outside_frac * n_aln))
+    lines.append(f"universe 밖 target {n_out}/{n_aln}  (허용 {out_cap})"
+                 + (f"  예: {coverage.get('outside_examples', [])[:5]}" if n_out else ""))
+    if n_out > out_cap:
+        raise ValueError(
+            f"정렬 결과의 target 중 {n_out}/{n_aln} 개가 FASTA universe 에 없다 "
+            f"(예: {coverage.get('outside_examples', [])[:5]}). 이 정렬은 그 FASTA 를 DB 로 "
+            f"돌린 것이므로 절단이 아니라 accession 표기가 다른 것이다 (버전 접미사 .1, "
+            f"sp|…| 접두사 등). 조인이 조용히 비면 identity 기반 세트가 ChCODH2 하나로 "
+            f"쪼그라든다. parse_accession 규칙을 양쪽에 맞춘 뒤 다시 돌릴 것.")
+
+    near = align_df["fident"].astype("float64")
+    n_near = int((near >= 0.999).sum())
+    near_cap = max(1, int(max_near_identical_frac * n_aln))
+    lines.append(f"fident >= 0.999 인 target {n_near}개 — 자기 히트 1건이 정상 (허용 {near_cap})")
+    if n_near > near_cap:
+        raise ValueError(
+            f"ChCODH2 와 사실상 동일한(fident>=0.999) target 이 {n_near}/{n_aln} 개다. "
+            f"자기 히트 1건 말고는 나올 수 없으므로 fident 가 아닌 열(tcov/qcov 등) 을 읽고 "
+            f"있을 가능성이 크다 (열 이름 출처: {meta.get('column_source')}). 중복 서열이 "
+            f"실제로 그만큼 있다면 max_near_identical_frac 를 올려 다시 돌릴 것. {hint}")
+    return lines
+
+
 def fident_summary(align_df: pd.DataFrame, *, universe=None) -> dict:
     """ChCODH2 대비 identity 분포. 기존 관측(중앙값 0.379, 95% 가 0.55 이하) 과 대조한다."""
     s = align_df["fident"]
@@ -1260,13 +1331,15 @@ def check_position_numbering(position_columns: dict, *,
     paper = sorted(int(p) for p in paper_positions)
     exact = [p for p in paper if p in found]
     near, unmatched = [], []
+    claimed = set(exact)          # master 컬럼 하나를 두 논문 번호가 나눠 갖지 않게 한다
     for p in paper:
         if p in found:
             continue
         cands = [(abs(f - p), f) for f in found if 0 < abs(f - p) <= tolerance
-                 and f not in exact]
+                 and f not in claimed]
         if cands:
             d, f = sorted(cands)[0]
+            claimed.add(f)
             near.append(dict(paper=p, master=f, delta=int(f - p),
                              column=position_columns[f]))
         else:
@@ -1464,8 +1537,9 @@ def pick_by_effective(prof_df: pd.DataFrame, target_effective: int) -> pd.DataFr
     """방식마다 '실질 다양성 target 을 채우는 가장 좁은 후보' 를 하나씩 고른다.
 
     n_effective 가 큰 쪽을 그냥 고르면 **언제나 가장 느슨한 기준이 이긴다** (세트를
-    넓히면 다양성은 자동으로 늘기 때문). 그래서 분모를 먼저 고정하고, 같은 분모를
-    채우면서 ChCODH2 와 가장 가까운(fident 하한이 높은) 후보를 방식별로 뽑는다.
+    넓히면 다양성은 자동으로 늘기 때문). 그래서 분모를 먼저 고정하고, target 을 넘는
+    것 중 n_effective 가 가장 작은 후보(동률이면 n 이 작은 쪽)를 방식별로 뽑는다.
+    즉 '목표 분모를 겨우 채우는 가장 좁은 후보' 다 — fident 하한으로 고르지는 않는다.
     목표를 못 채우는 방식은 그 방식의 최대 n_effective 후보로 대체하고 reached=False 로 표시한다.
     """
     rows = []
@@ -1500,8 +1574,9 @@ def compare_summary(prof_df: pd.DataFrame, *, target_effective: int | None = Non
     lines: list[str] = []
 
     for method, grp in prof_df.groupby("method", sort=True):
-        fmin = pd.to_numeric(grp.get("fident_min"), errors="coerce")
-        rng = ("" if fmin is None or not fmin.notna().any()
+        fmin = (pd.to_numeric(grp["fident_min"], errors="coerce")
+                if "fident_min" in grp.columns else None)
+        rng = ("" if fmin is None or not bool(fmin.notna().any())
                else f", fident 하한 {float(fmin.min()):.3f}~{float(fmin.max()):.3f}")
         no_ref = grp.loc[~grp["has_reference"].astype(bool), "name"].tolist()
         warn = f"  ⚠ ChCODH2 가 빠진 후보 {no_ref}" if no_ref else ""
