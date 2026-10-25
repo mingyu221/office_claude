@@ -95,6 +95,29 @@ chcodh2_alignment.tsv ─[3]→ equiv_map ──┴─→ residue_matrix.tsv (18
 
 ## epel-af2 에서 실행
 
+### 노트북 (권장)
+
+임계값별 클러스터 변화를 보는 것이 지금 단계의 목표라면 이것부터.
+
+```bash
+cd ~/office_claude && git pull
+jupyter lab pipeline/notebooks/cluster_sweep.ipynb
+```
+
+첫 셀의 `REPO` 와 `MNT` 두 줄만 환경에 맞게 고치면 된다. 로직은 `02_cluster_sweep.py` 를
+`import` 해서 쓰므로 노트북은 호출과 표시만 한다.
+
+**4절(시험 실행)을 반드시 먼저 돌릴 것.** 전체 스윕은 mmseqs 를 17회 돌리는데 1회 비용을
+아무도 모른다. 0.70 하나로 소요시간과 tmp 용량을 재고, 덤으로 219 가 재현되는지 본다.
+5절은 결과 파일이 있으면 건너뛰므로 중간에 끊겨도 다시 돌리면 이어진다
+(단, `-c` 나 `-s` 를 바꿨다면 `clusters/` 를 비우고 다시 돌려야 한다).
+
+**7절 해석 주의** — 전부 한 덩어리이거나 전부 싱글턴인 구간도 ARI 는 1.0 이 나온다.
+그것은 "안정" 이 아니라 "해상도가 쓸모없음" 이다. 노트북이 `⚠ 전부 퇴화` 로 표시하지만
+`n_clusters` 를 늘 같이 볼 것.
+
+### CLI (배치 실행용)
+
 ```bash
 cd <이 레포>
 source pipeline/config.sh          # 경로를 한 곳에서 고친다
