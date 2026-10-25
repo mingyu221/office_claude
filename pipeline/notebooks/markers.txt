@@ -1,0 +1,17 @@
+# 대조군 서열 — 스윕에서 "어느 임계값에서 이들이 갈라지는가" 를 보는 기준점.
+# 02_cluster_sweep.py --markers pipeline/lib/markers.txt
+#
+# 한 줄에 accession 하나. '#' 뒤는 주석. 탭이나 공백 뒤에 라벨을 붙여도 된다.
+#
+# ⚠ 아래 locus tag 는 논문에서 확인한 것이고, UniProt accession 은 미확인이다.
+#   IPR010047 FASTA 안에서 실제로 쓰이는 accession 을 찾아 왼쪽 칼럼을 채울 것.
+#   (01_sequence_set.py 산출물 sequence_set.tsv 에서 organism 으로 검색하면 빠르다)
+
+Q9F8A8	ChCODH2   Chy_0085  Carboxydothermus hydrogenoformans  O2-sensitive, 본 연구 대상
+#	ChCODH4   Chy_0736  Carboxydothermus hydrogenoformans  O2-insensitive, Y558 보유
+#	RrCODH    Rru_A1427 Rhodospirillum rubrum              4Fe-4S D-cluster, F43
+#	DvCODH    Dvu_2098  Desulfovibrio vulgaris             2Fe-2S D-cluster, F44, O2-insensitive
+#	MtCODH              Moorella thermoacetica             ACS 융합형 (CdhA)
+#	ChCODH1   Chy_0034  Carboxydothermus hydrogenoformans
+#	ChCODH3   Chy_0690  Carboxydothermus hydrogenoformans
+#	ChCODH5   Chy_1222  Carboxydothermus hydrogenoformans
