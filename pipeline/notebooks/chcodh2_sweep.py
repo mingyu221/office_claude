@@ -23,7 +23,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-VERSION = "2026-10-25a"   # 노트북 1절이 이 값을 대조한다. 어긋나면 둘 중 하나가 낡은 것이다.
+VERSION = "2026-10-25b"   # 노트북 1절이 이 값을 대조한다. 어긋나면 둘 중 하나가 낡은 것이다.
 
 CHCODH2_ACC = "Q9F8A8"
 CHCODH2_LEN = 636
