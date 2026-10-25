@@ -27,7 +27,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-VERSION = "2026-10-25c"   # 노트북 1절이 이 값을 대조한다. 어긋나면 둘 중 하나가 낡은 것이다.
+VERSION = "2026-10-25d"   # 노트북 1절이 이 값을 대조한다. 어긋나면 둘 중 하나가 낡은 것이다.
 
 CHCODH2_ACC = "Q9F8A8"
 CHCODH2_LEN = 636
@@ -786,8 +786,13 @@ def sha256_file(path, limit_mb=None) -> str:
                 break
     return h.hexdigest()
 
-def write_params(outdir, stage: str, *, inputs=None, outputs=None, commands=None, **extra) -> Path:
-    """산출물 옆에 재현 정보를 남긴다. 인계문서가 존재하는 이유가 이것이다."""
+def write_params(outdir, stage: str, *, inputs=None, outputs=None, commands=None,
+                 filename: str = "params.json", **extra) -> Path:
+    """산출물 옆에 재현 정보를 남긴다. 인계문서가 존재하는 이유가 이것이다.
+
+    filename — 한 폴더를 여러 노트북이 공유하면 params.json 이 서로 덮어쓴다.
+    노트북마다 params_<태그>.json 으로 나눠 쓸 것.
+    """
     outdir = Path(outdir)
     outdir.mkdir(parents=True, exist_ok=True)
 
@@ -819,7 +824,7 @@ def write_params(outdir, stage: str, *, inputs=None, outputs=None, commands=None
         commands=commands or [],
         **extra,
     )
-    dest = outdir / "params.json"
+    dest = outdir / filename
     dest.write_text(json.dumps(payload, indent=2, ensure_ascii=False, default=str))
     return dest
 
