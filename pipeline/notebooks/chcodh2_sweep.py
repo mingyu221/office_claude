@@ -8,8 +8,9 @@ cluster_sweep.ipynb 옆에 두기만 하면 된다. git 도, 다른 파일도 �
 직접 고치지 말 것 — 다음 갱신 때 덮어쓴다.
 
 2026-10-25c 에서 cluster_set_compare.ipynb 용 세트 비교 함수를 더했다 (파일 뒤쪽).
-정렬 파일 읽기는 pipeline/stages/03_equiv_map.py 에서 검증된 로직을 옮긴 것이다.
-앞쪽 함수(01 번 노트북이 쓰는 것)는 전혀 건드리지 않았다.
+2026-10-26a 에서 equiv_map.ipynb 용 좌표계 함수를 더했다 (파일 맨 뒤쪽).
+정렬 파일 읽기와 qaln/taln 파싱은 pipeline/stages/03_equiv_map.py 에서 검증된 로직을
+옮긴 것이다. 앞쪽 함수(01·02 번 노트북이 쓰는 것)는 전혀 건드리지 않았다.
 """
 from __future__ import annotations
 
@@ -27,7 +28,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-VERSION = "2026-10-25d"   # 노트북 1절이 이 값을 대조한다. 어긋나면 둘 중 하나가 낡은 것이다.
+VERSION = "2026-10-26a"   # 노트북 1절이 이 값을 대조한다. 어긋나면 둘 중 하나가 낡은 것이다.
 
 CHCODH2_ACC = "Q9F8A8"
 CHCODH2_LEN = 636
@@ -1618,3 +1619,1279 @@ def compare_summary(prof_df: pd.DataFrame, *, target_effective: int | None = Non
                  "좁히면 순수하지만 보존도의 분모가 작아진다. 위 n_effective 와 "
                  "fident 하한을 보고 고를 것.")
     return lines
+
+
+# ==========================================================================
+# ChCODH2 좌표계 — 상동체 잔기를 1~636 번호로 (2026-10-26a 추가)
+#
+# equiv_map.ipynb 가 쓰는 부분. 파싱·검증 로직은 pipeline/stages/03_equiv_map.py
+# (자기검증 79항목 통과) 에서 그대로 옮겼다. **새로 발명한 것은 없다.**
+#   - 검증 1 (V1) qaln 갭 제거 == 참조서열[qstart..] 부분서열. 전 행 정확히 일치.
+#   - 검증 2 (V2) len(qaln) == len(taln). **HSP 선택 전 전 행**에 적용.
+#   - 검증 3 (V3) 자기 히트는 q_pos == t_pos 가 636개 전부 성립.
+#   - 검증 4 (V4) base 자동 판별. 0-based 채택은 **파일에 색인 0 이 실제로 있을 때만.**
+#   - 검증 5 (V5) qlen 컬럼이 있으면 636 과 대조.
+#   - 검증 6 (V6) taln 소문자(소프트 마스킹) 검출 — 보존도만 조용히 과소계산된다.
+#   - 검증 7 (V7) universe 축소 검출 — 행렬 행 수가 1,827 아래면 보고.
+# 어느 것이든 깨지면 경고가 아니라 예외다. 뒤의 보존도·Fix/Bias 판정이 전부 조용히
+# 틀리는 쪽이 훨씬 비싸기 때문이다.
+#
+# 번호 체계는 **참조 FASTA(pipeline/lib/chcodh2.fasta, Met1=1, 636 aa) 하나뿐**이다.
+# master_1827.tsv 의 r* 컬럼은 대조 대상이지 좌표의 출처가 아니다
+# (compare_master_positions 가 잔기 값으로 판정한다).
+# ==========================================================================
+
+GAP_CHAR = "-"
+OUTSIDE_CHAR = "-"          # 정렬 블록 밖. 기본값은 갭과 같은 문자다(행렬 파일을 단순하게
+                            # 유지하려고). 구분이 필요한 계산은 커버리지 마스크를 쓴다.
+EXPECTED_N_SEQUENCES = 1827         # IPR010047 다운로드 서열 수 (universe)
+STD_AA = "ACDEFGHIKLMNPQRSTVWY"
+
+EQUIV_COLUMNS = ["accession", "q_pos", "q_aa", "t_pos", "t_aa"]
+EQUIV_REQUIRED_KEYS = ("accession", "qstart", "qaln", "tstart", "taln")
+
+# COLSPEC 에 없는 컬럼의 후보 이름. COLSPEC 은 01·02 가 쓰므로 건드리지 않는다.
+EQUIV_EXTRA_COLSPEC = {
+    "qend":   ["qend", "q_end"],
+    "tend":   ["tend", "t_end", "send"],
+    "qlen":   ["qlen", "q_len", "query_len"],
+    "tlen":   ["tlen", "t_len", "target_len"],
+    "alnlen": ["alnlen", "aln_len", "length", "alignment_length"],
+}
+
+# 논문에서 확인된 16개 위치 (pipeline/lib/common.KNOWN_POSITIONS 와 같은 내용).
+# aa 는 참조서열에서 **반드시 재확인된다** (verify_known_positions).
+KNOWN_POSITIONS = {
+    41:  dict(aa="F", role="d_cluster_aromatic", note="F41A 활성 소실; 전자전달 관문"),
+    43:  dict(aa="E", role="mediator_electrostatic", note="viologen 정전기 결합; 터널#1 입구"),
+    57:  dict(aa="R", role="mediator_affinity", note="R57G/N59L 에서 EV 친화도 10배 개선"),
+    59:  dict(aa="N", role="mediator_affinity", note="R57G/N59L 에서 EV 친화도 10배 개선"),
+    206: dict(aa="Q", role="tunnel3_entrance", note="비선택 터널 #3 입구"),
+    450: dict(aa="K", role="tunnel1_entrance", note="비선택 터널 #1 입구"),
+    559: dict(aa="A", role="tunnel_bottleneck", note="A559W/H 로 O2 내성 61~148배; triad"),
+    565: dict(aa="V", role="tunnel_bottleneck_triad", note="A559/V565/I580 triad"),
+    580: dict(aa="I", role="tunnel_bottleneck_triad", note="A559/V565/I580 triad"),
+    583: dict(aa="L", role="tunnel1_entrance", note="비선택 터널 #1 입구"),
+    586: dict(aa="I", role="tunnel2_entrance", note="비선택 터널 #2 입구"),
+    593: dict(aa="T", role="tunnel2_entrance", note="비선택 터널 #2 입구"),
+    597: dict(aa="T", role="tunnel2_entrance", note="비선택 터널 #2 입구"),
+    599: dict(aa="S", role="tunnel3_entrance", note="비선택 터널 #3 입구"),
+    603: dict(aa="I", role="tunnel3_entrance", note="비선택 터널 #3 입구"),
+    610: dict(aa="V", role="tunnel2_bottleneck", note="V610H 로 O2 내성 추가 개선"),
+}
+
+COVERAGE_COLUMNS = [
+    "q_pos", "q_aa", "is_known_position", "known_role",
+    "n_universe", "n_in_alignment", "n_not_in_alignment",
+    "n_residue", "n_gap_within_aln", "n_outside_aln",
+    "n_identical", "residue_frac_in_alignment", "residue_frac_universe",
+    "identity_frac_of_residues",
+]
+
+
+def read_reference_seq(path, *, ref_acc: str = CHCODH2_ACC,
+                       expect_len: int = CHCODH2_LEN) -> tuple[str, dict]:
+    """참조서열을 읽는다. **이 서열 하나가 좌표계의 유일한 출처다.**
+
+    레코드가 둘 이상이면 어느 것이 질의였는지 알 수 없으므로 예외. 길이가 636 이
+    아니면 번호가 전부 밀리므로 예외 (expect_len=None 으로 끌 수 있다).
+    """
+    recs = list(read_fasta(path))
+    if not recs:
+        raise ValueError(f"{path} 에서 FASTA 레코드를 읽지 못했다.")
+    if len(recs) > 1:
+        raise ValueError(
+            f"{path} 에 레코드가 {len(recs)}개 있다 (헤더 예: "
+            f"{[h.split()[0] for h, _ in recs][:5]}). 어느 것이 search 질의였는지 "
+            f"확정할 수 없으므로 중단한다 — 참조서열 1개 FASTA 를 줄 것.")
+    header, seq = recs[0]
+    seq = "".join(str(seq).split()).upper()
+    acc = safe_parse_accession(header)
+    bad = sorted({c for c in seq if c not in STD_AA})
+    meta = dict(path=str(path), header=header, accession=acc, length=len(seq),
+                expected_length=expect_len, nonstandard_chars=bad,
+                accession_matches_reference=bool(acc == ref_acc))
+    if expect_len is not None and len(seq) != int(expect_len):
+        raise ValueError(
+            f"참조서열 길이가 {len(seq)} 다 ({expect_len} 이어야 한다). 좌표 전체가 "
+            f"밀리므로 중단한다. 파일 {path}, 헤더 '{header}'. 다른 아이소폼이거나 "
+            f"태그가 붙은 서열일 수 있다.")
+    if bad:
+        raise ValueError(
+            f"참조서열에 표준 20 아미노산이 아닌 문자가 있다: {bad}. 번호를 믿을 수 "
+            f"없으므로 중단한다 (파일 {path}).")
+    return seq, meta
+
+
+def verify_known_positions(seq: str, positions: dict | None = None) -> dict:
+    """논문 위치의 잔기가 참조서열과 맞는지 확인한다. 어긋나면 즉시 예외.
+
+    **이것이 '번호 체계가 맞다' 의 유일한 직접 증거다.** 여기가 통과해야 아래의
+    모든 위치 번호가 논문과 같은 뜻이 된다.
+    """
+    positions = positions or KNOWN_POSITIONS
+    L = len(seq)
+    out_of_range = [p for p in positions if not (1 <= int(p) <= L)]
+    if out_of_range:
+        raise ValueError(f"참조서열 {L} aa 범위를 벗어난 위치: {sorted(out_of_range)}")
+    bad = [(int(p), m["aa"], seq[int(p) - 1]) for p, m in sorted(positions.items())
+           if seq[int(p) - 1] != m["aa"]]
+    if bad:
+        raise ValueError(
+            f"번호 체계 불일치 (위치, 논문 잔기, 참조서열 잔기) = {bad}. 참조 FASTA 가 "
+            f"논문의 번호와 다른 서열이므로 중단한다.")
+    return dict(n_positions=len(positions), positions=sorted(int(p) for p in positions),
+                residues={int(p): seq[int(p) - 1] for p in sorted(positions)},
+                passed=True)
+
+
+def _resolve_equiv_columns(df: pd.DataFrame) -> dict:
+    """정렬 표의 논리 이름 -> 실제 컬럼명. qaln/taln 이 없으면 좌표를 만들 수 없다."""
+    spec = dict(COLSPEC)
+    spec.update(EQUIV_EXTRA_COLSPEC)
+    out = {}
+    for key in ("accession", "query", "fident", "qstart", "qaln", "tstart", "taln",
+                "qcov", "tcov", "evalue", "bits", "qend", "tend", "qlen", "tlen", "alnlen"):
+        out[key] = detect_column(df, spec[key], required=False, what=key)
+    missing = [k for k in EQUIV_REQUIRED_KEYS if not out.get(k)]
+    if missing:
+        raise KeyError(
+            f"정렬 표에 {missing} 컬럼이 없다 (실제 컬럼 {list(df.columns)[:20]}). "
+            f"좌표계는 qstart/qaln/tstart/taln 으로만 만들 수 있다. --format-output 에 "
+            f"이 네 개가 들어갔는지 확인하고, 헤더가 없으면 columns 인자로 순서를 줄 것: "
+            f"columns=cs.ALIGN_FORMAT_OUTPUT")
+    return out
+
+
+def read_alignment_rows(path, columns=None, *, ref_acc: str = CHCODH2_ACC,
+                        assume_format_output: bool = True) -> tuple[pd.DataFrame, dict]:
+    """정렬 파일을 **행 그대로** 읽는다 (HSP 병합 없음, qaln/taln 보존).
+
+    read_alignment 은 target 당 1행으로 줄이고 qaln/taln 을 버리므로 좌표계에는 쓸 수
+    없다. 그래서 같은 헤더 판정 규칙(looks_like_align_header)을 쓰되 모든 행을 남긴다.
+    반환 표의 컬럼 이름은 논리 이름으로 정규화된다 (accession/qstart/qaln/tstart/taln/…).
+
+    열 이름을 정하는 세 갈래는 read_alignment 과 같다 — ① columns 인자 ② 파일 헤더
+    ③ 복원된 --format-output 순서(추정). 어느 쪽을 썼는지 meta['column_source'] 에 남는다.
+    """
+    path = Path(path)
+    raw = pd.read_csv(path, sep="\t", header=None, dtype=str,
+                      keep_default_na=False, na_filter=False)
+    if raw.empty:
+        raise ValueError(f"{path} 에서 행을 하나도 읽지 못했다. 파일이 비었거나 구분자가 탭이 아니다.")
+
+    first = [str(v).strip() for v in raw.iloc[0].tolist()]
+    hdr_guess, hdr_reason = looks_like_align_header(first)
+    meta: dict = dict(path=str(path), n_raw_rows=int(len(raw)), n_fields=int(raw.shape[1]),
+                      first_row=first[:20], header_guess=hdr_guess, header_reason=hdr_reason)
+    if columns:
+        names = [str(c).strip() for c in columns]
+        if len(names) != raw.shape[1]:
+            raise ValueError(
+                f"columns 가 {len(names)}개인데 {path} 는 {raw.shape[1]}열이다. "
+                f"--format-output 순서를 그대로 적었는지 확인할 것. 첫 행 = {first[:20]}")
+        _reject_duplicate_names(names, "columns 인자")
+        dropped = all(a.lower() == b.lower() for a, b in zip(first, names))
+        body = raw.iloc[1:] if dropped else raw
+        meta.update(column_source="columns 인자", header_row_dropped=bool(dropped))
+    elif hdr_guess:
+        names = first
+        _reject_duplicate_names(names, f"{path} 의 헤더 행")
+        body = raw.iloc[1:]
+        meta.update(column_source="파일 헤더", header_row_dropped=True)
+    elif assume_format_output and raw.shape[1] == len(ALIGN_FORMAT_OUTPUT):
+        names = list(ALIGN_FORMAT_OUTPUT)
+        body = raw
+        meta.update(column_source="추정(복원된 --format-output 순서)", header_row_dropped=False)
+    else:
+        raise ValueError(
+            f"{path} 에 헤더가 없다고 판정했다 ({hdr_reason}). {raw.shape[1]}열이며 첫 행 = "
+            f"{first[:20]}.\n어느 열이 qaln/taln 인지 알 수 없으므로 columns 인자로 "
+            f"--format-output 순서를 직접 줄 것. 예:\n  columns=cs.ALIGN_FORMAT_OUTPUT")
+
+    df = body.reset_index(drop=True)
+    df.columns = list(names)
+    if df.empty:
+        raise ValueError(f"{path} 에 헤더만 있고 데이터 행이 없다.")
+    cmap = _resolve_equiv_columns(df)
+    meta.update(columns=list(df.columns), column_map={k: v for k, v in cmap.items() if v})
+
+    if cmap.get("query"):
+        qvals = sorted({str(v).strip() for v in df[cmap["query"]].tolist() if str(v).strip()})
+        meta.update(n_query_values=len(qvals), query_values=qvals[:5])
+        if len(qvals) > 1:
+            raise ValueError(
+                f"{path} 에 질의가 {len(qvals)}종류 있다 ({qvals[:5]}). 좌표계는 ChCODH2 "
+                f"단일 질의를 전제하므로 q_pos 의 뜻이 달라진다. 중단한다.")
+    out = pd.DataFrame(index=pd.RangeIndex(len(df)))
+    out["accession"] = norm_acc_series(df[cmap["accession"]]).to_numpy()
+    for key in ("qaln", "taln"):
+        out[key] = df[cmap[key]].astype("object").astype(str).str.strip().to_numpy()
+    for key in ("qstart", "tstart", "qend", "tend", "qlen", "tlen", "alnlen"):
+        if cmap.get(key):
+            out[key] = _to_float(df[cmap[key]]).to_numpy()
+    for key in ("fident", "bits", "evalue", "qcov", "tcov"):
+        if cmap.get(key):
+            out[key] = _to_float(df[cmap[key]]).to_numpy()
+    if cmap.get("query"):
+        out["query"] = df[cmap["query"]].astype("object").astype(str).str.strip().to_numpy()
+    out["row_in_file"] = np.arange(len(out), dtype=np.int64)
+
+    n_empty = int((out["accession"] == "").sum())
+    if n_empty:
+        raise ValueError(
+            f"target accession 이 빈 행이 {n_empty}개 있다. 조인이 조용히 실패하므로 중단한다.")
+    for key in ("qstart", "tstart"):
+        n_bad = int(out[key].isna().sum())
+        if n_bad:
+            ex = df.loc[out[key].isna().to_numpy(), cmap[key]].astype(str).head(5).tolist()
+            raise ValueError(
+                f"{key} 를 정수로 읽을 수 없는 행이 {n_bad}/{len(out)}개 있다 (예 {ex}). "
+                f"열 이름을 {meta['column_source']} 로 정했는데 열이 어긋났을 수 있다.")
+    if "fident" in out.columns:
+        fid = out["fident"]
+        fmax = float(fid.max()) if int(fid.notna().sum()) else float("nan")
+        if fmax > 1.0:
+            if fmax > 100.0 + 1e-6:
+                raise ValueError(f"fident 최댓값이 {fmax} 다 — 분수도 퍼센트도 아니다. 열이 어긋났다.")
+            out["fident"] = fid / 100.0
+        meta.update(fident_scale="percent(100으로 나눴다)" if fmax > 1.0 else "fraction(0~1)",
+                    fident_input_max=fmax, n_fident_missing=int(fid.isna().sum()))
+    meta.update(n_rows=int(len(out)), n_unique_target=int(out["accession"].nunique()),
+                reference_accession=ref_acc,
+                reference_in_alignment=bool((out["accession"] == ref_acc).any()))
+    return out, meta
+
+
+def check_aln_lengths(rows: pd.DataFrame, *, max_examples: int = 10) -> dict:
+    """V2 — len(qaln) == len(taln). **HSP 선택 전 전 행**에 적용한다.
+
+    선택 규칙이 bits/evalue 를 쓰므로, 깨진 행이 선택될 수도 있다. 그래서 선택 뒤가
+    아니라 전 행을 먼저 본다. 쌍이 깨진 정렬에서는 잔기 대응을 만들 수 없다.
+    """
+    qa = rows["qaln"].astype(str)
+    ta = rows["taln"].astype(str)
+    empty = (qa.str.len() == 0) | (ta.str.len() == 0)
+    if empty.any():
+        ex = rows.loc[empty.to_numpy(), "accession"].head(max_examples).tolist()
+        raise ValueError(
+            f"[검증 2 실패] qaln 또는 taln 이 빈 행이 {int(empty.sum())}개 있다. 예시 {ex}. "
+            f"--format-output 에 qaln/taln 이 실제로 포함되었는지 확인할 것.")
+    bad = (qa.str.len() != ta.str.len()).to_numpy()
+    if bad.any():
+        ex = [f"{r.accession}: len(qaln)={len(str(r.qaln))} len(taln)={len(str(r.taln))}"
+              for r in rows.loc[bad].head(max_examples).itertuples()]
+        raise ValueError(
+            f"[검증 2 실패] qaln 과 taln 의 길이가 다른 행이 {int(bad.sum())}/{len(rows)}개 "
+            f"있다. 정렬 문자열 쌍이 깨졌으므로 잔기 대응을 만들 수 없다.\n  "
+            + "\n  ".join(ex))
+    return dict(check="V2", passed=True, n_checked=int(len(rows)),
+                aln_len_min=int(qa.str.len().min()), aln_len_max=int(qa.str.len().max()),
+                aln_len_median=float(qa.str.len().median()),
+                detail=f"len(qaln)==len(taln) 전 행 {len(rows)}행 통과 "
+                       f"(정렬 열 수 {int(qa.str.len().min())}~{int(qa.str.len().max())})")
+
+
+def check_query_length(rows: pd.DataFrame, ref_seq: str, *, max_examples: int = 10) -> dict:
+    """V5 — qlen 컬럼이 있으면 참조서열 길이와 대조한다.
+
+    'search 질의가 정말 이 참조서열이었나' 의 가장 싼 직접 증거다. 1잔기 차이는
+    0-based 오판으로 위장해 t_pos 를 조용히 +1 밀어버리므로 반드시 먼저 걸러야 한다.
+    alnlen 은 정렬 열 수와 대조하되 판본마다 정의가 달라 불일치로만 보고한다.
+    """
+    L = len(ref_seq)
+    info = dict(check="V5", reference_len=L, qlen_present=bool("qlen" in rows.columns),
+                alnlen_present=bool("alnlen" in rows.columns), notes=[])
+    if "qlen" not in rows.columns:
+        info.update(passed=None, detail="qlen 컬럼이 없다 — 질의 서열 길이를 직접 확인할 수 "
+                                        "없고 V1·V3 의 간접 증거에만 의존한다 "
+                                        "(--format-output 에 qlen 을 넣으면 가장 싸게 확인된다).")
+        info["notes"].append(info["detail"])
+        return info
+    ql = rows["qlen"]
+    vals = sorted({int(v) for v in ql.dropna().tolist()})
+    bad = (ql.notna() & (ql != L)).to_numpy()
+    info.update(qlen_values=vals[:20], n_qlen_unparseable=int(ql.isna().sum()),
+                n_qlen_mismatch=int(bad.sum()), n_rows=int(len(rows)))
+    if int(ql.isna().sum()):
+        info["notes"].append(f"qlen 을 숫자로 읽지 못한 행 {int(ql.isna().sum())}개 — 그 행은 건너뛴다.")
+    if bad.any():
+        ex = rows.loc[bad, "accession"].head(max_examples).tolist()
+        raise ValueError(
+            f"[검증 5 실패] 정렬 파일의 qlen 이 참조서열 길이 {L} 와 다른 행이 "
+            f"{int(bad.sum())}/{len(rows)}개 있다 (qlen 값 {vals[:10]}). search 질의가 "
+            f"참조 FASTA 의 {L} aa 가 아니었다는 직접 증거이며, 그러면 q_pos/t_pos 전체가 "
+            f"다른 좌표계가 된다. 예시 accession {ex}\n"
+            f"  특히 1잔기 차이는 0-based 오판으로 위장해 t_pos 를 조용히 밀어버린다.\n"
+            f"  조치 — 질의 FASTA 를 찾아 참조서열과 대조하고, 다르면 올바른 질의로 "
+            f"search 를 다시 돌릴 것.")
+    if "alnlen" in rows.columns:
+        al = rows["alnlen"]
+        cols = rows["qaln"].astype(str).str.len()
+        nbad = int((al.notna() & (al != cols)).sum())
+        info["n_alnlen_mismatch"] = nbad
+        if nbad:
+            info["notes"].append(
+                f"alnlen 이 len(qaln) 과 다른 행 {nbad}/{len(rows)}개 — 열 순서가 어긋났거나 "
+                f"alnlen 정의가 다른 판본이다 (매핑은 qaln/taln 만 쓰므로 좌표에는 영향 없음).")
+    info.update(passed=True,
+                detail=f"qlen 전 행 {int(ql.notna().sum())}행이 참조서열 {L} aa 와 일치")
+    return info
+
+
+def check_soft_masking(rows: pd.DataFrame, *, upper_aln: bool = False) -> dict:
+    """V6 — taln 소문자(소프트 마스킹) 검출.
+
+    소문자는 V1~V3 를 **전부 통과하면서** 행렬에 그대로 들어간다. 그러면 'a' != 'A' 라서
+    n_identical 과 하위 단계의 보존도가 조용히 과소계산된다. 그래서 경고가 아니라 예외다.
+    """
+    info = dict(check="V6", upper_aln=bool(upper_aln))
+    counts: dict[str, int] = {}
+    for key in ("qaln", "taln"):
+        ser = rows[key].astype(str)
+        n = int(ser.str.count(r"[a-z]").sum())
+        info[f"n_lower_{key}"] = n
+        if n:
+            chars = sorted({c for s in ser for c in s if c.islower()})
+            counts[key] = n
+            info[f"lower_chars_{key}"] = chars[:12]
+    if counts and not upper_aln:
+        raise ValueError(
+            f"[검증 6 실패] 정렬 문자열에 소문자 잔기가 있다 ({counts}). 소프트 마스킹된 "
+            f"산출물이면 V1~V3 는 전부 통과하지만, 행렬에 소문자가 그대로 들어가면 "
+            f"'a' != 'A' 가 되어 **n_identical 과 보존도가 조용히 과소계산된다.**\n"
+            f"  조치 — parse_equiv(..., upper_aln=True) 로 다시 돌릴 것 "
+            f"(qaln/taln 을 대문자로 올려 비교·매핑한다). 그 사실은 감사 json 에 남는다.")
+    info.update(passed=True, n_lower_total=int(sum(counts.values())),
+                detail=("소문자 없음 (대문자 정렬)" if not counts else
+                        f"소문자 {sum(counts.values())}개를 upper_aln=True 로 대문자화했다 "
+                        f"— 보존도 과소계산을 막았다"))
+    return info
+
+
+def select_best_hsp(rows: pd.DataFrame, *, max_examples: int = 5) -> tuple[pd.DataFrame, dict]:
+    """target 당 1행으로 줄인다. 규칙은 03_equiv_map 과 같다 —
+    bits 최대 → evalue 최소 → qcov 최대 → 파일 등장 순서."""
+    work = rows.copy()
+    work["n_hsp"] = work.groupby("accession")["row_in_file"].transform("size").to_numpy()
+    keys, asc, used = [], [], []
+    for key, ascending, label in (("bits", False, "bits 최대"),
+                                  ("evalue", True, "evalue 최소"),
+                                  ("qcov", False, "qcov 최대")):
+        if key in work.columns:
+            keys.append(key); asc.append(ascending); used.append(label)
+    keys.append("row_in_file"); asc.append(True); used.append("파일 등장 순서")
+    sel = (work.sort_values(keys, ascending=asc, kind="mergesort")
+               .drop_duplicates("accession", keep="first")
+               .sort_values("row_in_file", kind="mergesort")
+               .reset_index(drop=True))
+    multi = sel.loc[sel["n_hsp"] > 1, "accession"].head(max_examples).tolist()
+    meta = dict(n_rows=int(len(rows)), n_selected=int(len(sel)),
+                n_merged=int(len(rows) - len(sel)),
+                n_targets_multi_hsp=int((sel["n_hsp"] > 1).sum()),
+                multi_hsp_examples=multi, tiebreak=" → ".join(used))
+    return sel, meta
+
+
+def detect_qstart_base(sel: pd.DataFrame, ref_seq: str, *, assume_base=None,
+                       max_examples: int = 10, upper_aln: bool = False) -> dict:
+    """V1 의 전반부 + V4 — qstart 가 1-based 인지 0-based 인지 **데이터로** 판정한다.
+
+    두 해석 모두로 전 행을 맞춰보고 이긴 쪽을 채택하되, **0-based 를 채택하려면 파일에
+    색인 0 이 실제로 존재해야 한다.** 없으면 보류하고 예외다 — 질의가 참조와 1잔기
+    어긋난 판이 0-based 로 오진되면 q_pos 는 맞게 나오고 V1 도 통과하면서 t_pos 만
+    전 행 +1 밀려 **조용히 틀린다.** 가장 위험한 경로이므로 여기서 멈춘다.
+    """
+    gap = GAP_CHAR
+    L = len(ref_seq)
+    ref_up = ref_seq.upper()
+    stat = {1: 0, 0: 0}
+    case_only = {1: 0, 0: 0}
+    out_of_range = {1: 0, 0: 0}
+    examples: dict[int, list] = {1: [], 0: []}
+    qstart_vals: list[int] = []
+    tstart_vals: list[int] = []
+
+    for r in sel.itertuples():
+        qaln = str(r.qaln).upper() if upper_aln else str(r.qaln)
+        qres = qaln.replace(gap, "")
+        qstart = int(r.qstart)
+        qstart_vals.append(qstart)
+        tstart_vals.append(int(r.tstart))
+        for base in (1, 0):
+            start0 = qstart - 1 if base == 1 else qstart
+            if start0 < 0 or start0 + len(qres) > L:
+                out_of_range[base] += 1
+                if len(examples[base]) < max_examples:
+                    examples[base].append(dict(accession=r.accession, qstart=qstart,
+                                               n_residues=len(qres), reason="범위 초과"))
+                continue
+            seg = ref_seq[start0:start0 + len(qres)]
+            if qres == seg:
+                stat[base] += 1
+            elif qres.upper() == ref_up[start0:start0 + len(qres)]:
+                case_only[base] += 1
+                if len(examples[base]) < max_examples:
+                    examples[base].append(dict(accession=r.accession, qstart=qstart,
+                                               reason="대소문자만 다름"))
+            elif len(examples[base]) < max_examples:
+                found = ref_seq.find(qres) if len(qres) >= 8 else -1
+                examples[base].append(dict(
+                    accession=r.accession, qstart=qstart, n_residues=len(qres),
+                    expected_prefix=seg[:30], observed_prefix=qres[:30],
+                    found_at_1based=(found + 1) if found >= 0 else None,
+                    reason="부분서열 불일치"))
+
+    n = int(len(sel))
+    n_qzero = int(sum(1 for v in qstart_vals if v == 0))
+    n_tzero = int(sum(1 for v in tstart_vals if v == 0))
+    zero = dict(qstart_min=(min(qstart_vals) if qstart_vals else None),
+                tstart_min=(min(tstart_vals) if tstart_vals else None),
+                n_qstart_zero=n_qzero, n_tstart_zero=n_tzero,
+                zero_index_present=bool(n_qzero or n_tzero))
+
+    if assume_base in (0, 1, "0", "1"):
+        base = int(assume_base)
+        basis = f"assume_base={base} 으로 강제 지정 (데이터 판정을 쓰지 않았다)"
+    elif stat[1] == 0 and stat[0] == 0:
+        raise ValueError(
+            f"[검증 1 실패] 1-based / 0-based 어느 해석으로도 qaln 이 참조서열과 맞는 행이 "
+            f"하나도 없다 ({n}행 검사). 질의 서열이 참조서열({L} aa)이 아니거나, "
+            f"qaln/taln 컬럼이 뒤바뀌었거나, 참조 FASTA 가 다른 아이소폼이다.\n"
+            f"  1-based 범위초과 {out_of_range[1]} · 대소문자만다름 {case_only[1]}\n"
+            f"  0-based 범위초과 {out_of_range[0]} · 대소문자만다름 {case_only[0]}\n"
+            f"  1-based 예시: {json.dumps(examples[1][:3], ensure_ascii=False)}\n"
+            f"  0-based 예시: {json.dumps(examples[0][:3], ensure_ascii=False)}\n"
+            f"  (대소문자만 다르면 upper_aln=True 로 대문자 변환 후 진행할 수 있다)")
+    elif stat[1] > stat[0]:
+        base = 1
+        basis = (f"1-based 로 {stat[1]}/{n} 행 일치, 0-based 로 {stat[0]}/{n} 행 일치 → "
+                 f"1-based 채택 (mmseqs 기본 가정과 일치)")
+    elif stat[0] > stat[1]:
+        if not zero["zero_index_present"]:
+            raise ValueError(
+                f"[검증 4 보류] 0-based 로 {stat[0]}/{n} 행이 맞고 1-based 로 {stat[1]}/{n} 행이 "
+                f"맞지만, 파일 어디에도 색인 0 이 없다 (qstart 최소 {zero['qstart_min']} · "
+                f"tstart 최소 {zero['tstart_min']} · qstart==0 {n_qzero}행 · "
+                f"tstart==0 {n_tzero}행).\n"
+                f"  진짜 0-based 산출물이라면 {n}개 국소 정렬 중 어딘가에 0 이 나와야 한다. "
+                f"0 이 전혀 없다는 것은 base 가 아니라 **참조서열과 search 질의서열이 1잔기 "
+                f"어긋났다**는 뜻일 가능성이 훨씬 높다 (개시 Met 유무·태그·다른 아이소폼).\n"
+                f"  그대로 0-based 로 진행하면 q_pos 는 맞게 나오지만 t_pos 가 전부 +1 밀려 "
+                f"**조용히 틀린다** (V1 은 통과해버리고, 자기 히트가 없으면 V3 도 못 한다).\n"
+                f"  조치 — ① qlen 이 {L} 인지 본다(V5) ② search 질의 FASTA 를 참조서열과 "
+                f"대조한다 ③ 진짜 0-based 임을 확인했으면 assume_base=0 으로 강제한다.")
+        base = 0
+        basis = (f"0-based 로 {stat[0]}/{n} 행 일치, 1-based 로 {stat[1]}/{n} 행 일치 → "
+                 f"0-based 채택. mmseqs 의 1-based 가정이 깨졌다 (색인 0 증거: "
+                 f"qstart==0 {n_qzero}행 · tstart==0 {n_tzero}행)")
+    else:
+        base = 1
+        basis = (f"두 해석의 일치 행 수가 같다({stat[1]}/{n}). 1-based 를 채택하지만 "
+                 f"근거가 약하다")
+    return dict(check="V4", base=base, basis=basis, n_checked=n, **zero,
+                n_match_1based=stat[1], n_match_0based=stat[0],
+                n_case_only_1based=case_only[1], n_case_only_0based=case_only[0],
+                n_out_of_range_1based=out_of_range[1], n_out_of_range_0based=out_of_range[0],
+                ambiguous=bool(stat[1] == stat[0] and assume_base is None),
+                assume_base=assume_base, upper_aln=bool(upper_aln),
+                mismatch_examples_1based=examples[1][:max_examples],
+                mismatch_examples_0based=examples[0][:max_examples],
+                passed=True,
+                detail=f"base={base} 채택 — {basis}")
+
+
+def _build_equiv_arrays(sel: pd.DataFrame, ref_seq: str, base: int, *,
+                        upper_aln: bool, max_examples: int) -> dict:
+    """정렬 문자열을 ChCODH2 좌표로 투영한다. **행마다 V1 을 다시 확인한다.**
+
+    qaln 에 잔기가 있는 **모든 열**이 결과에 들어간다 (상동체 쪽이 갭인 열도 t_aa='-',
+    t_pos=0 으로 남는다). 그래야 '갭'(상동체에 그 잔기가 없다) 과 '정렬 블록 밖'
+    (애초에 정렬되지 않았다) 이 구분되고, 보존도의 분모가 정확해진다.
+    qaln 이 '-' 인 열(상동체에만 있는 삽입 잔기)은 ChCODH2 번호를 갖지 않으므로 버리고
+    개수만 센다.
+    """
+    gap = GAP_CHAR
+    L = len(ref_seq)
+    acc_list: list[str] = []
+    counts: list[int] = []
+    q_pos_parts: list[np.ndarray] = []
+    t_pos_parts: list[np.ndarray] = []
+    q_aa_parts: list[np.ndarray] = []
+    t_aa_parts: list[np.ndarray] = []
+    per_acc: list[dict] = []
+    mismatches: list[str] = []
+    n_scanned = 0
+    ins_cols = 0
+    del_cols = 0
+    end_mismatch = dict(qend=0, tend=0, tlen_exceeded=0)
+    nonstd: dict[str, int] = {}
+    seen: dict[str, int] = {}
+
+    for r in sel.itertuples():
+        n_scanned += 1
+        acc = str(r.accession)
+        if acc in seen:
+            raise ValueError(
+                f"{acc} 가 선택 후에도 두 번 이상 있다 (행 {seen[acc]} 와 {int(r.row_in_file)}). "
+                f"HSP 선택이 실패했으므로 중단한다 — 같은 위치가 두 번 덮인다.")
+        seen[acc] = int(r.row_in_file)
+        qaln, taln = str(r.qaln), str(r.taln)
+        if upper_aln:
+            qaln, taln = qaln.upper(), taln.upper()
+        qstart, tstart = int(r.qstart), int(r.tstart)
+        qarr = np.array(list(qaln), dtype="<U1")
+        tarr = np.array(list(taln), dtype="<U1")
+        qnon = qarr != gap
+        tnon = tarr != gap
+        nq, nt = int(qnon.sum()), int(tnon.sum())
+
+        start0 = qstart - 1 if base == 1 else qstart
+        tstart0 = tstart - 1 if base == 1 else tstart
+        if start0 < 0 or start0 + nq > L:
+            raise ValueError(
+                f"[검증 1 실패] {acc}: qstart={qstart} (base={base} → 0-based {start0}) 에서 "
+                f"잔기 {nq}개는 참조서열 {L} aa 를 벗어난다. base 판정 또는 입력이 잘못됐다.")
+        if tstart0 < 0:
+            raise ValueError(f"{acc}: tstart={tstart} 가 base={base} 해석에서 음수 색인이 된다.")
+
+        qres = "".join(qarr[qnon].tolist())
+        seg = ref_seq[start0:start0 + nq]
+        if qres != seg:
+            diff = next((i for i in range(nq) if qres[i] != seg[i]), 0)
+            found = ref_seq.find(qres) if nq >= 8 else -1
+            mismatches.append(
+                f"{acc} (파일 {int(r.row_in_file)}행): qstart={qstart}, 잔기 {nq}개. "
+                f"첫 불일치 색인 {diff} — 참조 '{seg[diff]}'(위치 {start0 + diff + 1}) vs "
+                f"qaln '{qres[diff]}'. 기대 '{seg[:30]}' vs 관측 '{qres[:30]}'"
+                + (f". 이 부분서열은 참조의 {found + 1} 번에서 시작한다 "
+                   f"(qstart 와 {found + 1 - (start0 + 1):+d} 어긋남)" if found >= 0 else ""))
+            if len(mismatches) >= max_examples:
+                break
+            continue
+
+        qcols = np.flatnonzero(qnon)
+        q_pos = (start0 + np.cumsum(qnon) - 1)[qcols] + 1
+        t_run = (tstart0 + np.cumsum(tnon) - 1)[qcols] + 1
+        t_pos = np.where(tnon[qcols], t_run, 0)
+        acc_list.append(acc)
+        counts.append(int(qcols.size))
+        q_pos_parts.append(q_pos.astype(np.int32))
+        t_pos_parts.append(t_pos.astype(np.int32))
+        q_aa_parts.append(qarr[qcols])
+        t_aa_parts.append(tarr[qcols])
+
+        n_del = int((qnon & ~tnon).sum())
+        n_ins = int((~qnon & tnon).sum())
+        del_cols += n_del
+        ins_cols += n_ins
+        for ch, cnt in zip(*np.unique(tarr[tnon], return_counts=True)):
+            if str(ch) not in STD_AA:
+                nonstd[str(ch)] = nonstd.get(str(ch), 0) + int(cnt)
+
+        q_from, q_to = start0 + 1, start0 + nq
+        t_from, t_to = tstart0 + 1, tstart0 + nt
+        for key, col in (("qend", "qend"), ("tend", "tend")):
+            val = getattr(r, col, None)
+            if val is not None and not pd.isna(val):
+                obs = int(val) if base == 1 else int(val) + 1
+                if obs != (q_to if key == "qend" else t_to):
+                    end_mismatch[key] += 1
+        tlen = getattr(r, "tlen", None)
+        if tlen is not None and not pd.isna(tlen) and t_to > int(tlen):
+            end_mismatch["tlen_exceeded"] += 1
+        per_acc.append(dict(accession=acc, q_from=q_from, q_to=q_to, t_from=t_from,
+                            t_to=t_to, aln_cols=int(qarr.size), n_q_residues=nq,
+                            n_t_residues=nt, n_mapped_positions=int(qcols.size),
+                            n_deletion_cols=n_del, n_insertion_cols=n_ins))
+
+    if mismatches:
+        stopped = len(mismatches) >= max_examples and n_scanned < len(sel)
+        raise ValueError(
+            f"[검증 1 실패] qaln 에서 갭을 뺀 문자열이 참조서열의 qstart 부분서열과 다른 행이 "
+            f"{len(mismatches)}개 있다 (base={base} 채택). 1-based/0-based 오프셋 오류이거나 "
+            f"질의 서열이 참조서열이 아니다. 뒤의 모든 숫자가 조용히 틀리므로 중단한다. "
+            f"검사한 행 {n_scanned}/{len(sel)}"
+            + (f" — 불일치 {max_examples}건에서 탐색을 멈췄으므로 나머지 "
+               f"{len(sel) - n_scanned}행은 검사하지 않았다. 실제 불일치는 더 많을 수 있다"
+               if stopped else " (전 행 검사 완료)")
+            + ":\n  " + "\n  ".join(mismatches))
+
+    lower = {c: n for c, n in nonstd.items() if c.isalpha() and c.islower()}
+    if lower:
+        raise ValueError(
+            f"[검증 6 실패] taln 에 소문자 잔기가 {sum(lower.values())}개 있다 "
+            f"({dict(sorted(lower.items())[:8])}). 행렬에 소문자가 들어가면 보존도가 "
+            f"조용히 과소계산된다. upper_aln=True 로 다시 돌릴 것.")
+    notes: list[str] = []
+    other = {c: n for c, n in nonstd.items() if not (c.isalpha() and c.islower())}
+    if other:
+        notes.append(
+            f"상동체 쪽 비표준 문자 {sum(other.values())}개 ({json.dumps(other, ensure_ascii=False)}). "
+            f"행렬에 그대로 들어가며 보존도의 분모(n_residue)에는 세지되 n_identical 에는 "
+            f"들어가지 않는다. 04 번에서 X/*/U 를 어떻게 다룰지 정할 것.")
+    for key, cnt in end_mismatch.items():
+        if cnt:
+            notes.append(f"{key} 가 매핑 결과와 어긋난 행 {cnt}개 (좌표는 qaln/taln 으로만 "
+                         f"만들므로 영향 없음. 열 순서나 판본 차이를 의심할 것).")
+
+    empty = np.array([], dtype=np.int32)
+    equiv = pd.DataFrame({
+        "accession": np.repeat(np.array(acc_list, dtype=object), counts) if acc_list
+                     else np.array([], dtype=object),
+        "q_pos": np.concatenate(q_pos_parts) if q_pos_parts else empty,
+        "q_aa": np.concatenate(q_aa_parts) if q_aa_parts else np.array([], dtype="<U1"),
+        "t_pos": np.concatenate(t_pos_parts) if t_pos_parts else empty,
+        "t_aa": np.concatenate(t_aa_parts) if t_aa_parts else np.array([], dtype="<U1"),
+    })[EQUIV_COLUMNS]
+    return dict(equiv=equiv, per_acc=pd.DataFrame(per_acc), notes=notes,
+                n_accessions=len(acc_list), insertion_cols=ins_cols, deletion_cols=del_cols,
+                end_mismatch=end_mismatch, nonstandard_target_chars=nonstd)
+
+
+def check_self_hit(equiv: pd.DataFrame, ref_seq: str, *, ref_acc: str = CHCODH2_ACC) -> dict:
+    """V3 — 자기 자신 히트는 q_pos == t_pos 가 636개 전부 성립해야 한다.
+
+    좌표계를 **독립적으로** 확인하는 유일한 그물이다. 자기 히트가 없으면 생략되고,
+    그 사실 자체가 보고되어야 한다 (V1 하나만 남으므로 base 오판에 취약해진다).
+    """
+    info = dict(check="V3", reference_acc=ref_acc, present=False, expected=len(ref_seq))
+    sub = equiv[equiv["accession"].to_numpy() == ref_acc]
+    if not len(sub):
+        info.update(passed=None, skipped=True,
+                    detail=f"자기 히트({ref_acc})가 정렬에 없다 — 생략. V1 만 남으므로 "
+                           f"base 오판을 교차 확인할 수단이 하나 줄었다.")
+        return info
+    qpos = sub["q_pos"].to_numpy()
+    tpos = sub["t_pos"].to_numpy()
+    qaa = sub["q_aa"].astype(str).to_numpy()
+    taa = sub["t_aa"].astype(str).to_numpy()
+    n_same = int((qpos == tpos).sum())
+    n_aa = int((qaa == taa).sum())
+    ok = (len(sub) == len(ref_seq) and n_same == len(ref_seq) and n_aa == len(ref_seq)
+          and "".join(taa.tolist()) == ref_seq)
+    info.update(present=True, skipped=False, n_pairs=int(len(sub)), n_q_eq_t=n_same,
+                n_same_residue=n_aa,
+                residues_equal_reference=bool("".join(taa.tolist()) == ref_seq), passed=bool(ok))
+    if not ok:
+        raise AssertionError(
+            f"[검증 3 실패] 자기 자신 히트({ref_acc})가 완전 일치가 아니다: 대응 "
+            f"{len(sub)}/{len(ref_seq)} · q_pos==t_pos {n_same}/{len(ref_seq)} · "
+            f"q_aa==t_aa {n_aa}/{len(ref_seq)}. 좌표계가 어긋났거나 자기 히트가 국소 "
+            f"정렬로 잘렸다. 자기 히트가 실제로 부분 정렬이라면 그 사실을 보고서에 적고 "
+            f"이 검증을 사람이 판단할 것.")
+    info["detail"] = (f"자기 히트 {ref_acc}: q_pos==t_pos {n_same}/{len(ref_seq)}, "
+                      f"잔기도 {n_aa}/{len(ref_seq)} 일치 — 좌표계가 참조서열과 같다")
+    return info
+
+
+def parse_equiv(align_df: pd.DataFrame, ref_seq: str, *, assume_base=None,
+                ref_acc: str = CHCODH2_ACC, upper_aln: bool = False,
+                max_examples: int = 10) -> tuple[pd.DataFrame, dict]:
+    """qstart/qaln 과 tstart/taln 으로 잔기 대응을 만든다. **이 파이프라인의 척추다.**
+
+    align_df — read_alignment_rows 의 결과 (HSP 병합 전, 행 그대로).
+    반환 (equiv, meta):
+      equiv — accession, q_pos(1~636), q_aa(참조 잔기), t_pos(상동체 번호, 갭이면 0),
+              t_aa(상동체 잔기, 갭이면 '-'). qaln 에 잔기가 있는 모든 열이 들어간다.
+      meta  — checks 에 V1~V6 의 통과 여부와 근거가 순서대로 담긴다. base 를 무엇으로
+              채택했고 색인 0 증거가 무엇인지 반드시 들어 있다.
+    검증 순서가 중요하다 — V2(전 행) → V5 → V6 → HSP 선택 → V4/V1 → 매핑(V1 재확인) → V3.
+    """
+    if "qaln" not in align_df.columns or "taln" not in align_df.columns:
+        raise KeyError(
+            f"align_df 에 qaln/taln 이 없다 (컬럼 {list(align_df.columns)}). "
+            f"read_alignment 가 아니라 **read_alignment_rows** 의 결과를 줄 것 "
+            f"(read_alignment 은 target 당 1행으로 줄이고 정렬 문자열을 버린다).")
+    checks: list[dict] = []
+    checks.append(check_aln_lengths(align_df, max_examples=max_examples))
+    checks.append(check_query_length(align_df, ref_seq, max_examples=max_examples))
+    checks.append(check_soft_masking(align_df, upper_aln=upper_aln))
+    sel, hsp = select_best_hsp(align_df)
+    base_info = detect_qstart_base(sel, ref_seq, assume_base=assume_base,
+                                   max_examples=max_examples, upper_aln=upper_aln)
+    built = _build_equiv_arrays(sel, ref_seq, base_info["base"],
+                                upper_aln=upper_aln, max_examples=max_examples)
+    equiv = built["equiv"]
+    n_bad_q = int((equiv["q_aa"].astype(str).to_numpy()
+                   != np.array(list(ref_seq), dtype="<U1")[equiv["q_pos"].to_numpy() - 1]).sum())
+    if n_bad_q:
+        raise AssertionError(
+            f"[검증 1 실패] 투영된 q_aa 가 참조서열과 다른 대응이 {n_bad_q}개 있다. "
+            f"행별 검사를 통과했는데 전체 대조에서 어긋났다면 투영 색인 계산이 틀린 것이다.")
+    checks.insert(0, dict(check="V1", passed=True, base=base_info["base"],
+                          n_rows=int(len(sel)), n_pairs=int(len(equiv)),
+                          detail=f"qaln 갭 제거 == 참조서열[qstart..] 부분서열: 선택된 "
+                                 f"{len(sel)}행 전부 통과, 투영된 대응 {len(equiv):,}개의 "
+                                 f"q_aa 도 전부 참조서열과 일치 (base={base_info['base']})"))
+    checks.append(base_info)
+    checks.append(check_self_hit(equiv, ref_seq, ref_acc=ref_acc))
+
+    n_gap = int((equiv["t_aa"].astype(str).to_numpy() == GAP_CHAR).sum())
+    meta = dict(
+        reference_len=len(ref_seq), reference_acc=ref_acc, base=base_info["base"],
+        base_basis=base_info["basis"], assume_base=assume_base, upper_aln=bool(upper_aln),
+        n_input_rows=int(len(align_df)), n_selected_rows=int(len(sel)),
+        n_accessions=int(built["n_accessions"]), n_pairs=int(len(equiv)),
+        n_gap_pairs=n_gap, n_residue_pairs=int(len(equiv)) - n_gap,
+        insertion_cols=int(built["insertion_cols"]), deletion_cols=int(built["deletion_cols"]),
+        end_mismatch=built["end_mismatch"],
+        nonstandard_target_chars=built["nonstandard_target_chars"],
+        hsp=hsp, checks=checks, notes=list(built["notes"]),
+        per_accession=built["per_acc"],
+    )
+    return equiv, meta
+
+
+def equiv_check_lines(meta: dict) -> list[str]:
+    """검증 결과를 한 줄씩. 노트북 3절이 **각 검증의 통과 여부를 명시적으로** 찍는다."""
+    order = {"V1": "qaln↔참조 부분서열 일치", "V2": "len(qaln)==len(taln)",
+             "V3": "자기 히트 q_pos==t_pos", "V4": "qstart base 판정",
+             "V5": "qlen == 참조 길이", "V6": "taln 소문자(소프트 마스킹)"}
+    lines = []
+    for c in meta.get("checks", []):
+        name = order.get(c.get("check"), c.get("check", "?"))
+        mark = {True: "통과", False: "실패", None: "생략"}.get(c.get("passed"), "?")
+        lines.append(f"  [{c.get('check')}] {mark:<4} {name} — {c.get('detail', '')}")
+    for note in meta.get("notes", []):
+        lines.append(f"  [참고] {note}")
+    return lines
+
+
+def build_residue_matrix(equiv: pd.DataFrame, universe, ref_seq: str, *,
+                         outside_char: str = OUTSIDE_CHAR,
+                         expect_n_rows: int = EXPECTED_N_SEQUENCES) -> pd.DataFrame:
+    """행=accession(universe 전부), 열=1..636, 값=그 자리에 정렬된 상동체 잔기.
+
+    **universe 는 줄지 않는다** — 정렬에 없는 서열도 행으로 남고 전부 outside_char 다
+    (규칙 3: 1,827행은 끝까지 1,827행). 갭('-')과 정렬 블록 밖은 기본값에서 같은 문자가
+    되므로, 그 둘을 구분해야 하는 계산은 attrs 의 커버리지 마스크를 쓴다
+    (position_coverage 가 그렇게 한다).
+    """
+    rows = sorted(set(str(a) for a in universe if str(a)))
+    if not rows:
+        raise ValueError("universe 가 비었다 — FASTA 를 먼저 읽을 것.")
+    L = len(ref_seq)
+    index = pd.Index(rows, name="accession")
+    acc = equiv["accession"].astype(str).to_numpy()
+    ridx = index.get_indexer(acc)
+    if len(ridx) and int((ridx < 0).sum()):
+        missing = sorted(set(acc[ridx < 0].tolist()))
+        raise ValueError(
+            f"정렬에는 있고 universe 에는 없는 accession 이 {len(missing)}개 있다 "
+            f"(예 {missing[:5]}). 행렬에 넣을 자리가 없으므로 서열이 조용히 사라진다. "
+            f"accession 정규화 규칙(parse_accession)을 양쪽에 맞춘 뒤 다시 돌릴 것.")
+    qpos = equiv["q_pos"].to_numpy()
+    if len(qpos) and (int(qpos.min()) < 1 or int(qpos.max()) > L):
+        raise ValueError(f"q_pos 가 1~{L} 범위를 벗어난다 (min {int(qpos.min())}, "
+                         f"max {int(qpos.max())}). 좌표계가 참조서열과 다르다.")
+    mat = np.full((len(rows), L), str(outside_char), dtype="<U1")
+    covered = np.zeros((len(rows), L), dtype=bool)
+    if len(ridx):
+        mat[ridx, qpos - 1] = equiv["t_aa"].to_numpy(dtype="<U1")
+        covered[ridx, qpos - 1] = True
+    in_aln = covered.any(axis=1)
+
+    out = pd.DataFrame(mat, index=index, columns=pd.RangeIndex(1, L + 1, name="q_pos"))
+    notes: list[str] = []
+    shrunk = bool(len(rows) < int(expect_n_rows))
+    if shrunk:
+        notes.append(
+            f"[검증 7] universe 축소 — 행렬 행이 {len(rows)}개로 기대 {expect_n_rows} 보다 "
+            f"적다. 어딘가에서 서열이 걸러졌다는 뜻이므로 보존도의 분모가 달라진다. "
+            f"FASTA 와 master 의 행 수를 다시 확인할 것.")
+    n_rows_no_aln = int((~in_aln).sum())
+    if n_rows_no_aln:
+        notes.append(f"정렬에 전혀 들어가지 않은 서열 {n_rows_no_aln}개 — 행은 남아 있고 "
+                     f"값은 전부 '{outside_char}' 다 (n_not_in_alignment 로 센다).")
+    out.attrs["meta"] = dict(
+        check="V7", n_rows=len(rows), n_position_columns=L, expect_n_rows=int(expect_n_rows),
+        universe_shrunk=shrunk, passed=(not shrunk),
+        n_in_alignment=int(in_aln.sum()), n_not_in_alignment=n_rows_no_aln,
+        n_covered_cells=int(covered.sum()), gap_char=GAP_CHAR, outside_char=str(outside_char),
+        n_gap_cells=int((covered & (mat == GAP_CHAR)).sum()),
+        memory_bytes=int(mat.nbytes + covered.nbytes), notes=notes,
+        detail=(f"행렬 {len(rows)} x {L}, 정렬에 들어간 서열 {int(in_aln.sum())}개, "
+                f"덮인 칸 {int(covered.sum()):,}개" + (" — 축소 감지" if shrunk else "")))
+    out.attrs["covered"] = covered
+    out.attrs["in_alignment"] = in_aln
+    out.attrs["reference_seq"] = ref_seq
+    return out
+
+
+def _matrix_masks(matrix: pd.DataFrame, ref_seq: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """행렬에서 (값, 커버리지 마스크, 정렬 포함 여부) 를 꺼낸다.
+
+    attrs 가 사라진 행렬(파일에서 다시 읽은 것 등)은 갭과 '정렬 블록 밖' 을 구분할 수
+    없다. 그 상태로 커버리지를 계산하면 분모가 조용히 틀리므로 예외다.
+    """
+    vals = matrix.to_numpy(dtype="<U1")
+    if vals.shape[1] != len(ref_seq):
+        raise ValueError(f"행렬 열이 {vals.shape[1]}개인데 참조서열은 {len(ref_seq)} aa 다.")
+    covered = matrix.attrs.get("covered")
+    in_aln = matrix.attrs.get("in_alignment")
+    if covered is None or in_aln is None:
+        meta = matrix.attrs.get("meta") or {}
+        outside = str(meta.get("outside_char", OUTSIDE_CHAR))
+        if outside == GAP_CHAR:
+            raise ValueError(
+                "행렬에 커버리지 마스크(attrs['covered'])가 없다. 갭('-')과 정렬 블록 밖이 "
+                "같은 문자이므로 n_gap_within_aln 과 n_outside_aln 을 구분할 수 없고, "
+                "그대로 계산하면 보존도의 분모가 조용히 틀린다. build_residue_matrix 가 "
+                "돌려준 행렬을 그대로 넘기거나(권장), 행렬을 다시 만들 것 "
+                "(tsv 에서 읽은 행렬은 마스크를 잃는다).")
+        covered = vals != outside
+        in_aln = covered.any(axis=1)
+    return vals, np.asarray(covered), np.asarray(in_aln)
+
+
+def position_coverage(matrix: pd.DataFrame, ref_seq: str, *, members=None) -> pd.DataFrame:
+    """636행. **보존도의 분모다.** 위치마다 몇 개가 잔기이고 갭이고 정렬 밖인지 센다.
+
+    members 를 주면 그 부분집합만 센다 (티어별 커버리지가 이것을 쓴다).
+    n_residue + n_gap_within_aln + n_outside_aln + n_not_in_alignment == 행 수 가
+    모든 위치에서 성립해야 하며, 깨지면 마스크 계산이 틀린 것이므로 예외다.
+    """
+    vals, covered, in_aln = _matrix_masks(matrix, ref_seq)
+    if members is not None:
+        keep = matrix.index.isin(list(members))
+        n_req = len({str(a) for a in members})
+        if int(keep.sum()) != n_req:
+            missing = sorted({str(a) for a in members} - set(matrix.index[keep].tolist()))
+            raise ValueError(
+                f"members 중 {len(missing)}개가 행렬에 없다 (예 {missing[:5]}). 분모가 "
+                f"조용히 작아지므로 중단한다 — 같은 universe 에서 고른 세트인지 확인할 것.")
+        vals, covered, in_aln = vals[keep], covered[keep], in_aln[keep]
+    n_rows = int(vals.shape[0])
+    n_in = int(in_aln.sum())
+    n_not_in = n_rows - n_in
+    residue = covered & (vals != GAP_CHAR)
+    n_residue = residue.sum(axis=0).astype(np.int64)
+    n_gap = (covered & (vals == GAP_CHAR)).sum(axis=0).astype(np.int64)
+    n_outside = (in_aln[:, None] & ~covered).sum(axis=0).astype(np.int64)
+    ref_arr = np.array(list(ref_seq), dtype="<U1")
+    n_ident = (residue & (vals == ref_arr[None, :])).sum(axis=0).astype(np.int64)
+
+    total = n_residue + n_gap + n_outside + n_not_in
+    if not np.all(total == n_rows):
+        bad = int(np.flatnonzero(total != n_rows)[0]) + 1
+        raise AssertionError(
+            f"position_coverage 분해 항등식 위반: 위치 {bad} 에서 {int(total[bad - 1])} != "
+            f"행 수 {n_rows}. 커버리지 마스크 계산이 틀렸다.")
+    pos = np.arange(1, len(ref_seq) + 1)
+    nan = np.full(len(ref_seq), np.nan)
+    df = pd.DataFrame({
+        "q_pos": pos, "q_aa": ref_arr,
+        "is_known_position": [int(p) in KNOWN_POSITIONS for p in pos],
+        "known_role": [KNOWN_POSITIONS.get(int(p), {}).get("role", "") for p in pos],
+        "n_universe": n_rows, "n_in_alignment": n_in, "n_not_in_alignment": n_not_in,
+        "n_residue": n_residue, "n_gap_within_aln": n_gap, "n_outside_aln": n_outside,
+        "n_identical": n_ident,
+        "residue_frac_in_alignment": np.divide(n_residue, n_in, out=nan.copy(), where=(n_in > 0)),
+        "residue_frac_universe": (n_residue / n_rows if n_rows else nan.copy()),
+        "identity_frac_of_residues": np.divide(n_ident, n_residue, out=nan.copy(),
+                                               where=(n_residue > 0)),
+    })[COVERAGE_COLUMNS]
+    if len(df) != len(ref_seq):
+        raise AssertionError(f"position_coverage 행 수가 {len(df)} — {len(ref_seq)} 이어야 한다")
+    return df
+
+
+def coverage_summary(cov: pd.DataFrame, *, worst: int = 10,
+                     low_frac: float = 0.5) -> dict:
+    """커버리지 표를 사람이 읽는 숫자로. **보존도를 믿을 수 없는 위치를 미리 안다.**"""
+    n_res = cov["n_residue"].to_numpy()
+    frac = cov["residue_frac_universe"].to_numpy()
+    low = cov.loc[frac < low_frac]
+    known = cov[cov["is_known_position"]]
+    order = cov.sort_values(["n_residue", "q_pos"], kind="mergesort").head(worst)
+    return dict(
+        n_positions=int(len(cov)), n_rows=int(cov["n_universe"].iloc[0]),
+        n_in_alignment=int(cov["n_in_alignment"].iloc[0]),
+        min_n_residue=int(n_res.min()), max_n_residue=int(n_res.max()),
+        median_n_residue=float(np.median(n_res)),
+        n_positions_zero_residue=int((n_res == 0).sum()),
+        n_positions_below_low_frac=int(len(low)), low_frac=float(low_frac),
+        low_runs_1based=[(a + 1, b + 1) for a, b in
+                         consecutive_runs([bool(f < low_frac) for f in frac])][:20],
+        worst_positions=[dict(q_pos=int(r.q_pos), q_aa=str(r.q_aa), n_residue=int(r.n_residue),
+                              residue_frac=float(r.residue_frac_universe),
+                              is_known=bool(r.is_known_position))
+                         for r in order.itertuples()],
+        known_min_n_residue=(int(known["n_residue"].min()) if len(known) else None),
+        known_median_n_residue=(float(known["n_residue"].median()) if len(known) else None),
+        known_worst=[dict(q_pos=int(r.q_pos), q_aa=str(r.q_aa), n_residue=int(r.n_residue),
+                          role=str(r.known_role))
+                     for r in known.sort_values("n_residue", kind="mergesort").head(5).itertuples()],
+    )
+
+
+def _equiv_at_positions(equiv: pd.DataFrame, positions, *, universe=None) -> pd.DataFrame:
+    """equiv 에서 주어진 위치들만 뽑아 행=accession, 열=위치 로 돌린다.
+
+    값: 상동체 잔기 / '-'(정렬 안에서의 갭) / ''(정렬 블록 밖 또는 정렬에 없음).
+    세 가지를 구분해서 돌려주는 것이 요점이다 — 보존도의 분모가 거기서 갈린다.
+    """
+    pos = [int(p) for p in sorted(set(int(p) for p in positions))]
+    if universe is None:
+        rows = sorted(set(equiv["accession"].astype(str).tolist()))
+    else:
+        rows = sorted(set(str(a) for a in universe if str(a)))
+    index = pd.Index(rows, name="accession")
+    out = np.full((len(rows), len(pos)), "", dtype="<U1")
+    qp = equiv["q_pos"].to_numpy()
+    keep = np.isin(qp, np.array(pos, dtype=qp.dtype))
+    if int(keep.sum()):
+        sub_acc = equiv["accession"].astype(str).to_numpy()[keep]
+        ridx = index.get_indexer(sub_acc)
+        if int((ridx < 0).sum()):
+            missing = sorted(set(sub_acc[ridx < 0].tolist()))
+            raise ValueError(f"universe 에 없는 accession {len(missing)}개 (예 {missing[:5]}) — "
+                             f"행렬과 같은 universe 를 줄 것.")
+        lut = np.full(int(pos[-1]) + 1, -1, dtype=np.int64)   # 위치 -> 열 색인. 636개
+        lut[np.array(pos, dtype=np.int64)] = np.arange(len(pos), dtype=np.int64)
+        cidx = lut[qp[keep].astype(np.int64)]
+        if int((cidx < 0).sum()):          # np.isin 과 lut 이 어긋나면 열이 밀린다
+            raise AssertionError("위치->열 색인이 어긋났다 (_equiv_at_positions).")
+        out[ridx, cidx] = equiv["t_aa"].to_numpy(dtype="<U1")[keep]
+    return pd.DataFrame(out, index=index, columns=pos)
+
+
+def known_position_equivalents(equiv: pd.DataFrame, positions=None, *, universe=None,
+                               ref_seq: str | None = None) -> pd.DataFrame:
+    """행=accession, 열=논문 위치. 각 상동체의 **그 자리 잔기**를 그대로 담는다.
+
+    열 이름은 'pos41_F' 처럼 참조 잔기를 달고 나온다 (번호만 보면 무슨 자리인지
+    잊어버리므로). ref_seq 를 주면 논문 잔기와 참조서열을 대조해 어긋나면 예외다.
+    값의 뜻 — 잔기: 그 상동체의 잔기 / '-': 정렬 안에서 갭 / '': 정렬 블록 밖.
+    """
+    positions = sorted(int(p) for p in (positions or sorted(KNOWN_POSITIONS)))
+    if ref_seq is not None:
+        bad = [(p, KNOWN_POSITIONS[p]["aa"], ref_seq[p - 1]) for p in positions
+               if p in KNOWN_POSITIONS and ref_seq[p - 1] != KNOWN_POSITIONS[p]["aa"]]
+        if bad:
+            raise AssertionError(f"참조 잔기와 KNOWN_POSITIONS 가 어긋난 위치: {bad}")
+    wide = _equiv_at_positions(equiv, positions, universe=universe)
+    aa = {p: (ref_seq[p - 1] if ref_seq is not None
+              else KNOWN_POSITIONS.get(p, {}).get("aa", "?")) for p in positions}
+    out = wide.rename(columns={p: f"pos{p}_{aa[p]}" for p in positions})
+    vals = wide.to_numpy(dtype="<U1")
+    out["n_residue_covered"] = ((vals != "") & (vals != GAP_CHAR)).sum(axis=1).astype(np.int32)
+    out["n_gap"] = (vals == GAP_CHAR).sum(axis=1).astype(np.int32)
+    out["n_outside"] = (vals == "").sum(axis=1).astype(np.int32)
+    return out
+
+
+def known_position_frequency(known: pd.DataFrame, ref_seq: str, *, top: int = 5) -> pd.DataFrame:
+    """논문 위치마다 **어떤 잔기가 몇 번 나오는지.** F41 이 정말 보존되는지,
+    A559 자리가 다른 CODH 에선 무엇인지 여기서 눈으로 확인된다."""
+    rows = []
+    for col in known.columns:
+        m = re.fullmatch(r"pos(\d+)_(.)", str(col))
+        if not m:
+            continue
+        p = int(m.group(1))
+        ref_aa = ref_seq[p - 1]
+        if m.group(2) != ref_aa:
+            raise AssertionError(f"열 '{col}' 의 잔기가 참조서열 {p} 번({ref_aa}) 과 다르다.")
+        ser = known[col].astype(str)
+        n_out = int((ser == "").sum())
+        n_gap = int((ser == GAP_CHAR).sum())
+        res = ser[(ser != "") & (ser != GAP_CHAR)]
+        vc = res.value_counts()
+        n_res = int(len(res))
+        top_s = "; ".join(f"{aa} {int(n)} ({n / n_res:.2f})" for aa, n in vc.head(top).items()) \
+            if n_res else "(없음)"
+        rows.append(dict(
+            q_pos=p, q_aa=ref_aa, known_role=KNOWN_POSITIONS.get(p, {}).get("role", ""),
+            n_residue=n_res, n_gap=n_gap, n_outside=n_out,
+            n_identical=int(vc.get(ref_aa, 0)),
+            identity_frac=(float(vc.get(ref_aa, 0)) / n_res if n_res else float("nan")),
+            n_distinct_residue=int(len(vc)), top_residues=top_s))
+    return pd.DataFrame(rows).sort_values("q_pos", kind="mergesort").reset_index(drop=True)
+
+
+def _normalize_residue_series(ser: pd.Series) -> pd.Series:
+    """master 의 잔기 컬럼을 한 글자 대문자로. 잔기가 아닌 값은 빈 문자열."""
+    s = ser.astype("object").fillna("").astype(str).str.strip().str.upper()
+    return s.where(s.str.fullmatch(r"[A-Z]"), "")
+
+
+def compare_master_positions(master: pd.DataFrame, equiv: pd.DataFrame,
+                             paper_positions=PAPER_POSITIONS, *, ref_seq: str,
+                             window: int = 4, ref_acc: str = CHCODH2_ACC,
+                             min_rows: int = 20, min_frac: float = 0.5,
+                             margin: float = 0.10) -> dict:
+    """master 의 r* 컬럼이 **어느 위치 번호인지 잔기 값으로 판정한다.**
+
+    컬럼 이름(r612)이 아니라, 그 컬럼의 값이 이 좌표계의 어느 위치 잔기와 가장 많이
+    일치하는지로 정한다. r612 가 논문 V610 과 +2 어긋난다고 보고됐고 질의가 pdb|1SU6|A
+    였으므로 PDB 번호가 섞였을 수 있다 — 그 가설을 **숫자로** 검정하는 것이 이 함수다.
+    좌표 자체는 고치지 않는다(참조서열 기준을 쓴다). 판정만 한다.
+
+    후보는 **참조서열 전체 1..636 을 훑는다.** 이름 ±window 만 보면 어긋남이 그 창보다
+    크면(예: PDB 번호가 10 어긋남) 창 안의 엉뚱한 위치가 1등이 되어 **확신에 찬 오답**이
+    나온다. 실제로 참조서열에는 같은 잔기가 널려 있어(600번과 610번이 모두 V) 창 안의
+    이웃이 0.38 쯤 맞는 일이 생긴다. window 는 표에 보여 줄 근접 후보를 고르는 데만 쓴다.
+
+    판정은 **결정적일 때만** 한다 — 1등 일치율이 min_frac 이상이고 2등(인접 위치 제외)과
+    margin 이상 벌어져야 한다. 아니면 '판정 불가' 로 남긴다. 애매한 것을 숫자처럼
+    적어 두는 쪽이 조용히 틀리는 길이다.
+    """
+    L = len(ref_seq)
+    position_columns = dict(master.attrs.get("position_columns") or {})
+    if not position_columns:
+        for col in master.columns:
+            hit = _POSITION_COL_RE.match(str(col).strip())
+            if hit:
+                position_columns[int(hit.group(1))] = str(col)
+    name_based = check_position_numbering(position_columns,
+                                          paper_positions=paper_positions)
+    out = dict(position_columns={int(k): str(v) for k, v in position_columns.items()},
+               paper_positions=[int(p) for p in paper_positions], window=int(window),
+               min_rows=int(min_rows), min_frac=float(min_frac), margin=float(margin),
+               scanned_positions=int(L),
+               name_based=name_based, columns={}, messages=[],
+               n_decided=0, n_shifted=0, n_undecidable=0)
+    if not position_columns:
+        out["messages"].append("master 에 r<NNN> 꼴 위치 컬럼이 없다 — 대조할 것이 없다.")
+        return out
+
+    wide = _equiv_at_positions(equiv, range(1, L + 1))     # 전 위치를 훑는다 (n x 636)
+    common = master.index.intersection(wide.index)
+    out["n_master_rows"] = int(len(master))
+    out["n_common_accession"] = int(len(common))
+    if not len(common):
+        out["messages"].append(
+            "master 와 정렬의 accession 이 하나도 겹치지 않는다 — 조인 키가 다르다. "
+            "대조를 할 수 없다.")
+        return out
+
+    ours_all = wide.loc[common].to_numpy(dtype="<U1")            # (n_common, L)
+    covered_all = (ours_all != "") & (ours_all != GAP_CHAR)
+    ref_arr = np.array(list(ref_seq), dtype="<U1")
+    ref_row = int(common.get_indexer([ref_acc])[0]) if ref_acc in common else -1
+
+    def _cand(p, named, n_cmp, n_eq, mref):
+        """후보 한 칸. p 는 1-based 참조 위치."""
+        return dict(position=int(p), ref_aa=str(ref_arr[p - 1]), delta=int(p - int(named)),
+                    n_compared=int(n_cmp), n_equal=int(n_eq),
+                    frac=(float(n_eq / n_cmp) if n_cmp else float("nan")),
+                    reference_row_equal=(None if mref is None else
+                                         bool(mref != "" and mref == str(ref_arr[p - 1]))))
+
+    pos_all = np.arange(1, L + 1)
+    for n in sorted(position_columns):
+        col = position_columns[n]
+        mval = _normalize_residue_series(master.loc[common, col])
+        n_letter = int((mval != "").sum())
+        rec = dict(column=col, named_position=int(n), n_rows=int(len(common)),
+                   n_residue_values=n_letter,
+                   n_distinct_values=int(mval[mval != ""].nunique()),
+                   value_counts={str(k): int(v) for k, v in
+                                 mval[mval != ""].value_counts().head(6).items()},
+                   candidates=[], global_top=[], verdict="", named_position_frac=None,
+                   best_position=None, decided=False)
+        if n_letter < max(1, min_rows):
+            rec["verdict"] = (f"판정 불가 — 잔기 값이 {n_letter}개뿐이다(최소 {min_rows}). "
+                              f"이 컬럼은 잔기가 아니라 플래그/숫자일 수 있다 "
+                              f"(값 분포 {rec['value_counts']}).")
+            out["n_undecidable"] += 1
+            out["columns"][col] = rec
+            out["messages"].append(f"{col}: {rec['verdict']}")
+            continue
+        mv = mval.to_numpy(dtype="<U1")
+        mref = (str(mv[ref_row]) if ref_row >= 0 else None)
+        ok = covered_all & (mv != "")[:, None]
+        n_cmp = ok.sum(axis=0).astype(np.int64)
+        n_eq = (ok & (ours_all == mv[:, None])).sum(axis=0).astype(np.int64)
+        frac = np.where(n_cmp > 0, n_eq / np.maximum(n_cmp, 1), np.nan)
+        rec["candidates"] = [_cand(p, n, n_cmp[p - 1], n_eq[p - 1], mref)
+                             for p in range(max(1, int(n) - window),
+                                            min(L, int(n) + window) + 1)]
+        rec["reference_row_matches"] = ([int(p) for p in pos_all.tolist()
+                                         if mref and mref == str(ref_arr[p - 1])]
+                                        if mref else [])
+        rec["n_reference_row_matches"] = len(rec["reference_row_matches"])
+        rec["named_in_range"] = bool(1 <= int(n) <= L)
+        if not rec["named_in_range"]:      # r700 처럼 636 을 넘는 이름. PDB 번호의 흔적일 수 있다
+            out["messages"].append(
+                f"{col}: 이름의 번호 {n} 이 참조서열 1~{L} 밖이다 — 이 번호 체계는 "
+                f"ChCODH2 서열 번호가 아니다. 값으로 어느 위치인지 아래에서 판정한다.")
+        usable = (n_cmp >= min_rows)
+        pool = usable if int(usable.sum()) else (n_cmp > 0)
+        if not int(pool.sum()):
+            rec["verdict"] = "판정 불가 — 이 좌표계에서 비교 가능한 행이 없다 (전부 갭/정렬 밖)."
+            out["n_undecidable"] += 1
+            out["columns"][col] = rec
+            out["messages"].append(f"{col}: {rec['verdict']}")
+            continue
+        order = sorted(pos_all[pool].tolist(),
+                       key=lambda p: (-frac[p - 1], abs(p - int(n)), p))
+        rec["global_top"] = [_cand(p, n, n_cmp[p - 1], n_eq[p - 1], mref) for p in order[:8]]
+        bp = int(order[0])
+        rec["best_position"] = bp
+        rec["best_frac"] = float(frac[bp - 1])
+        rec["named_position_frac"] = (float(frac[int(n) - 1])
+                                      if 1 <= int(n) <= L and int(n_cmp[int(n) - 1]) else None)
+        # 2등은 1등에서 window 보다 멀리 떨어진 위치만 센다 (바로 옆이 같은 잔기라
+        # 덩달아 높게 나오는 것을 2등으로 세면 멀쩡한 판정까지 '불가' 가 된다)
+        rival = [p for p in order[1:] if abs(p - bp) > window]
+        rec["runner_up_position"] = (int(rival[0]) if rival else None)
+        rec["runner_up_frac"] = (float(frac[rival[0] - 1]) if rival else None)
+        tag = (f"일치율 최고 {bp}({ref_arr[bp - 1]}) {rec['best_frac']:.3f} "
+               f"[{int(n_eq[bp - 1])}/{int(n_cmp[bp - 1])}] — 참조서열 {L} 위치 전부에서 골랐다")
+        named_txt = (f"이름 위치 {n} 은 참조서열 1~{L} 밖" if not rec["named_in_range"]
+                     else "이름 위치 비교 불가" if rec["named_position_frac"] is None
+                     else f"이름 위치 {n} 은 {rec['named_position_frac']:.3f}")
+        rival_txt = ("먼 2등 없음" if rec["runner_up_position"] is None else
+                     f"먼 2등 {rec['runner_up_position']} 은 {rec['runner_up_frac']:.3f}")
+        ref_txt = (f"참조행 잔기 '{mref}' 와 같은 위치 {rec['reference_row_matches'][:8]}"
+                   f"{'…' if rec['n_reference_row_matches'] > 8 else ''}"
+                   if mref else "참조행 값이 없어 단서로 쓸 수 없다")
+        weak = not np.isfinite(rec["best_frac"]) or rec["best_frac"] < float(min_frac)
+        close = (rec["runner_up_frac"] is not None
+                 and rec["best_frac"] - rec["runner_up_frac"] < float(margin))
+        if weak or close:
+            why = (f"1등 일치율이 하한 {float(min_frac):.2f} 에 못 미친다" if weak
+                   else f"먼 2등과 {float(margin):.2f} 도 벌어지지 않았다")
+            rec["verdict"] = (f"판정 불가 — {why}. {tag}, {named_txt}, {rival_txt}. "
+                              f"이 컬럼이 어느 위치인지 **값으로 정할 수 없다** — 다른 서열 "
+                              f"집합이나 다른 번호 체계에서 온 값이거나 잔기 컬럼이 아닐 수 "
+                              f"있다. 04 번은 이 컬럼을 쓰지 말고 이 좌표계의 "
+                              f"known_position_equivalents 를 쓸 것. {ref_txt}")
+            out["n_undecidable"] += 1
+            out["columns"][col] = rec
+            out["messages"].append(f"{col}: {rec['verdict']}")
+            continue
+        rec["decided"] = True
+        if bp == int(n):
+            rec["verdict"] = (f"이름 그대로 {n} 이다 — {tag}, {rival_txt}. {ref_txt}")
+            out["n_decided"] += 1
+        else:
+            rec["verdict"] = (f"**이름은 r{n} 인데 값은 {bp} 이다** ({bp - int(n):+d} 어긋남). "
+                              f"{tag}, {named_txt}, {rival_txt}. {ref_txt}")
+            out["n_shifted"] += 1
+        out["columns"][col] = rec
+        out["messages"].append(f"{col}: {rec['verdict']}")
+
+    shifted = {c: r for c, r in out["columns"].items() if r.get("decided")
+               and int(r["best_position"]) != int(r["named_position"])}
+    out["shifted_columns"] = {c: int(r["best_position"]) for c, r in shifted.items()}
+    out["needs_decision"] = bool(shifted or out["n_undecidable"])
+    if shifted:
+        out["messages"].append(
+            "→ 위 컬럼들은 **이름의 번호가 아닌 다른 위치**의 잔기다. 이 노트북의 좌표는 "
+            "참조서열(Met1=1) 기준이므로 영향받지 않지만, master 의 r* 를 그대로 쓰는 "
+            "코드는 그 어긋남만큼 틀린 자리를 본다. 04 번에서 master 의 r* 를 쓰지 말고 "
+            "이 좌표계의 known_position_equivalents 를 쓸 것.")
+    elif out["n_undecidable"]:
+        out["messages"].append(
+            f"→ 값으로 위치가 **정해진** 컬럼은 이름 그대로였지만, 판정 불가가 "
+            f"{out['n_undecidable']}개 남았다. 판정 불가는 '이름이 맞다' 가 아니다 — "
+            f"그 컬럼은 어느 자리인지 모르는 것이므로 04 번에서 쓰지 말 것.")
+    else:
+        out["messages"].append(
+            "→ master 의 r* 컬럼이 전부 이름 그대로의 위치였다. 그래도 04 번은 이 좌표계를 "
+            "쓴다 (출처가 하나여야 조용히 틀리지 않는다).")
+    return out
+
+
+def master_compare_lines(mcmp: dict, *, focus=("r612",), top: int = 8) -> list[str]:
+    """7절이 찍을 줄들 — 이름 기준 대조 → 잔기 값 기준 판정 → 문제 컬럼의 후보 표.
+
+    표를 찍는 컬럼은 ① focus 에 적힌 것 ② 이름과 다른 위치로 판정된 것 ③ 판정 불가인 것.
+    '판정 불가' 의 후보 표를 반드시 보여 준다 — 1등이 왜 결정적이지 않은지는 숫자를
+    봐야 사람이 판단할 수 있고, 그 판단 없이 r* 를 쓰면 조용히 틀린 자리를 본다.
+    """
+    cols = ["position", "ref_aa", "delta", "n_compared", "n_equal", "frac",
+            "reference_row_equal"]
+    want = {str(f).lower() for f in (focus or ())}
+    lines = ["", "■ 이름 기준 대조 (02 번과 같은 함수 — 컬럼 이름만 본다)"]
+    lines += ["  " + m for m in (mcmp.get("name_based") or {}).get("messages", [])]
+    lines += ["", "■ 잔기 값 기준 판정  ★이것이 답이다★"]
+    lines += ["  " + m for m in mcmp.get("messages", [])]
+    for col, rec in (mcmp.get("columns") or {}).items():
+        named, best = rec.get("named_position"), rec.get("best_position")
+        show = (str(col).lower() in want or not rec.get("decided")
+                or (best is not None and int(best) != int(named)))
+        if not show or not rec.get("global_top"):
+            continue
+        lines += ["", f"■ {col} — 참조서열 전 위치 상위 {min(top, len(rec['global_top']))} "
+                      f"(이름 위치 {named}, 값 분포 {rec.get('value_counts')})",
+                  pd.DataFrame(rec["global_top"][:top])[cols].round(3).to_string(index=False)]
+        if rec.get("candidates"):
+            lines += [f"  이름 ±{mcmp.get('window')} 근접 후보",
+                      pd.DataFrame(rec["candidates"])[cols].round(3).to_string(index=False)]
+        else:
+            lines.append(f"  이름 위치 {named} 가 참조서열 1~{mcmp.get('scanned_positions')} "
+                         f"밖이라 근접 후보가 없다 — 이름이 다른 번호 체계(PDB 등)다")
+    return lines
+
+
+def tier_coverage(matrix: pd.DataFrame, tiers: dict, ref_seq: str) -> pd.DataFrame:
+    """티어마다 위치별 정렬 서열 수. **T1(31개)에서 커버리지가 낮은 위치는 보존도를
+    낼 수 없다.** 04 번의 전제가 되는 표다. tiers = {라벨: accession 집합}."""
+    frames = []
+    for label, members in tiers.items():
+        mem = sorted({str(a) for a in members})
+        if not mem:
+            raise ValueError(f"티어 '{label}' 이 비었다 — 세트를 먼저 고를 것.")
+        cov = position_coverage(matrix, ref_seq, members=mem)
+        cov.insert(0, "tier", str(label))
+        cov.insert(1, "n_members", len(mem))
+        frames.append(cov)
+    out = pd.concat(frames, ignore_index=True)
+    out["residue_frac_tier"] = out["n_residue"] / out["n_members"]
+    return out
+
+
+def tier_coverage_summary(tcov: pd.DataFrame, *, low_frac: float = 0.8,
+                          worst: int = 5) -> pd.DataFrame:
+    """티어별 한 줄 요약. low_frac 미만인 위치가 '보존도를 믿을 수 없는 자리' 다."""
+    rows = []
+    for label, g in tcov.groupby("tier", sort=False):
+        low = g.loc[g["residue_frac_tier"] < low_frac]
+        known = g[g["is_known_position"]]
+        kl = known.loc[known["residue_frac_tier"] < low_frac]
+        order = known.sort_values(["n_residue", "q_pos"], kind="mergesort").head(worst)
+        rows.append(dict(
+            tier=str(label), n_members=int(g["n_members"].iloc[0]),
+            n_in_alignment=int(g["n_in_alignment"].iloc[0]),
+            min_n_residue=int(g["n_residue"].min()),
+            median_n_residue=float(g["n_residue"].median()),
+            n_pos_zero=int((g["n_residue"] == 0).sum()),
+            n_pos_below_frac=int(len(low)),
+            known_min_n_residue=(int(known["n_residue"].min()) if len(known) else None),
+            n_known_below_frac=int(len(kl)),
+            known_below_frac=";".join(f"{int(r.q_pos)}{r.q_aa}" for r in kl.itertuples()),
+            known_worst=";".join(f"{int(r.q_pos)}{r.q_aa}:{int(r.n_residue)}"
+                                 for r in order.itertuples()),
+        ))
+    return pd.DataFrame(rows)
+
+
+def write_residue_matrix(path, matrix: pd.DataFrame) -> dict:
+    """행렬을 tsv 로. DataFrame.to_csv 를 쓰지 않고 직접 쓴다 (1,827 x 637 객체열 회피)."""
+    path = Path(path)
+    vals = matrix.to_numpy(dtype="<U1")
+    with open(path, "wt", encoding="utf-8") as fh:
+        fh.write("accession\t" + "\t".join(str(c) for c in matrix.columns) + "\n")
+        for acc, row in zip(matrix.index.tolist(), vals):
+            fh.write(str(acc) + "\t" + "\t".join(row.tolist()) + "\n")
+    return dict(path=str(path), n_rows=int(vals.shape[0]),
+                n_position_columns=int(vals.shape[1]), bytes=int(path.stat().st_size))
+
+
+def write_equiv_long(path, equiv: pd.DataFrame, *, chunk: int = 200_000) -> dict:
+    """long 테이블(100만행급)을 흘려 쓴다. 04 번이 필요할 때만 켠다 —
+    보존도는 행렬만으로 계산된다."""
+    path = Path(path)
+    n = int(len(equiv))
+    with open(path, "wt", encoding="utf-8") as fh:
+        fh.write("\t".join(EQUIV_COLUMNS) + "\n")
+        for start in range(0, n, int(chunk)):
+            equiv.iloc[start:start + int(chunk)].to_csv(
+                fh, sep="\t", header=False, index=False, lineterminator="\n")
+    return dict(path=str(path), n_rows=n, columns=list(EQUIV_COLUMNS),
+                bytes=int(path.stat().st_size))
