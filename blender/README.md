@@ -27,6 +27,52 @@ xformOp:translate : 5개 prim 전부 (0,0,0) 정적 -> 진짜 이동은 없음
   줄고, 마지막 프레임에만 보이던 F6 은 샘플 1개(1.0)만 남아 **영구 표시**됐다.
   → `07_visibility_fix.py` 는 이 버전에서 쓰면 안 된다. `09` 가 그 키를 지운다.
 
+## 이동을 완전히 제거하는 방법 (10_freeze_to_visibility.py)
+
+리타이밍은 보간 시간을 0.5초 → 0.042초로 **줄인다**. 10 은 이동을
+**불가능하게** 만든다.
+
+USD 의 `visibility` 는 숫자가 아니라 token(`inherited`/`invisible`)이다.
+token 은 보간이 정의되지 않으므로 ARKit/RealityKit 이 중간값을 만들 수 없다.
+`scale` 을 정적 값으로 고정하면 보간할 트랜스폼 채널이 하나도 남지 않는다.
+
+`pip install` 이 필요 없다. usda 는 텍스트이고 usdz 는 무압축 zip 이라
+표준 라이브러리로 둘 다 처리한다 (`struct` + `zlib` 로 64바이트 정렬 zip 작성).
+
+```bash
+cd ~/Desktop/vision/frame
+python3 10_freeze_to_visibility.py o2_tunnel_retimed.usda
+# -> o2_tunnel_retimed_frozen.usda / .usdz
+```
+
+변환 결과:
+
+```usda
+def Xform "O2_Trajectory_F6"
+{
+    float3 xformOp:scale = (1, 1, 1)                  # 정적
+    double3 xformOp:translate = (16.74, -16.99, -2.7) # 정적
+    token visibility.timeSamples = {
+        1: "invisible",
+        193: "inherited",
+    }
+}
+```
+
+### 검증 (pxr 로 실제 확인)
+
+손으로 만든 usdz 가 USD 규격을 만족하는지 실제 USD 런타임으로 확인했다.
+
+| 항목 | 결과 |
+|---|---|
+| zip 구조 | `dataOffset=64` (64바이트 정렬), `method=0` (무압축) |
+| pxr 생성물과 비교 | 동일한 offset·압축방식 (3,365 vs 3,376 바이트) |
+| `Usd.Stage.Open()` | 성공, `tps=24.0`, `upAxis=Z` |
+| visibility ON 구간 | 5개 모두 의도와 일치 |
+| **트랜스폼 정적 여부** | 프레임 1·48·49·120·193·240 의 월드 행렬이 **전부 동일** |
+| 프레임당 표시 개수 | 240프레임 전체에서 정확히 1개, 위반 0개 |
+| `zipfile.testzip()` | `None` (손상 없음) |
+
 ## 처음 측정한 내용 (참고)
 
 `00_list_objects.py` 로 측정한 결과:
@@ -121,7 +167,10 @@ git pull
 | `03_export_usdz.py` | 블렌더 Scripting 탭 | `.usda` + `.usdz` 내보내기 (ARKit 옵션) |
 | `04_verify_usda.py` | 일반 터미널 | 내보낸 `.usda` 안에 문제가 남았는지 검증 |
 | `05_inject_visibility.py` | 일반 터미널 | USD `visibility` 주입 (07 의 폴백) |
-| `07_visibility_fix.py` | 블렌더 Scripting 탭 | **이 씬의 해법.** scale 대신 visibility + 내보내기 + 검증 |
+| `07_visibility_fix.py` | 블렌더 Scripting 탭 | (Blender 5.3 에서는 쓰지 말 것 — scale 키 유실) |
+| `08_inspect_usda.py` | 일반 터미널 | usda 타이밍·이동 측정 (pip 불필요) |
+| `09_retime_fix.py` | 블렌더 Scripting 탭 | 240프레임/24fps 리타이밍 + 오리진 교정 + 내보내기 |
+| `10_freeze_to_visibility.py` | 일반 터미널 | **이동을 원리적으로 불가능하게** 만든다 (pip 불필요) |
 
 `05` 는 블렌더 안에서 돌아가지 않는다. 블렌더는 USD 를 C++ 라이브러리로만 품고 있고
 파이썬 `pxr` 모듈은 노출하지 않으므로, 일반 python3 에서 실행해야 한다.
