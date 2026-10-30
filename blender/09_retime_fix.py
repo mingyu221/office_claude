@@ -321,19 +321,63 @@ if tps > 0:
     print(f"  {'✓' if ok_timing else '★'} ARKit 보간 시간 = {step:.3f}초"
           f" {'(팝으로 보임)' if ok_timing else '(아직 눈에 보임)'}")
 
+# 샘플 '개수'로 판정하면 안 된다. 익스포터는 뒤쪽 상수 구간을 중복 제거하므로
+# 첫 구간과 마지막 구간 오브젝트는 전환이 하나뿐이어서 샘플이 3개다. 정상이다.
+# 올바른 기준: (a) 값이 OFF~ON 을 걸치는가  (b) 상태 전환이 인접 1프레임인가
+#              (c) 모든 프레임에 정확히 1개만 표시되는가
+def lerp(sm, f):                      # USD 기본 보간은 선형
+    ks = sorted(sm)
+    if f <= ks[0]:
+        return sm[ks[0]]
+    if f >= ks[-1]:
+        return sm[ks[-1]]
+    for a, b in zip(ks, ks[1:]):
+        if a <= f <= b:
+            t = (f - a) / (b - a) if b > a else 0.0
+            return sm[a] + (sm[b] - sm[a]) * t
+    return sm[ks[-1]]
+
+
 print("  per-object scale 샘플:")
 ok_samples = True
+per_obj = {}
 for m in re.finditer(r'xformOp:scale\.timeSamples\s*=', text):
     body = block_at(m.end())
-    frames = [float(x) for x in re.findall(rf'({NUM})\s*:\s*\(', body)]
-    vals = [float(mm.group(1)) for mm in
-            re.finditer(rf'{NUM}\s*:\s*\(\s*({NUM})', body)]
-    lo, hi = (min(vals), max(vals)) if vals else (0, 0)
-    good = len(frames) >= 4 and lo < 0.5 < hi
+    sm = {}
+    for mm in re.finditer(rf'({NUM})\s*:\s*\(\s*({NUM})', body):
+        sm[float(mm.group(1))] = float(mm.group(2))
+    if not sm:
+        continue
+    name = owner(m.start())
+    per_obj[name] = sm
+    lo, hi = min(sm.values()), max(sm.values())
+    ks = sorted(sm)
+    slow = [(a, b) for a, b in zip(ks, ks[1:])
+            if (sm[a] > 0.5) != (sm[b] > 0.5) and b - a != 1]
+    on = [f for f in range(int(t0), int(t1) + 1) if lerp(sm, f) > 0.5]
+    good = (lo < 0.5 < hi) and not slow and bool(on)
     ok_samples &= good
-    print(f"    {'✓' if good else '★'} {owner(m.start()):<26}"
-          f" 샘플 {len(frames):>3}개  {lo:.4f}~{hi:.4f}"
-          f"  프레임 {[int(f) for f in frames[:8]]}")
+    win = f"{min(on)}-{max(on)}" if on else "없음"
+    print(f"    {'✓' if good else '★'} {name:<26}"
+          f" 샘플 {len(sm):>3}개  {lo:.4f}~{hi:.4f}  ON 구간 {win}")
+    if slow:
+        print(f"      ★ 전환이 1프레임이 아님: {slow}")
+    if not on:
+        print(f"      ★ 한 번도 표시되지 않음")
+
+# 전체 커버리지: 모든 프레임에 정확히 1개만 보여야 한다
+if per_obj:
+    bad_cov = []
+    for f in range(int(t0), int(t1) + 1):
+        vis = [n for n, sm in per_obj.items() if lerp(sm, f) > 0.5]
+        if len(vis) != 1:
+            bad_cov.append((f, vis))
+    if bad_cov:
+        ok_samples = False
+        print(f"    ★ 동시 표시/미표시 프레임 {len(bad_cov)}개:"
+              f" {[(f, len(v)) for f, v in bad_cov[:6]]}")
+    else:
+        print(f"    ✓ 모든 프레임({int(t0)}-{int(t1)})에 정확히 1개만 표시")
 
 n_vis = len(re.findall(r'\bvisibility\.timeSamples\s*=', text))
 moving = 0
