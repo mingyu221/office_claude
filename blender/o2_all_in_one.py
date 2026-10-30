@@ -257,6 +257,16 @@ def mode_diagnose():
                 suspect.append((o.name, dist, ratio))
             else:
                 log("  >>> OK. 오리진이 지오메트리 안에 있음 (제자리 수축).")
+            if dist > 1e-6:
+                log(f"  >>> 붕괴 시 시각적 중심 이동 거리 : {dist:.3f} (절대값)")
+            scene_scale = max((geo_stats(x)[1] for x in bpy.data.objects
+                               if x.type == 'MESH'), default=0.0)
+            if scene_scale > 1e-9 and radius > scene_scale * 0.10:
+                log(f"  >>> ★ 넓게 퍼진 묶음 메쉬 (반경이 씬의"
+                    f" {radius / scene_scale * 100:.1f}%).")
+                log("  >>>   분자 하나가 아니라 여러 구체가 합쳐진 덩어리입니다.")
+                log("  >>>   오리진을 고쳐도 scale 수축 시 내부가 중심으로 모입니다.")
+                log("  >>>   -> scale 방식 부적합. 07_visibility_fix.py 를 쓰세요.")
 
         if o.delta_location.length > 1e-6 or any(abs(c - 1.0) > 1e-6 for c in o.delta_scale):
             log(f"  !! delta_location   : {fmt(o.delta_location)}")
