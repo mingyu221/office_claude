@@ -16,7 +16,48 @@ Location 키프레임이 하나도 없어도 증상이 동일하다. ARKit 의 �
 부드럽게 만들어 더 눈에 띄게 할 뿐이고, 범인이 아니다. 그래서 `0.001` 트릭과
 `CONSTANT` 보간으로는 해결되지 않았다.
 
-## 실행 순서
+## 블렌더 Text Editor 복붙 워크플로 (권장)
+
+`o2_all_in_one.py` **한 개만** 붙여넣고 맨 위 `MODE` 만 바꿔가며 실행하면 된다.
+
+1. Scripting 탭 → **New** → `o2_all_in_one.py` 전체 붙여넣기
+2. 맨 위 `PATTERNS` 를 실제 산소 오브젝트 이름에 맞게 수정
+3. `MODE` 를 바꿔가며 **Alt+P** (Run Script)
+
+```
+MODE = "diagnose"   # 원인 확인 (아무것도 바꾸지 않음)
+MODE = "fix"        # 수정 (★ .blend 백업 후!)
+MODE = "export"     # usda + usdz 내보내기
+MODE = "verify"     # 내보낸 usda 검증
+```
+
+### ★ 중요: 결과를 어디서 보는가
+
+Text Editor 에서 실행한 `print()` 는 **블렌더 UI 에 안 보인다.** 그래서 이 스크립트는
+결과를 두 곳에 기록한다.
+
+- Text Editor 상단 **텍스트 블록 드롭다운 → `O2_REPORT`** 선택 ← 가장 편함
+- `.blend` 와 같은 폴더의 **`O2_REPORT.txt`**
+
+시스템 콘솔을 열고 싶다면: Windows 는 `Window ▸ Toggle System Console`,
+macOS/Linux 는 터미널에서 블렌더를 직접 실행해야 한다
+(`/Applications/Blender.app/Contents/MacOS/Blender`).
+
+### 복붙하지 않는 방법
+
+파일을 로컬에 받아두면 Text Editor 의 `Text ▸ Open` 으로 바로 열 수 있다.
+
+```bash
+git clone https://github.com/mingyu221/office_claude
+# 또는 이미 있으면
+git pull
+```
+
+## 개별 스크립트 (분리 버전)
+
+통합 스크립트와 기능이 같다. 터미널에서 돌리거나 단계별로 관리하고 싶을 때 사용.
+
+
 
 | 스크립트 | 실행 위치 | 역할 |
 |---|---|---|
@@ -25,6 +66,9 @@ Location 키프레임이 하나도 없어도 증상이 동일하다. ARKit 의 �
 | `03_export_usdz.py` | 블렌더 Scripting 탭 | `.usda` + `.usdz` 내보내기 (ARKit 옵션) |
 | `04_verify_usda.py` | 일반 터미널 | 내보낸 `.usda` 안에 문제가 남았는지 검증 |
 | `05_inject_visibility.py` | 일반 터미널 | [Plan B] USD `visibility` 로 확실하게 팝 처리 |
+
+`05` 는 블렌더 안에서 돌아가지 않는다. 블렌더는 USD 를 C++ 라이브러리로만 품고 있고
+파이썬 `pxr` 모듈은 노출하지 않으므로, 일반 python3 에서 실행해야 한다.
 
 각 스크립트 상단의 `PATTERNS` 를 실제 산소 오브젝트 이름에 맞게 수정할 것.
 
@@ -67,6 +111,18 @@ def Xform "O2_02"
     double3 xformOp:translate = (4, -1, 2)  # 정적 - 보간 불가능
 }
 ```
+
+## 오리진 이탈 판정 기준
+
+절대 거리가 아니라 **오브젝트 자기 크기 대비 비율**로 판정한다. 산소 구체 반경이
+0.07 인데 오리진이 6 떨어져 있으면 반경의 약 83배이므로 확정이고, 반경의 0.5배
+미만이면 오리진이 지오메트리 안에 있어 제자리에서 수축한다.
+
+| 비율 | 판정 |
+|---|---|
+| 반경의 2배 이상 | ★ 범인 확정 (오리진이 지오메트리 바깥) |
+| 반경의 0.5 ~ 2배 | 주의 (가장자리 근처) |
+| 반경의 0.5배 미만 | OK |
 
 ## 알려진 함정
 

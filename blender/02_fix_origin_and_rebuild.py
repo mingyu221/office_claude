@@ -248,10 +248,12 @@ for o in targets:
     for v in o.data.vertices:
         lm += v.co
     lm /= max(len(o.data.vertices), 1)
+    radius = max((v.co - lm).length for v in o.data.vertices) if o.data.vertices else 0.0
+    tol = max(1e-4, radius * 0.01)       # 반경에 비례한 허용 오차
     paths = sorted({fc.data_path for fc in iter_fcurves(o)})
-    ok = lm.length < 1e-3 and all(p == "scale" or p.startswith("hide_") for p in paths)
-    print(f"  [{o.name}] 로컬 median |{lm.length:.5f}|   애니 채널={paths}"
-          f"   {'OK' if ok else '<<< 확인 필요'}")
+    ok = lm.length <= tol and all(p == "scale" or p.startswith("hide_") for p in paths)
+    print(f"  [{o.name}] 로컬 median |{lm.length:.6f}| (허용 {tol:.6f})"
+          f"   애니 채널={paths}   {'OK' if ok else '<<< 확인 필요'}")
     if not ok:
         bad.append(o.name)
 

@@ -33,6 +33,24 @@ def local_median(obj):
     return acc / len(obj.data.vertices)
 
 
+def geo_stats(obj):
+    """(로컬 median, median 기준 반경).
+
+    오리진 이탈은 '절대 거리'가 아니라 '오브젝트 자기 크기 대비'로 판정해야 한다.
+    산소 구체 반경이 0.07 인데 오리진이 6 떨어져 있으면 반경의 88배 -> 확정.
+    반경의 0.5배 미만이면 오리진이 지오메트리 안에 있으므로 제자리에서 수축한다.
+    """
+    med = local_median(obj)
+    if med is None:
+        return None, 0.0
+    radius = 0.0
+    for v in obj.data.vertices:
+        d = (v.co - med).length
+        if d > radius:
+            radius = d
+    return med, radius
+
+
 def is_identity(m, eps=1e-6):
     return all(abs(m[i][j] - (1.0 if i == j else 0.0)) < eps
                for i in range(4) for j in range(4))
@@ -61,7 +79,7 @@ for o in targets:
     print("-" * 86)
     print(f"[{o.name}]  type={o.type}  mesh_users={o.data.users if o.data else '-'}")
 
-    lm = local_median(o)
+    lm, radius = geo_stats(o)
     origin_w = o.matrix_world.translation.copy()
 
     print(f"  location (local)     : {fmt(o.location)}")
@@ -71,13 +89,18 @@ for o in targets:
 
     if lm is not None:
         off = lm.length
+        ratio = off / radius if radius > 1e-9 else 0.0
         print(f"  버텍스 median(로컬)  : {fmt(lm)}   |거리| = {off:.4f}")
-        if off > 1e-3:
-            print(f"  >>> ★ 범인 확정: 오리진이 지오메트리에서 {off:.3f} 만큼 떨어져 있음.")
+        print(f"  오브젝트 자체 반경   : {radius:.4f}  (거리는 반경의 {ratio:.2f}배)")
+        if ratio >= 2.0:
+            print(f"  >>> ★ 범인 확정: 오리진이 지오메트리 바깥에 있음"
+                  f" (거리 {off:.3f} > 반경 {radius:.3f}).")
             print(f"  >>>   scale 0.001 을 주면 지오메트리가 오리진(월드 {fmt(origin_w, 2)})으로 수축함.")
-            verdict.append((o.name, off))
+            verdict.append((o.name, off, ratio))
+        elif ratio >= 0.5:
+            print(f"  >>> 주의: 오리진이 지오메트리 가장자리 근처 (반경의 {ratio:.2f}배)")
         else:
-            print(f"  >>> OK: 오리진이 지오메트리 중심에 붙어 있음 (제자리 수축)")
+            print(f"  >>> OK: 오리진이 지오메트리 안에 있음 (제자리 수축)")
 
     # 델타 트랜스폼
     dl, ds = o.delta_location, o.delta_scale
@@ -124,8 +147,8 @@ for o in targets:
 print("=" * 86)
 if verdict:
     print("■ 진단 결과: 오리진 문제입니다. 아래 오브젝트들의 오리진이 지오메트리와 분리돼 있습니다.")
-    for n, d in verdict:
-        print(f"    - {n}: 거리 {d:.3f}")
+    for n, d, r in verdict:
+        print(f"    - {n}: 거리 {d:.3f} (자기 반경의 {r:.1f}배)")
     print("  -> 02_fix_origin_and_rebuild.py 를 실행하세요.")
 else:
     print("■ 오리진은 정상입니다. 위에 '★' 로 표시된 다른 항목(위치 커브 / 부모 역행렬 /")
