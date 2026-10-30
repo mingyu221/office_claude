@@ -20,8 +20,9 @@ Location 키프레임이 하나도 없어도 증상이 동일하다. ARKit 의 �
 
 `o2_all_in_one.py` **한 개만** 붙여넣고 맨 위 `MODE` 만 바꿔가며 실행하면 된다.
 
+0. 먼저 `00_list_objects.py` 를 붙여넣고 실행 → 산소 이름과 `PATTERNS` 값을 알려준다
 1. Scripting 탭 → **New** → `o2_all_in_one.py` 전체 붙여넣기
-2. 맨 위 `PATTERNS` 를 실제 산소 오브젝트 이름에 맞게 수정
+2. 맨 위 `PATTERNS` 를 0번이 알려준 값으로 수정
 3. `MODE` 를 바꿔가며 **Alt+P** (Run Script)
 
 ```
@@ -61,6 +62,7 @@ git pull
 
 | 스크립트 | 실행 위치 | 역할 |
 |---|---|---|
+| `00_list_objects.py` | 블렌더 Scripting 탭 | 읽기 전용. 오브젝트 이름 파악 + `PATTERNS` 자동 추출 |
 | `01_diagnose.py` | 블렌더 Scripting 탭 | 읽기 전용. 오리진↔지오메트리 거리로 원인 확정 |
 | `02_fix_origin_and_rebuild.py` | 블렌더 Scripting 탭 | 오리진 교정 + 키프레임 재생성 (**백업 필수**) |
 | `03_export_usdz.py` | 블렌더 Scripting 탭 | `.usda` + `.usdz` 내보내기 (ARKit 옵션) |
