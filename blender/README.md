@@ -1,5 +1,50 @@
 # O2 터널 애니메이션 - "원점에서 날아오는" 이슈 해결
 
+## 최종 결과 (해결 완료, 측정 확인)
+
+실행할 것은 두 개다. `13_full_fix.py` (블렌더) -> `10_freeze_to_visibility.py` (터미널).
+
+```bash
+# 1) 준비
+cd ~/Desktop/vision/frame
+python3 -m pip install usd-core        # pip3 가 아니라 python3 -m pip
+curl -fsSL -O .../blender/13_full_fix.py
+curl -fsSL -o freeze.py .../blender/10_freeze_to_visibility.py
+
+# 2) 블렌더: Text > Open 으로 13_full_fix.py 열고 Alt+P, 끝나면 File > Save
+
+# 3) 터미널
+python3 freeze.py o2_tunnel_final.usda
+# -> o2_tunnel_final_frozen.usdz  (기기로 전송)
+```
+
+측정된 최종 지표:
+
+| 항목 | 이전 | 최종 |
+|---|---|---|
+| 타임코드 1칸 (ARKit 보간 시간) | 0.500초 | **0.042초** |
+| 전체 길이 | 2.50초 | **9.96초** |
+| scale 타임샘플 | 있음 | **0개** (visibility 로 치환) |
+| translate 타임샘플 | 5개 | **0개** |
+| AR 회전축 (BBoxCache 측정) | (-0.291, -120.434, -3.003) | **(0.0, 0.0, 0.0)** |
+| usdz 크기 | 76.7 MB | **21.8 MB** |
+| 카메라/라이트 prim | 포함됨 | **없음** |
+
+트랜스폼이 전부 정적이고 `visibility` token 만 애니메이션되므로 ARKit 이 보간할
+채널이 하나도 없다. 이동이 줄어든 게 아니라 불가능하다.
+
+### 주의: .blend 를 반드시 저장할 것
+
+13 을 돌린 뒤 `File > Save` 를 하지 않고 블렌더를 다시 열면 작업이 전부 사라진다.
+실제로 09 와 11 을 따로 돌리던 중 그렇게 돼서, centered 파일이 6프레임 2fps 로
+나왔다. 13 이 09+11 을 합친 이유다.
+
+### 텍스처
+
+카메라/라이트를 제외하면서 `./textures/color_0C0C0C.exr` 참조가 사라졌다
+(라이트용 단색 텍스처였다). 머티리얼은 Principled BSDF 색상만 남는다.
+
+
 ## 최종 확정된 원인 (usda 측정)
 
 ```
