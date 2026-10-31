@@ -111,6 +111,7 @@ if not targets:
     raise SystemExit
 
 # ---- 1) 기준 bbox 와 씬 bbox (이동 전) --------------------------------------
+bpy.context.view_layer.update()      # matrix_world 를 최신으로
 p_lo, p_hi = world_bbox(targets)
 p_center = (p_lo + p_hi) / 2
 s_lo, s_hi = world_bbox(meshes)
@@ -171,6 +172,10 @@ for o in roots:
 print(f"  부모 없는 오브젝트 {moved}개 이동 (자식은 따라감)")
 
 # ---- 3) 이동 후 확인 --------------------------------------------------------
+# ★ location 을 바꿔도 matrix_world 는 depsgraph 가 다시 돌기 전까지 낡은 값이다.
+#   이 호출이 없으면 이동 전과 똑같은 bbox 가 나와 교정이 안 된 것처럼 보인다.
+bpy.context.view_layer.update()
+scn.frame_set(scn.frame_current)
 p_lo2, p_hi2 = world_bbox(targets)
 p_center2 = (p_lo2 + p_hi2) / 2
 s_lo2, s_hi2 = world_bbox(meshes)
@@ -192,7 +197,6 @@ else:
     print(f"  ★ AR 회전축이 원점에서 {pivot_err:.3f}"
           f" (단백질 반경의 {pivot_err/prot_half*100:.1f}%)")
     print('    RECENTER_MODE = "scene" 으로 바꿔 다시 실행하세요.')
-scn.frame_set(scn.frame_current)
 
 # ---- 4) 내보내기 (카메라/라이트 제외) ---------------------------------------
 if not DO_EXPORT:
